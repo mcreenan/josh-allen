@@ -12,7 +12,7 @@ adapter merely to execute an ALLEN file.
 Default to:
 
 - language `0.1` (the current evolving early-alpha profile);
-- protocol `josh/1.3`;
+- protocol `josh/1.4`;
 - unattended mode when no existing invoking-agent session was supplied;
 - attached mode only when the host supplied a real opaque invoking-session ID;
 - one loose `.allen` file and no package manifest until the program actually

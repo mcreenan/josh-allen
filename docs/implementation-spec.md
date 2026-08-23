@@ -28,7 +28,7 @@ The workspace uses these crates:
 | `allen-http-get` | Restricted HTTPS GET and destination policy |
 | `allen-testkit` | Deterministic recording, replay, redaction, and provider test support |
 | `allen-cli` | `check`, `build`, `inspect`, `run`, and package commands |
-| `josh-protocol` | The current `josh/1.3` message, payload, framing, and connection-state contract |
+| `josh-protocol` | The current `josh/1.4` message, payload, framing, and connection-state contract |
 | `josh-host` | JOSH session lifecycle, provider adapters, stdio connection, and execution supervision |
 | `josh` | The `serve` and `run` executable entry points |
 
@@ -292,15 +292,15 @@ and otherwise denied address classes are rejected according to policy.
 ## 10. Current JOSH protocol
 
 JOSH uses the fixed envelope marker `josh/1` and negotiates the sole current
-protocol version `josh/1.3`. Transport is an ASCII
+protocol version `josh/1.4`. Transport is an ASCII
 decimal byte length, `:`, exactly that many UTF-8 JSON bytes, and `,`. Frames are
 bounded before allocation. JSON objects reject duplicate and unknown fields;
 request IDs and methods are validated before entering connection state.
 
-The host sends `initialize` once with `protocol_versions: ["josh/1.3"]`, one
+The host sends `initialize` once with `protocol_versions: ["josh/1.4"]`, one
 execution mode, an invoking-session identity or `null`, limits, and standard
 capabilities.
-The runtime selects `josh/1.3` or rejects initialization. The result contains
+The runtime selects `josh/1.4` or rejects initialization. The result contains
 the runtime identity, effective limits, and the current feature set. There is no
 minor-version fallback.
 
@@ -309,6 +309,13 @@ current artifact, start and cancel executions, answer provider requests, and
 receive ordered execution events and one terminal response. Direction-scoped
 request IDs, active-request bounds, cancellation tombstones, and strict method
 state prevent duplicate, late, or cross-direction responses from resuming work.
+
+`catalog/set` carries source, source revision, observation time, freshness, and
+an explicit completeness claim alongside the sorted typed definitions. The
+runtime refuses an incomplete catalog before program loading. A successful
+result returns the frozen catalog digest, schema profile, tool count, the same
+metadata, and sorted name, version, and description summaries. Descriptions are
+display metadata and do not change the typed contract digest.
 
 The protocol routes invoking-agent messages, typed agent questions, transcript
 snapshots, model and user prompts, sub-agent creation/run/message/ask, permission

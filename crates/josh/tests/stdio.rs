@@ -175,6 +175,7 @@ fn executable_serves_the_exact_stdio_handshake() {
     };
     let catalog = CatalogSetParams {
         schema_dialect: josh_protocol::SCHEMA_DIALECT.to_owned(),
+        metadata: josh_protocol::CatalogMetadata::complete("test-host", "1", 1),
         tools: Vec::new(),
     };
     let mut child = Command::new(env!("CARGO_BIN_EXE_josh"))
@@ -234,9 +235,11 @@ fn independent_stdio_host_matches_the_golden_tool_transcript() {
     };
     let catalog = CatalogSetParams {
         schema_dialect: josh_protocol::SCHEMA_DIALECT.to_owned(),
+        metadata: josh_protocol::CatalogMetadata::complete("test-host", "1", 1),
         tools: vec![CatalogTool {
             name: "example.lookup".to_owned(),
             version: "1.2.3".to_owned(),
+            description: "Look up one example value.".to_owned(),
             input_schema: schema_json.clone(),
             output_schema: schema_json.clone(),
             error_schema: schema_json,
@@ -370,9 +373,11 @@ fn active_partial_frame_eof_cleans_up_and_reports_only_a_safe_error() {
     };
     let catalog = CatalogSetParams {
         schema_dialect: josh_protocol::SCHEMA_DIALECT.to_owned(),
+        metadata: josh_protocol::CatalogMetadata::complete("test-host", "1", 1),
         tools: vec![CatalogTool {
             name: "example.lookup".to_owned(),
             version: "1.2.3".to_owned(),
+            description: "Look up one example value.".to_owned(),
             input_schema: schema_json.clone(),
             output_schema: schema_json.clone(),
             error_schema: schema_json,

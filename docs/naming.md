@@ -38,7 +38,7 @@ Public JOSH names are:
 - `josh/1`, the protocol family
 - `josh-*`, host and protocol Rust crates
 
-Peers currently negotiate `josh/1.3`. They reject other protocol identifiers.
+Peers currently negotiate `josh/1.4`. They reject other protocol identifiers.
 The `/1` suffix is not part of the executable name.
 
 ## Dependency rule

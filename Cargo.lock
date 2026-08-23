@@ -10,14 +10,14 @@ checksum = "320119579fcad9c21884f5c4861d16174d0e06250625266f50fe6898340abefa"
 
 [[package]]
 name = "allen-bytecode"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "semver",
 ]
 
 [[package]]
 name = "allen-cli"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "allen-bytecode",
  "allen-compiler",
@@ -34,7 +34,7 @@ dependencies = [
 
 [[package]]
 name = "allen-compiler"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "allen-bytecode",
  "allen-package",
@@ -45,7 +45,7 @@ dependencies = [
 
 [[package]]
 name = "allen-http-get"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "flate2",
  "httparse",
@@ -56,7 +56,7 @@ dependencies = [
 
 [[package]]
 name = "allen-package"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "allen-schema",
  "cap-fs-ext",
@@ -70,7 +70,7 @@ dependencies = [
 
 [[package]]
 name = "allen-runtime"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "allen-bytecode",
  "allen-http-get",
@@ -85,7 +85,7 @@ dependencies = [
 
 [[package]]
 name = "allen-sandbox-fs"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "cap-fs-ext",
  "cap-std",
@@ -94,7 +94,7 @@ dependencies = [
 
 [[package]]
 name = "allen-schema"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "serde",
  "serde_json",
@@ -103,7 +103,7 @@ dependencies = [
 
 [[package]]
 name = "allen-syntax"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "rowan",
  "ungrammar",
@@ -111,7 +111,7 @@ dependencies = [
 
 [[package]]
 name = "allen-testkit"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "allen-bytecode",
  "allen-vm",
@@ -122,7 +122,7 @@ dependencies = [
 
 [[package]]
 name = "allen-vm"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "allen-bytecode",
 ]
@@ -506,7 +506,7 @@ checksum = "8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682"
 
 [[package]]
 name = "josh"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "allen-bytecode",
  "allen-compiler",
@@ -521,7 +521,7 @@ dependencies = [
 
 [[package]]
 name = "josh-host"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "allen-bytecode",
  "allen-compiler",
@@ -539,7 +539,7 @@ dependencies = [
 
 [[package]]
 name = "josh-protocol"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "base64",
  "semver",

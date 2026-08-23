@@ -2,13 +2,13 @@ use std::collections::BTreeMap;
 
 use josh_protocol::{
     AgentAskParams, AgentMessageParams, AgentMessageResult, AgentTranscriptParams,
-    AgentTranscriptResult, EventKind, EventSequenceTracker, ExecutionEventParams, FEATURES,
-    FileEncoding, GrantDuration, InitializeParams, InitializeResult, ModelRequestParams,
-    PROTOCOL_VERSION, PeerInfo, PermissionRequestParams, PermissionRequestResult,
-    PermissionRevokeParams, PermissionRight, PermissionTargetKind, ProgramLoadParams,
-    ProtocolError, ProtocolLimits, SourceFile, SubAgentAskParams, SubAgentCreateParams,
-    SubAgentCreateResult, SubAgentMessageParams, SubAgentRunParams, ToolInvokeResult,
-    TranscriptPart, Validate, request_params,
+    AgentTranscriptResult, CatalogSetParams, CatalogSetResult, EventKind, EventSequenceTracker,
+    ExecutionEventParams, FEATURES, FileEncoding, GrantDuration, InitializeParams,
+    InitializeResult, ModelRequestParams, PROTOCOL_VERSION, PeerInfo, PermissionRequestParams,
+    PermissionRequestResult, PermissionRevokeParams, PermissionRight, PermissionTargetKind,
+    ProgramLoadParams, ProtocolError, ProtocolLimits, SourceFile, SubAgentAskParams,
+    SubAgentCreateParams, SubAgentCreateResult, SubAgentMessageParams, SubAgentRunParams,
+    ToolInvokeResult, TranscriptPart, Validate, request_params,
 };
 use serde_json::json;
 
@@ -76,6 +76,53 @@ fn validates_initialize_exactly() {
         "host":{"name":"h","version":"1.0.0"}, "extra": true
     }));
     assert!(unknown.is_err());
+}
+
+#[test]
+fn catalog_payloads_preserve_provenance_and_projection() {
+    let params: CatalogSetParams = serde_json::from_value(json!({
+        "schema_dialect": "https://json-schema.org/draft/2020-12/schema",
+        "metadata": {
+            "source": "test-host",
+            "source_revision": "revision-7",
+            "observed_at_unix_ms": 1,
+            "freshness": "current",
+            "complete": true
+        },
+        "tools": [{
+            "name": "example.lookup",
+            "version": "1.2.3",
+            "description": "Look up one example value.",
+            "input_schema": {"type":"string"},
+            "output_schema": {"type":"string"},
+            "error_schema": {"type":"string"},
+            "effects": [],
+            "idempotency": "idempotent"
+        }]
+    }))
+    .unwrap();
+    params.validate().unwrap();
+
+    let result: CatalogSetResult = serde_json::from_value(json!({
+        "catalog_digest": format!("sha256:{}", "a".repeat(64)),
+        "schema_profile": "allen.tool-schema/0.1",
+        "tool_count": 1,
+        "metadata": params.metadata,
+        "tools": [{
+            "name": "example.lookup",
+            "version": "1.2.3",
+            "description": "Look up one example value."
+        }]
+    }))
+    .unwrap();
+    result.validate().unwrap();
+
+    let mut wrong_count = result.clone();
+    wrong_count.tool_count = 2;
+    assert!(wrong_count.validate().is_err());
+    let mut incomplete = result;
+    incomplete.metadata.complete = false;
+    assert!(incomplete.validate().is_err());
 }
 
 #[test]

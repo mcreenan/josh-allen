@@ -42,6 +42,7 @@ pub fn initialized_session() -> Session {
     session
         .set_catalog(&CatalogSetParams {
             schema_dialect: josh_protocol::SCHEMA_DIALECT.to_owned(),
+            metadata: josh_protocol::CatalogMetadata::complete("test-host", "1", 1),
             tools: Vec::new(),
         })
         .unwrap();

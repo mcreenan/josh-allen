@@ -23,9 +23,9 @@ use allen_schema::{
 use allen_vm::{CancellationSource, Checkpoint, CheckpointObserver, ExecutionOutcome};
 use base64::Engine as _;
 use josh_protocol::{
-    CatalogSetParams, CatalogSetResult, EntryContract, ExecutionResult, ExecutionStartParams,
-    InitializeParams, InitializeResult, PeerInfo, ProgramLoadParams, ProgramLoadResult,
-    ProtocolLimits, Validate, WireError, WireErrorCode,
+    CatalogSetParams, CatalogSetResult, CatalogToolSummary, EntryContract, ExecutionResult,
+    ExecutionStartParams, InitializeParams, InitializeResult, PeerInfo, ProgramLoadParams,
+    ProgramLoadResult, ProtocolLimits, Validate, WireError, WireErrorCode,
 };
 
 const RUNTIME_NAME: &str = "allen-reference";
@@ -287,6 +287,12 @@ impl Session {
                 "tool catalog is invalid",
             ));
         }
+        if !params.metadata.complete {
+            return Err(HostError::new(
+                WireErrorCode::CatalogInvalid,
+                "tool catalog is incomplete",
+            ));
+        }
         let schema_limits = SchemaLimits::default();
         let tools = params
             .tools
@@ -329,6 +335,17 @@ impl Session {
             catalog_digest: catalog.digest().to_owned(),
             schema_profile: catalog.schema_profile().to_owned(),
             tool_count: u64::try_from(catalog.tools().len()).unwrap_or(u64::MAX),
+            metadata: params.metadata.clone(),
+            tools: catalog
+                .tools()
+                .iter()
+                .zip(&params.tools)
+                .map(|(tool, supplied)| CatalogToolSummary {
+                    name: tool.name.as_str().to_owned(),
+                    version: tool.version.to_string(),
+                    description: supplied.description.clone(),
+                })
+                .collect(),
         };
         self.catalog = Some(Arc::new(catalog));
         Ok(result)
@@ -849,6 +866,7 @@ mod tests {
     fn empty_catalog() -> CatalogSetParams {
         CatalogSetParams {
             schema_dialect: josh_protocol::SCHEMA_DIALECT.to_owned(),
+            metadata: josh_protocol::CatalogMetadata::complete("test-host", "1", 1),
             tools: Vec::new(),
         }
     }
@@ -944,10 +962,25 @@ mod tests {
         );
         let catalog = session.set_catalog(&empty_catalog()).unwrap();
         assert_eq!(catalog.tool_count, 0);
+        assert_eq!(catalog.metadata.source, "test-host");
+        assert!(catalog.metadata.complete);
+        assert!(catalog.tools.is_empty());
         assert_eq!(
             session.set_catalog(&empty_catalog()).unwrap_err().code,
             WireErrorCode::CatalogInvalid
         );
+    }
+
+    #[test]
+    fn incomplete_catalog_is_rejected_without_freezing_partial_state() {
+        let mut session = Session::new();
+        session.initialize(&initialize_params()).unwrap();
+        let mut incomplete = empty_catalog();
+        incomplete.metadata.complete = false;
+        let error = session.set_catalog(&incomplete).unwrap_err();
+        assert_eq!(error.code, WireErrorCode::CatalogInvalid);
+        assert_eq!(error.message, "tool catalog is incomplete");
+        assert_eq!(session.set_catalog(&empty_catalog()).unwrap().tool_count, 0);
     }
 
     #[test]

@@ -104,14 +104,17 @@ and child-agent prompts.
 
 ## Tool catalog example
 
-`examples/josh-allen/tool-echo.allen` takes a `ToolCatalog` supplied by the
-invoking agent. The program does not discover tools.
+`examples/josh-allen/tool-echo.allen` takes the runtime-confirmed projection of
+the frozen tool catalog. Start it through MCP with `catalog_input: true` and no
+explicit `input`. For unattended execution, use `josh run --catalog
+<catalog.json> --catalog-input`.
 
-In Codex, read every enabled nested tool's exact `name` and `description` from
-`ALL_TOOLS` inside `functions.exec`. Add `functions.exec` and directly exposed
-tools that are absent from `ALL_TOOLS`. Deduplicate exact names, sort by name,
-and pass the complete list to the program. Print every returned pair.
+The catalog producer owns enumeration. It supplies sorted typed definitions
+and provenance metadata. JOSH rejects catalogs marked incomplete, freezes the
+definitions, and returns the metadata, digest, count, and tool summaries used
+as the program input.
 
-On another host, use its supported tool metadata only when that metadata can
-be enumerated. If the host has no complete export, state that limit. Do not ask
-the user to invent a catalog or claim that a partial list is complete.
+The packaged MCP bridge proves only its one-tool integration catalog. It
+cannot enumerate the current Codex built-ins, apps, collaboration tools, or
+tools from other MCP servers. Do not reconstruct those lists from memory or
+mark a catalog complete without a host contract that guarantees it.

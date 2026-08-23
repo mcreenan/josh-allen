@@ -97,11 +97,53 @@ pub enum Idempotency {
     NonIdempotent,
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CatalogFreshness {
+    Current,
+    Cached,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct CatalogMetadata {
+    pub source: String,
+    pub source_revision: String,
+    pub observed_at_unix_ms: u64,
+    pub freshness: CatalogFreshness,
+    pub complete: bool,
+}
+
+impl Validate for CatalogMetadata {
+    fn validate(&self) -> Result<(), ProtocolError> {
+        validate_opaque(&self.source, "catalog source")?;
+        validate_opaque(&self.source_revision, "catalog source revision")?;
+        if self.observed_at_unix_ms == 0 {
+            return Err(invalid("catalog observation time is zero"));
+        }
+        Ok(())
+    }
+}
+
+impl CatalogMetadata {
+    #[must_use]
+    pub fn complete(source: &str, source_revision: &str, observed_at_unix_ms: u64) -> Self {
+        Self {
+            source: source.to_owned(),
+            source_revision: source_revision.to_owned(),
+            observed_at_unix_ms,
+            freshness: CatalogFreshness::Current,
+            complete: true,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct CatalogTool {
     pub name: String,
     pub version: String,
+    pub description: String,
     pub input_schema: Value,
     pub output_schema: Value,
     pub error_schema: Value,
@@ -113,6 +155,7 @@ impl Validate for CatalogTool {
     fn validate(&self) -> Result<(), ProtocolError> {
         validate_tool_name(&self.name)?;
         validate_semver(&self.version)?;
+        validate_description(&self.description)?;
         if self.effects.len() > 32 {
             return Err(invalid("tool has more than 32 effects"));
         }
@@ -128,6 +171,7 @@ impl Validate for CatalogTool {
 #[serde(deny_unknown_fields)]
 pub struct CatalogSetParams {
     pub schema_dialect: String,
+    pub metadata: CatalogMetadata,
     pub tools: Vec<CatalogTool>,
 }
 
@@ -136,6 +180,7 @@ impl Validate for CatalogSetParams {
         if self.schema_dialect != SCHEMA_DIALECT {
             return Err(invalid("catalog schema dialect is invalid"));
         }
+        self.metadata.validate()?;
         let names: Vec<_> = self.tools.iter().map(|tool| tool.name.clone()).collect();
         validate_sorted_unique(&names, "catalog tools")?;
         for tool in &self.tools {
@@ -147,10 +192,28 @@ impl Validate for CatalogSetParams {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
+pub struct CatalogToolSummary {
+    pub name: String,
+    pub version: String,
+    pub description: String,
+}
+
+impl Validate for CatalogToolSummary {
+    fn validate(&self) -> Result<(), ProtocolError> {
+        validate_tool_name(&self.name)?;
+        validate_semver(&self.version)?;
+        validate_description(&self.description)
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct CatalogSetResult {
     pub catalog_digest: String,
     pub schema_profile: String,
     pub tool_count: u64,
+    pub metadata: CatalogMetadata,
+    pub tools: Vec<CatalogToolSummary>,
 }
 
 impl Validate for CatalogSetResult {
@@ -158,6 +221,18 @@ impl Validate for CatalogSetResult {
         validate_digest(&self.catalog_digest)?;
         if self.schema_profile != SCHEMA_PROFILE {
             return Err(invalid("catalog result schema profile is invalid"));
+        }
+        self.metadata.validate()?;
+        if !self.metadata.complete {
+            return Err(invalid("successful catalog result is incomplete"));
+        }
+        if usize::try_from(self.tool_count).ok() != Some(self.tools.len()) {
+            return Err(invalid("catalog result tool count does not match tools"));
+        }
+        let names: Vec<_> = self.tools.iter().map(|tool| tool.name.clone()).collect();
+        validate_sorted_unique(&names, "catalog result tools")?;
+        for tool in &self.tools {
+            tool.validate()?;
         }
         Ok(())
     }
@@ -1771,6 +1846,13 @@ fn validate_effect(effect: &str) -> Result<(), ProtocolError> {
         })
     {
         return Err(invalid("tool effect ID is not canonical"));
+    }
+    Ok(())
+}
+
+fn validate_description(description: &str) -> Result<(), ProtocolError> {
+    if description.len() > 4_096 || description.contains('\0') {
+        return Err(invalid("tool description is invalid"));
     }
     Ok(())
 }

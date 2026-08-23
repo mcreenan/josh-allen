@@ -3,14 +3,15 @@ use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, ExitCode, Stdio};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use base64::Engine as _;
 use josh_protocol::{
-    CatalogSetParams, CatalogSetResult, DEFAULT_MAX_FRAME_BYTES, ExecutionMode, ExecutionResult,
-    ExecutionStartParams, FrameReader, InitializeParams, InitializeResult, InvokingSessionId,
-    PeerInfo, ProgramLoadParams, ProgramLoadResult, ProtocolLimits, RuntimeReadyParams,
-    SCHEMA_DIALECT, SerializedWriter, SourceFile, Validate, WireError, WireErrorCode, WireMessage,
-    notification_params, response_result,
+    CatalogMetadata, CatalogSetParams, CatalogSetResult, DEFAULT_MAX_FRAME_BYTES, ExecutionMode,
+    ExecutionResult, ExecutionStartParams, FrameReader, InitializeParams, InitializeResult,
+    InvokingSessionId, PeerInfo, ProgramLoadParams, ProgramLoadResult, ProtocolLimits,
+    RuntimeReadyParams, SCHEMA_DIALECT, SerializedWriter, SourceFile, Validate, WireError,
+    WireErrorCode, WireMessage, notification_params, response_result,
 };
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -55,7 +56,8 @@ pub(crate) fn run(arguments: &[String]) -> ExitCode {
 
 fn execute(options: &RunOptions) -> Result<ExecutionResult, String> {
     let load = load_params(Path::new(&options.path))?;
-    let input = read_input(options.input.as_deref())?;
+    let explicit_input = read_input(options.input.as_deref())?;
+    let catalog = read_catalog(options.catalog.as_deref())?;
     let workdir = options
         .workdir
         .as_deref()
@@ -82,12 +84,14 @@ fn execute(options: &RunOptions) -> Result<ExecutionResult, String> {
             extensions: Vec::new(),
         };
         let _: InitializeResult = client.request("h-1", "initialize", &initialize)?;
-        let catalog = CatalogSetParams {
-            schema_dialect: SCHEMA_DIALECT.to_owned(),
-            tools: Vec::new(),
-        };
-        let _: CatalogSetResult = client.request("h-2", "catalog/set", &catalog)?;
+        let catalog_result: CatalogSetResult = client.request("h-2", "catalog/set", &catalog)?;
         let loaded: ProgramLoadResult = client.request("h-3", "program/load", &load)?;
+        let input = if options.catalog_input {
+            serde_json::to_value(&catalog_result)
+                .map_err(|error| format!("cannot encode frozen catalog input: {error}"))?
+        } else {
+            explicit_input
+        };
         let start = ExecutionStartParams {
             execution_id: "exec-1".to_owned(),
             program_id: loaded.program_id,
@@ -104,6 +108,34 @@ fn execute(options: &RunOptions) -> Result<ExecutionResult, String> {
     })();
     client.finish(result.is_ok())?;
     result
+}
+
+fn read_catalog(path: Option<&str>) -> Result<CatalogSetParams, String> {
+    let Some(path) = path else {
+        return Ok(CatalogSetParams {
+            schema_dialect: SCHEMA_DIALECT.to_owned(),
+            metadata: CatalogMetadata::complete(
+                "josh-runner",
+                env!("CARGO_PKG_VERSION"),
+                current_unix_ms()?,
+            ),
+            tools: Vec::new(),
+        });
+    };
+    let text = read_bounded_utf8(Path::new(path), MAX_INPUT_BYTES)?;
+    let catalog: CatalogSetParams = serde_json::from_str(&text)
+        .map_err(|error| format!("catalog is not valid JSON: {error}"))?;
+    catalog
+        .validate()
+        .map_err(|error| format!("catalog is invalid: {error}"))?;
+    Ok(catalog)
+}
+
+fn current_unix_ms() -> Result<u64, String> {
+    let elapsed = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_| "system clock is before the Unix epoch".to_owned())?;
+    u64::try_from(elapsed.as_millis()).map_err(|_| "system clock value is too large".to_owned())
 }
 
 fn protocol_limits() -> ProtocolLimits {

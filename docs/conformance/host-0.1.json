@@ -4,7 +4,7 @@
   "completed_on": "2026-08-16",
   "language_versions": ["0.1.0"],
   "bytecode_versions": [13],
-  "protocol_versions": ["josh/1.3"],
+  "protocol_versions": ["josh/1.4"],
   "required": {
     "agent_and_typed_response_operations": "conforming",
     "canary_secret_scans": "conforming",

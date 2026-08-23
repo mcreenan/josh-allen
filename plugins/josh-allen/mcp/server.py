@@ -28,6 +28,7 @@ JOSH_RESPONSE_TIMEOUT_SECONDS = 30
 # MCP version used by the local stdio clients supported by this plugin.
 MCP_PROTOCOL_VERSION = "2025-06-18"
 JOSH_PROTOCOL = "josh/1"
+JOSH_PROTOCOL_VERSION = "josh/1.4"
 JOSH_LIMITS = {
     "max_frame_bytes": MAX_FRAME_BYTES,
     "max_active_requests": 64,
@@ -217,7 +218,7 @@ def inline_manifest_source(path: Path) -> str:
     return source
 
 
-def _catalog() -> list[dict[str, Any]]:
+def _catalog_tools() -> list[dict[str, Any]]:
     schema = {
         "type": "object",
         "properties": {"text": {"type": "string"}},
@@ -227,12 +228,37 @@ def _catalog() -> list[dict[str, Any]]:
     return [{
         "name": "allen_integration_echo",
         "version": "1.0.0",
+        "description": "Deterministically echo one text value through the typed JOSH tool provider.",
         "input_schema": schema,
         "output_schema": schema,
         "error_schema": schema,
         "effects": [],
         "idempotency": "idempotent",
     }]
+
+
+class CatalogAdapter:
+    """Produce one complete, source-owned JOSH catalog snapshot."""
+
+    def snapshot(self) -> dict[str, Any]:
+        raise NotImplementedError
+
+
+class BridgeCatalogAdapter(CatalogAdapter):
+    """Enumerate the typed tools implemented by this MCP bridge."""
+
+    def snapshot(self) -> dict[str, Any]:
+        return {
+            "schema_dialect": "https://json-schema.org/draft/2020-12/schema",
+            "metadata": {
+                "source": "josh-allen-mcp",
+                "source_revision": "0.1.2",
+                "observed_at_unix_ms": time.time_ns() // 1_000_000,
+                "freshness": "current",
+                "complete": True,
+            },
+            "tools": _catalog_tools(),
+        }
 
 
 def _result_payload(value: dict[str, Any]) -> dict[str, Any]:
@@ -412,7 +438,12 @@ class Session:
 
 
 class Bridge:
-    def __init__(self, workspace: Path | None = None, executable: Path | None = None) -> None:
+    def __init__(
+        self,
+        workspace: Path | None = None,
+        executable: Path | None = None,
+        catalog_adapter: CatalogAdapter | None = None,
+    ) -> None:
         root = workspace or Path(os.environ.get("JOSH_ALLEN_WORKSPACE", os.getcwd()))
         try:
             self.workspace = root.resolve(strict=True)
@@ -429,6 +460,7 @@ class Bridge:
             installed = shutil.which("josh")
             self.executable = Path(installed) if installed else self.workspace / "target" / "debug" / "josh"
         self.sessions: dict[str, Session] = {}
+        self.catalog_adapter = catalog_adapter or BridgeCatalogAdapter()
 
     def _evict_terminal_sessions(self) -> None:
         while len(self.sessions) >= MAX_RETAINED_SESSIONS:
@@ -543,9 +575,9 @@ class Bridge:
 
     def start(self, arguments: Any) -> dict[str, Any]:
         args = _require_object(arguments, "arguments")
-        allowed = {"source_path", "entry", "input", "wall_ms", "subagent_model", "subagent_reasoning_effort"}
+        allowed = {"source_path", "entry", "input", "catalog_input", "wall_ms", "subagent_model", "subagent_reasoning_effort"}
         if set(args) - allowed or "source_path" not in args:
-            raise BridgeError("allen_session_start accepts source_path, entry, input, wall_ms, subagent_model, and subagent_reasoning_effort")
+            raise BridgeError("allen_session_start accepts source_path, entry, input, catalog_input, wall_ms, subagent_model, and subagent_reasoning_effort")
         self._evict_terminal_sessions()
         if sum(session.state in {"running", "waiting"} for session in self.sessions.values()) >= MAX_SESSIONS:
             raise BridgeError("too many active bridge sessions")
@@ -556,6 +588,11 @@ class Bridge:
         input_value = args.get("input", None)
         if not _json_size_is_bounded(input_value):
             raise BridgeError("input exceeds bridge limit")
+        catalog_input = args.get("catalog_input", False)
+        if not isinstance(catalog_input, bool):
+            raise BridgeError("catalog_input must be a Boolean")
+        if catalog_input and "input" in args:
+            raise BridgeError("catalog_input cannot be combined with input")
         wall_ms = args.get("wall_ms", DEFAULT_WALL_MS)
         if not isinstance(wall_ms, int) or isinstance(wall_ms, bool) or not 1_000 <= wall_ms <= MAX_WALL_MS:
             raise BridgeError("wall_ms must be an integer from 1000 through 3600000")
@@ -574,8 +611,8 @@ class Bridge:
             if ready.get("kind") != "notification" or ready.get("method") != "runtime/ready":
                 raise BridgeError("JOSH did not announce runtime/ready")
             self._send_request(session, "init-1", "initialize", {
-                "host": {"name": "josh-allen-mcp", "version": "0.1.1"},
-                "protocol_versions": ["josh/1.3"],
+                "host": {"name": "josh-allen-mcp", "version": "0.1.2"},
+                "protocol_versions": [JOSH_PROTOCOL_VERSION],
                 "language_versions": [">=0.1.0, <0.2.0"],
                 "execution_mode": "attached",
                 "invoking_session_id": f"mcp-{token}",
@@ -584,11 +621,13 @@ class Bridge:
                 "extensions": [],
             })
             self._expect_response(session, "init-1", "initialize")
-            self._send_request(session, "catalog-1", "catalog/set", {
-                "schema_dialect": "https://json-schema.org/draft/2020-12/schema",
-                "tools": _catalog(),
-            })
-            self._expect_response(session, "catalog-1", "catalog/set")
+            catalog = self.catalog_adapter.snapshot()
+            if not _json_size_is_bounded(catalog):
+                raise BridgeError("catalog adapter result exceeds bridge limit")
+            self._send_request(session, "catalog-1", "catalog/set", catalog)
+            frozen_catalog = self._expect_response(session, "catalog-1", "catalog/set")
+            if catalog_input:
+                input_value = frozen_catalog
             self._send_request(session, "load-1", "program/load", {
                 "format": "source_bundle",
                 "files": [{"path": "src/main.allen", "encoding": "utf8", "content": source}],
@@ -732,7 +771,8 @@ TOOLS = [
         "name": "allen_session_start",
         "description": (
             "Start one manifest-first ALLEN source session. Inspect the exported entry first: "
-            "omit input for a zero-parameter entry, and otherwise pass its exact JSON input."
+            "omit input for a zero-parameter entry, pass its exact JSON input, or set "
+            "catalog_input to project the host's frozen catalog result."
         ),
         "inputSchema": {
             "type": "object",
@@ -750,6 +790,14 @@ TOOLS = [
                     "description": (
                         "Exact JSON value for the entry's single parameter. Omit this property when "
                         "the entry has zero parameters; do not use an empty object as a placeholder."
+                    ),
+                },
+                "catalog_input": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": (
+                        "Use the validated catalog/set result as entry input. This cannot be "
+                        "combined with input, and an incomplete catalog fails before program load."
                     ),
                 },
                 "wall_ms": {
@@ -790,7 +838,7 @@ def dispatch(bridge: Bridge, request: dict[str, Any]) -> dict[str, Any] | None:
     if method == "notifications/initialized":
         return None
     if method == "initialize":
-        result = {"protocolVersion": MCP_PROTOCOL_VERSION, "capabilities": {"tools": {}}, "serverInfo": {"name": "josh-allen-mcp", "version": "0.1.1"}, "instructions": "For each next_action, perform the real host operation. Copy next_action.resume_arguments_shape as the complete allen_session_resume arguments and replace only its placeholder. Keep the provider response nested under result. Never fabricate provider results. Pause for real user input for user/ask. Use the host's native agent tools for sub_agent/*; prompt_governed_defaults are hints, not authority."}
+        result = {"protocolVersion": MCP_PROTOCOL_VERSION, "capabilities": {"tools": {}}, "serverInfo": {"name": "josh-allen-mcp", "version": "0.1.2"}, "instructions": "For each next_action, perform the real host operation. Copy next_action.resume_arguments_shape as the complete allen_session_resume arguments and replace only its placeholder. Keep the provider response nested under result. Never fabricate provider results. Pause for real user input for user/ask. Use the host's native agent tools for sub_agent/*; prompt_governed_defaults are hints, not authority."}
     elif method == "tools/list":
         result = {"tools": TOOLS}
     elif method == "tools/call":

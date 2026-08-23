@@ -136,6 +136,7 @@ fn raw_stdio_routes_all_sub_agent_operations_without_an_invoking_session() {
     };
     let catalog = CatalogSetParams {
         schema_dialect: josh_protocol::SCHEMA_DIALECT.to_owned(),
+        metadata: josh_protocol::CatalogMetadata::complete("test-host", "1", 1),
         tools: Vec::new(),
     };
     let load = ProgramLoadParams::SourceBundle {

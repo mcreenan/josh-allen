@@ -6,13 +6,32 @@ manifest {
 
 record ToolDescription {
   name: String
+  version: String
   description: String
 }
 
+record CatalogMetadata {
+  source: String
+  source_revision: String
+  observed_at_unix_ms: Int
+  freshness: String
+  complete: Bool
+}
+
 record ToolCatalog {
+  catalog_digest: String
+  schema_profile: String
+  tool_count: Int
+  metadata: CatalogMetadata
   tools: List<ToolDescription>
 }
 
 export fn main(catalog: ToolCatalog) returns ToolCatalog {
+  if (!catalog.metadata.complete) {
+    stop("catalog.incomplete")
+  }
+  if (catalog.tool_count != length(catalog.tools)) {
+    stop("catalog.count_mismatch")
+  }
   catalog
 }

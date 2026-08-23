@@ -6,6 +6,8 @@ pub(crate) const DEFAULT_WALL_MS: u64 = 5_000;
 pub(crate) struct RunOptions {
     pub(crate) entry: String,
     pub(crate) input: Option<String>,
+    pub(crate) catalog: Option<String>,
+    pub(crate) catalog_input: bool,
     pub(crate) workdir: Option<String>,
     pub(crate) grants: Vec<String>,
     pub(crate) allowed_http_origins: Vec<String>,
@@ -16,7 +18,7 @@ pub(crate) struct RunOptions {
 
 pub(crate) fn print_help(program: &str) {
     eprintln!(
-        "Usage:\n  {program} run [options] <source.allen|package-directory|artifact.allenb>\n  {program} serve\n\nOptions:\n  --entry <name>              Select an entry (default: main)\n  --input <json|@file|->      Supply exact entry JSON\n  --workdir <directory>       Select the sandbox working directory\n  --grant <capability>        Grant fs.read, fs.write, or net.http_get\n  --allow-net-origin <origin> Allow one canonical HTTPS origin\n  --wall-ms <milliseconds>    Set the wall-time limit (default: 5000)\n  --trace-events              Write JOSH execution events to stderr\n  -h, --help                  Show this help"
+        "Usage:\n  {program} run [options] <source.allen|package-directory|artifact.allenb>\n  {program} serve\n\nOptions:\n  --entry <name>              Select an entry (default: main)\n  --input <json|@file|->      Supply exact entry JSON\n  --catalog <json-file>       Load a complete host tool catalog\n  --catalog-input             Use the frozen catalog result as entry input\n  --workdir <directory>       Select the sandbox working directory\n  --grant <capability>        Grant fs.read, fs.write, or net.http_get\n  --allow-net-origin <origin> Allow one canonical HTTPS origin\n  --wall-ms <milliseconds>    Set the wall-time limit (default: 5000)\n  --trace-events              Write JOSH execution events to stderr\n  -h, --help                  Show this help"
     );
 }
 
@@ -35,6 +37,10 @@ pub(crate) fn parse_run(program: &str, arguments: &[String]) -> Result<Option<Ru
             }
             "--entry" => options.entry = take_value(arguments, &mut index, "--entry")?,
             "--input" => options.input = Some(take_value(arguments, &mut index, "--input")?),
+            "--catalog" => {
+                options.catalog = Some(take_value(arguments, &mut index, "--catalog")?);
+            }
+            "--catalog-input" => options.catalog_input = true,
             "--workdir" => {
                 options.workdir = Some(take_value(arguments, &mut index, "--workdir")?);
             }
@@ -67,6 +73,9 @@ pub(crate) fn parse_run(program: &str, arguments: &[String]) -> Result<Option<Ru
     }
     if options.entry.is_empty() {
         return Err("--entry cannot be empty".to_owned());
+    }
+    if options.catalog_input && options.input.is_some() {
+        return Err("--catalog-input cannot be combined with --input".to_owned());
     }
     if !options.allowed_http_origins.is_empty() {
         options.grants.push("net.http_get".to_owned());

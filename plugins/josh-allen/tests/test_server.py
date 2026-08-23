@@ -409,29 +409,67 @@ class JoshEndToEndTests(unittest.TestCase):
             self.assertEqual(outcome["terminal"], {"outcome": "completed", "output": 42})
 
     def test_tool_echo_preserves_every_unattended_input_entry(self) -> None:
+        schema = {
+            "type": "object",
+            "properties": {},
+            "required": [],
+            "additionalProperties": False,
+        }
         catalog = {
+            "schema_dialect": "https://json-schema.org/draft/2020-12/schema",
+            "metadata": {
+                "source": "test-adapter",
+                "source_revision": "revision-13",
+                "observed_at_unix_ms": 1,
+                "freshness": "current",
+                "complete": True,
+            },
             "tools": [
-                {"name": f"example.tool_{index:02}", "description": f"Example tool {index}."}
+                {
+                    "name": f"example.tool_{index:02}",
+                    "version": "1.0.0",
+                    "description": f"Example tool {index}.",
+                    "input_schema": schema,
+                    "output_schema": schema,
+                    "error_schema": schema,
+                    "effects": [],
+                    "idempotency": "idempotent",
+                }
                 for index in range(13)
             ],
         }
-        completed = subprocess.run(
+        with tempfile.TemporaryDirectory() as temporary:
+            catalog_path = Path(temporary) / "catalog.json"
+            catalog_path.write_text(json.dumps(catalog), encoding="utf-8")
+            completed = subprocess.run(
+                [
+                    str(self.josh),
+                    "run",
+                    "--catalog",
+                    str(catalog_path),
+                    "--catalog-input",
+                    "examples/josh-allen/tool-echo.allen",
+                ],
+                cwd=self.repo_root,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+        output = json.loads(completed.stdout)["output"]
+        self.assertEqual(output["metadata"], catalog["metadata"])
+        self.assertEqual(output["tool_count"], 13)
+        self.assertEqual(
+            output["tools"],
             [
-                str(self.josh),
-                "run",
-                "--input",
-                json.dumps(catalog, separators=(",", ":")),
-                "examples/josh-allen/tool-echo.allen",
+                {
+                    "name": tool["name"],
+                    "version": tool["version"],
+                    "description": tool["description"],
+                }
+                for tool in catalog["tools"]
             ],
-            cwd=self.repo_root,
-            check=True,
-            capture_output=True,
-            text=True,
         )
-        self.assertEqual(json.loads(completed.stdout), {
-            "outcome": "completed",
-            "output": catalog,
-        })
+        self.assertTrue(output["catalog_digest"].startswith("sha256:"))
 
     def test_tool_request_round_trips_through_real_josh(self) -> None:
         source = '''manifest { language: "0.1" entry: main capabilities: [] tools: { required: [ { name: "allen_integration_echo", version: ">=1.0.0, <2.0.0" } ] } }
@@ -571,32 +609,42 @@ export async fn main(value: String) returns Result<tools.allen_integration_echo.
                     "output": expected_output,
                 })
 
-        catalog = {
-            "tools": [
-                {
-                    "name": "josh_allen/allen_session_start",
-                    "description": "Start a manifest-first ALLEN session.",
-                },
-                {
-                    "name": "josh_allen/allen_session_resume",
-                    "description": "Resume a waiting ALLEN session.",
-                },
-            ],
-        }
         bridge = server.Bridge(self.repo_root, self.josh)
         try:
             state = bridge.start({
                 "source_path": "examples/josh-allen/tool-echo.allen",
-                "input": catalog,
+                "catalog_input": True,
             })
         finally:
             bridge.close_all()
         session_token = state.pop("session_token")
         self.assertIsInstance(session_token, str)
-        self.assertEqual(state, {
-            "state": "terminal",
-            "terminal": {"outcome": "completed", "output": catalog},
-        })
+        self.assertEqual(state["state"], "terminal")
+        catalog = state["terminal"]["output"]
+        self.assertEqual(catalog["metadata"]["source"], "josh-allen-mcp")
+        self.assertEqual(catalog["metadata"]["source_revision"], "0.1.2")
+        self.assertEqual(catalog["metadata"]["freshness"], "current")
+        self.assertTrue(catalog["metadata"]["complete"])
+        self.assertGreater(catalog["metadata"]["observed_at_unix_ms"], 0)
+        self.assertEqual(catalog["tool_count"], 1)
+        self.assertEqual(catalog["tools"][0]["name"], "allen_integration_echo")
+
+    def test_incomplete_catalog_adapter_fails_before_program_load(self) -> None:
+        class IncompleteAdapter(server.BridgeCatalogAdapter):
+            def snapshot(self) -> dict[str, Any]:
+                catalog = super().snapshot()
+                catalog["metadata"]["complete"] = False
+                return catalog
+
+        bridge = server.Bridge(self.repo_root, self.josh, IncompleteAdapter())
+        try:
+            with self.assertRaisesRegex(server.BridgeError, "tool catalog is incomplete"):
+                bridge.start({
+                    "source_path": "examples/josh-allen/tool-echo.allen",
+                    "catalog_input": True,
+                })
+        finally:
+            bridge.close_all()
 
     def test_real_world_showcases_complete_through_real_josh(self) -> None:
         cases = {

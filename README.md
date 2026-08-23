@@ -26,7 +26,7 @@ agent session without changing the language.
 
 JOSH/ALLEN is early alpha. During the `0.1.x` series, the repository supports
 one source language, bytecode format, runtime contract, replay format, and
-`josh/1.3` protocol. The current runtime rejects artifacts from older builds.
+`josh/1.4` protocol. The current runtime rejects artifacts from older builds.
 
 A breaking change replaces the previous language and artifacts. The same
 change must update the implementation, specifications, tests, conformance

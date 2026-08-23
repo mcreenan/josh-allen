@@ -1,6 +1,6 @@
 # JOSH protocol reference for AI agents
 
-Status: Operational guide for the current `josh/1.3` protocol
+Status: Operational guide for the current `josh/1.4` protocol
 
 Entry point: [`docs/agents/README.md`](../README.md). The implementation
 specification is authoritative for runtime behavior.
@@ -69,7 +69,7 @@ negotiated protocol version:
   "method": "initialize",
   "params": {
     "host": {"name": "allen-host", "version": "0.1.0"},
-    "protocol_versions": ["josh/1.3"],
+    "protocol_versions": ["josh/1.4"],
     "language_versions": ["0.1.0"],
     "execution_mode": "attached",
     "invoking_session_id": "session-1",
@@ -91,10 +91,10 @@ negotiated protocol version:
 stable `invoking_session_id`; unattended mode sends it as `null`. Limits and
 standard capability names are canonical, bounded, sorted, and unique.
 
-The runtime either selects `josh/1.3` or rejects initialization. Its result
+The runtime either selects `josh/1.4` or rejects initialization. Its result
 returns the runtime identity, effective limits, and these exact feature strings:
 `agent`, `external-fs-grants`, `model`, `record-replay`, `structured-prompts`,
-`structured-transcript`, `sub-agents`, `typed-responses`, `typed-tools`, and
+`catalog-provenance`, `structured-transcript`, `sub-agents`, `typed-responses`, `typed-tools`, and
 `user-interaction`.
 There is no minor-version fallback or alternate feature set.
 
@@ -140,14 +140,26 @@ capabilities, limits, origins, required tools, and boundary schemas.
 ## 6. Tool catalog
 
 The host freezes at most one tool catalog before loading a program that needs
-tools. Entries are sorted by canonical dotted name and contain exact input,
-output, declared-error schemas, selected tool version, generated effect,
-idempotency metadata, and limits.
+tools. `catalog/set` includes metadata with a bounded source and source
+revision, a nonzero Unix-millisecond observation time, `current` or `cached`
+freshness, and an explicit completeness Boolean. The runtime rejects
+`complete: false` before it freezes any state.
+
+Entries are sorted by canonical dotted name and contain a bounded description,
+exact input, output, and declared-error schemas, selected tool version,
+generated effect, idempotency metadata, and limits.
 
 The runtime validates and canonicalizes all schemas, rejects generated-name or
 effect collisions, computes the catalog digest, and creates the current typed
 ALLEN tool bindings. A loaded program binds the exact catalog digest; execution
 cannot change it.
+
+The successful `catalog/set` result returns the digest, schema profile, count,
+the accepted metadata, and sorted name, version, and description summaries.
+The summaries are the runtime-confirmed projection of what it froze. Tool
+descriptions are display metadata and are excluded from the typed contract
+digest. Source and completeness remain host claims unless a separate host
+contract authenticates them.
 
 `tool/invoke` carries the execution ID, operation ID, tool name, exact input,
 and deadline. Its response is one of validated output, validated declared
@@ -264,7 +276,7 @@ must not produce a second terminal response or expose internal error detail.
 
 When writing or reviewing a JOSH client:
 
-1. Offer only `josh/1.3`.
+1. Offer only `josh/1.4`.
 2. Send `initialize` exactly once.
 3. Use strict length framing and exact JSON shapes.
 4. Keep request IDs unique per direction while active.

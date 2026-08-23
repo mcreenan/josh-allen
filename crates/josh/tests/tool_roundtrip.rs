@@ -451,9 +451,11 @@ fn run_parity_transcript(
     };
     let catalog = CatalogSetParams {
         schema_dialect: josh_protocol::SCHEMA_DIALECT.to_owned(),
+        metadata: josh_protocol::CatalogMetadata::complete("test-host", "1", 1),
         tools: vec![CatalogTool {
             name: "example.lookup".to_owned(),
             version: "1.2.3".to_owned(),
+            description: "Look up one example value.".to_owned(),
             input_schema: schema_json.clone(),
             output_schema: schema_json.clone(),
             error_schema: schema_json,
@@ -685,7 +687,7 @@ optional = []
         input.extend(request(
             "h-2",
             "catalog/set",
-            json!({"schema_dialect":josh_protocol::SCHEMA_DIALECT,"tools":[]}),
+            json!({"schema_dialect":josh_protocol::SCHEMA_DIALECT,"metadata":{"source":"test-host","source_revision":"1","observed_at_unix_ms":1,"freshness":"current","complete":true},"tools":[]}),
         ));
         input.extend(request("h-3", "program/load", json!(load)));
         input.extend(request("h-4", "execution/start", json!(start)));
@@ -939,7 +941,7 @@ optional = []
         input.extend(request(
             "h-2",
             "catalog/set",
-            json!({"schema_dialect":josh_protocol::SCHEMA_DIALECT,"tools":[]}),
+            json!({"schema_dialect":josh_protocol::SCHEMA_DIALECT,"metadata":{"source":"test-host","source_revision":"1","observed_at_unix_ms":1,"freshness":"current","complete":true},"tools":[]}),
         ));
         input.extend(request("h-3", "program/load", json!(load)));
         input.extend(request("h-4", "execution/start", json!(start)));
@@ -1158,7 +1160,7 @@ optional = []
     input.extend(request(
         "h-2",
         "catalog/set",
-        json!({"schema_dialect":josh_protocol::SCHEMA_DIALECT,"tools":[]}),
+        json!({"schema_dialect":josh_protocol::SCHEMA_DIALECT,"metadata":{"source":"test-host","source_revision":"1","observed_at_unix_ms":1,"freshness":"current","complete":true},"tools":[]}),
     ));
     input.extend(request("h-3", "program/load", json!(stopped_load)));
     input.extend(request(
@@ -1317,7 +1319,7 @@ fn active_connection_returns_when_writer_breaks_and_input_stays_open() {
         (
             "h-2",
             "catalog/set",
-            json!({"schema_dialect":josh_protocol::SCHEMA_DIALECT,"tools":[]}),
+            json!({"schema_dialect":josh_protocol::SCHEMA_DIALECT,"metadata":{"source":"test-host","source_revision":"1","observed_at_unix_ms":1,"freshness":"current","complete":true},"tools":[]}),
         ),
         (
             "h-3",
@@ -1389,9 +1391,11 @@ fn in_memory_connection_matches_the_golden_tool_transcript() {
     };
     let catalog = CatalogSetParams {
         schema_dialect: josh_protocol::SCHEMA_DIALECT.to_owned(),
+        metadata: josh_protocol::CatalogMetadata::complete("test-host", "1", 1),
         tools: vec![CatalogTool {
             name: "example.lookup".to_owned(),
             version: "1.2.3".to_owned(),
+            description: "Look up one example value.".to_owned(),
             input_schema: schema_json.clone(),
             output_schema: schema_json.clone(),
             error_schema: schema_json,
@@ -1588,15 +1592,18 @@ fn run_terminal_script(
 fn all_four_terminal_outcomes_cross_the_wire_once() {
     let empty_catalog = || CatalogSetParams {
         schema_dialect: josh_protocol::SCHEMA_DIALECT.to_owned(),
+        metadata: josh_protocol::CatalogMetadata::complete("test-host", "1", 1),
         tools: Vec::new(),
     };
     let schema_json = json!({"type":"string"});
     let schema = ToolSchema::from_value(&schema_json, &SchemaLimits::default()).unwrap();
     let tool_catalog = CatalogSetParams {
         schema_dialect: josh_protocol::SCHEMA_DIALECT.to_owned(),
+        metadata: josh_protocol::CatalogMetadata::complete("test-host", "1", 1),
         tools: vec![CatalogTool {
             name: "example.lookup".to_owned(),
             version: "1.2.3".to_owned(),
+            description: "Look up one example value.".to_owned(),
             input_schema: schema_json.clone(),
             output_schema: schema_json.clone(),
             error_schema: schema_json,
@@ -1720,9 +1727,11 @@ fn late_tool_response_after_cancel_is_fatal_without_a_second_terminal() {
     };
     let catalog = CatalogSetParams {
         schema_dialect: josh_protocol::SCHEMA_DIALECT.to_owned(),
+        metadata: josh_protocol::CatalogMetadata::complete("test-host", "1", 1),
         tools: vec![CatalogTool {
             name: "example.lookup".to_owned(),
             version: "1.2.3".to_owned(),
+            description: "Look up one example value.".to_owned(),
             input_schema: schema_json.clone(),
             output_schema: schema_json.clone(),
             error_schema: schema_json,
@@ -1887,9 +1896,11 @@ fn wrong_domain_tool_error_stops_before_a_matched_retry() {
     };
     let catalog = CatalogSetParams {
         schema_dialect: josh_protocol::SCHEMA_DIALECT.to_owned(),
+        metadata: josh_protocol::CatalogMetadata::complete("test-host", "1", 1),
         tools: vec![CatalogTool {
             name: "example.lookup".to_owned(),
             version: "1.2.3".to_owned(),
+            description: "Look up one example value.".to_owned(),
             input_schema: schema_json.clone(),
             output_schema: schema_json.clone(),
             error_schema: schema_json,
@@ -2022,9 +2033,11 @@ fn tool_call_and_reentrant_program_load_complete_over_raw_stdio() {
     };
     let catalog = CatalogSetParams {
         schema_dialect: josh_protocol::SCHEMA_DIALECT.to_owned(),
+        metadata: josh_protocol::CatalogMetadata::complete("test-host", "1", 1),
         tools: vec![CatalogTool {
             name: "example.lookup".to_owned(),
             version: "1.2.3".to_owned(),
+            description: "Look up one example value.".to_owned(),
             input_schema: schema_json.clone(),
             output_schema: schema_json.clone(),
             error_schema: schema_json,
