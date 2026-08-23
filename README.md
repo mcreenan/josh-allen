@@ -8,19 +8,35 @@ JOSH/ALLEN is a language and host for agent-written programs. Programs have
 typed inputs, declare every external effect, and receive only the capabilities
 their host grants.
 
-The name has two parts:
+## What is this and Why should I use it?
 
-- ALLEN means Agent-Level Language, Embedded Natively. It includes the
-  language, compiler, bytecode format, verifier, virtual machine, and
-  standalone CLI.
-- JOSH means JSON-Oriented Session Host. It runs ALLEN programs and routes
-  typed effects to an agent, model, user, tool, or child agent.
+Agent-driven work usually moves between two spaces. In the **agent space**, an
+agent interprets a goal, makes judgment calls, and decides what to do next. In
+the **deterministic space**, a program follows explicit rules and produces the
+same result from the same input.
 
-The uppercase spelling is intentional. JOSH and ALLEN are acronyms. Together,
-JOSH/ALLEN is a tribute to the GOAT, Josh Allen.
+Agents can already write Bash, Python, or TypeScript and use those languages to
+do the heavy lifting. But the overall workflow often stays in the agent space:
+the agent runs a command, reads the result, decides on another command, and
+repeats. Each trip through that loop takes time and gives the agent another
+chance to misunderstand state or make a different choice.
 
-ALLEN programs do not need an agent. JOSH connects an ALLEN program to a live
-agent session without changing the language.
+JOSH/ALLEN binds the agent space and deterministic space closer together while
+leaning more heavily on the deterministic space. Instead of making every step
+an agent decision, the agent writes a small, typed ALLEN program up front. That
+program can handle the repeatable work, enforce limits, and control when the
+workflow may call back into the agent space for judgment, approval, or other
+capabilities.
+
+This can make the intended work finish sooner. The agent spends its time
+defining the workflow once, then the runtime carries out more of it without a
+new model round trip for every step. You still keep agentic capabilities where
+they help, but filtering, grouping, checking, scheduling, and other rule-based
+work stay in the deterministic space.
+
+JOSH/ALLEN is most useful for bounded, multi-step work with clear rules and a
+few places that need judgment. A short shell command or ordinary script is
+still the simpler choice for a direct task.
 
 ## Status
 
@@ -156,6 +172,22 @@ resource budgets. It also supports record and replay, exact JSON boundaries,
 package locks, filesystem brokers, restricted HTTPS GET, typed prompts, and
 terminal stopped outcomes. The language reference documents only the current
 syntax and runtime contract.
+
+## Name and component reference
+
+The name has two parts:
+
+- ALLEN means Agent-Level Language, Embedded Natively. It includes the
+  language, compiler, bytecode format, verifier, virtual machine, and
+  standalone CLI.
+- JOSH means JSON-Oriented Session Host. It runs ALLEN programs and routes
+  typed effects to an agent, model, user, tool, or child agent.
+
+The uppercase spelling is intentional. JOSH and ALLEN are acronyms. Together,
+JOSH/ALLEN is a tribute to the GOAT, Josh Allen.
+
+ALLEN programs do not need an agent. JOSH connects an ALLEN program to a live
+agent session without changing the language.
 
 ## Documentation
 
