@@ -7,8 +7,8 @@ effects, typed prompts, typed tools, capability checks, structured concurrency,
 and replay.
 
 The proposals below address work that continues across process boundaries.
-They also address external mutations, data controls, actor identity, and host
-differences.
+They also address external mutations, data controls, actor identity, host
+differences, and bounded host integrations.
 
 The proposals do not change ALLEN `0.1`. Each proposal needs a separate design
 decision before implementation starts.
@@ -26,6 +26,7 @@ decision before implementation starts.
 | PD-7 | [Typed streams and multimodal artifacts](roadmap/proposals/PD-7.md) | Add bounded streams and typed references for images, audio, video, and documents. | PD-3, PD-6 |
 | PD-8 | [Capability-scoped persistent memory](roadmap/proposals/PD-8.md) | Add typed persistent memory with explicit ownership, access, retention, and origin. | PD-1, PD-2, PD-3, PD-4 |
 | PD-9 | [Provider-independent model policy](roadmap/proposals/PD-9.md) | Let source set model cost, privacy, time, content, and review requirements. | PD-3, PD-4, PD-6, PD-7 |
+| PD-10 | [Opt-in Executor CLI tool provider](roadmap/proposals/PD-10.md) | Dispatch explicitly granted typed tools through a user-installed Executor CLI without an agent or model turn. | None |
 
 ## Proposed order
 
@@ -39,3 +40,9 @@ to PD-5, PD-7, PD-8, and PD-9 before those proposals become language changes.
 
 Implement PD-5 and PD-6 after the first group. Then implement PD-7. Implement
 PD-8 and PD-9 last because they depend on most of the earlier contracts.
+
+PD-10 can proceed independently against the current language and protocol. Its
+MVP keeps catalog supply, tool grants, and Executor selection explicit. Revisit
+automatic catalog import, mutation semantics, receipts, negotiation,
+cancellation, and streams only after the related proposals define those
+contracts.
