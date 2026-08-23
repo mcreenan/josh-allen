@@ -14,8 +14,9 @@ use super::{
     ValueType, agent_error_type, external_directory_request_type, external_file_request_type,
     file_error_type, http_response_type, is_strict_schema_type, mangle_source_segment,
     model_error_type, network_error_type, normalize_root, permission_error_type, prompt_type,
-    sub_agent_error_type, syntax_lowering, template_interpolations, transcript_message_type,
-    transcript_part_enum_type, transcript_query_type, transcript_snapshot_type, user_error_type,
+    search_match_type, sub_agent_error_type, syntax_lowering, template_interpolations,
+    transcript_message_type, transcript_part_enum_type, transcript_query_type,
+    transcript_snapshot_type, user_error_type,
 };
 
 mod type_aliases;
@@ -1033,6 +1034,7 @@ pub(super) fn standard_builtin_callee(expression: &LoweredExpr) -> Option<Standa
         ("fs", "write_text") => Some(StandardBuiltin::Operation(EffectOperation::WriteText)),
         ("fs", "write_bytes") => Some(StandardBuiltin::Operation(EffectOperation::WriteBytes)),
         ("fs", "list") => Some(StandardBuiltin::Operation(EffectOperation::List)),
+        ("fs", "search") => Some(StandardBuiltin::Operation(EffectOperation::Search)),
         ("http", "get") => Some(StandardBuiltin::Operation(EffectOperation::HttpGet)),
         ("permission", "request_file") => Some(StandardBuiltin::Operation(
             EffectOperation::PermissionRequestFile,
@@ -1123,6 +1125,15 @@ pub(super) fn effect_operation_signature(
             vec![workspace, path],
             ValueType::Result(
                 Box::new(ValueType::List(Box::new(ValueType::String))),
+                Box::new(file_error_type()),
+            ),
+            "fs.read",
+            "filesystem operation",
+        ),
+        EffectOperation::Search => (
+            vec![workspace, path, ValueType::String],
+            ValueType::Result(
+                Box::new(ValueType::List(Box::new(search_match_type()))),
                 Box::new(file_error_type()),
             ),
             "fs.read",

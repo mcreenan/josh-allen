@@ -198,6 +198,29 @@ pub fn http_response_type() -> ValueType {
     ])
 }
 
+/// Return the exact structural match type produced by `fs.search`.
+#[must_use]
+pub fn search_match_type() -> ValueType {
+    ValueType::Record(vec![
+        RecordField {
+            name: "column".to_owned(),
+            value_type: ValueType::Int,
+        },
+        RecordField {
+            name: "line".to_owned(),
+            value_type: ValueType::Int,
+        },
+        RecordField {
+            name: "path".to_owned(),
+            value_type: ValueType::String,
+        },
+        RecordField {
+            name: "text".to_owned(),
+            value_type: ValueType::String,
+        },
+    ])
+}
+
 /// Return the exact request type accepted by `permission.request_file`.
 #[must_use]
 pub fn external_file_request_type() -> ValueType {
@@ -638,6 +661,7 @@ pub enum EffectOperation {
     SubAgentRun,
     SubAgentMessage,
     SubAgentAsk,
+    Search,
 }
 
 /// Operation type used by the VM and provider ABI.
@@ -647,7 +671,7 @@ impl EffectOperation {
     #[must_use]
     pub const fn required_effect(self) -> &'static str {
         match self {
-            Self::ReadText | Self::ReadBytes | Self::List => "fs.read",
+            Self::ReadText | Self::ReadBytes | Self::List | Self::Search => "fs.read",
             Self::WriteText | Self::WriteBytes => "fs.write",
             Self::HttpGet => "net.http_get",
             Self::PermissionRequestFile | Self::PermissionRequestDirectory => {
@@ -683,6 +707,10 @@ pub fn effect_result_type(
         }
         EffectOperation::List => (
             ValueType::List(Box::new(ValueType::String)),
+            file_error_type(),
+        ),
+        EffectOperation::Search => (
+            ValueType::List(Box::new(search_match_type())),
             file_error_type(),
         ),
         EffectOperation::HttpGet => (http_response_type(), network_error_type()),

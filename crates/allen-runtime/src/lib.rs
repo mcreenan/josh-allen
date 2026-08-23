@@ -31,7 +31,7 @@ use allen_bytecode::{
 use allen_http_get::{HttpBroker, HttpError, HttpErrorCode, HttpLimits, HttpUsage};
 use allen_sandbox_fs::{
     ExecutionAccounting, ExternalTargetKind, FileError, FileErrorCode, RetainedExternalTarget,
-    Rights, WorkspaceBroker, WorkspaceLimits,
+    Rights, SearchMatch, WorkspaceBroker, WorkspaceLimits,
 };
 use allen_schema::{
     Descriptor, FrozenCatalog, SchemaLimits, ToolDefinition, ToolName, VersionRange,
@@ -2326,7 +2326,8 @@ impl<'provider> BrokerEffects<'provider> {
             | FsOperation::ReadBytes
             | FsOperation::WriteText
             | FsOperation::WriteBytes
-            | FsOperation::List => Ok(error_result(
+            | FsOperation::List
+            | FsOperation::Search => Ok(error_result(
                 "fs.unavailable",
                 "the filesystem provider is unavailable",
             )),
@@ -2554,9 +2555,10 @@ impl<'provider> BrokerEffects<'provider> {
             _ => return Err(VmError::Invariant("filesystem path type")),
         };
         let authorized = match operation {
-            FsOperation::ReadText | FsOperation::ReadBytes | FsOperation::List => {
-                self.authority.filesystem.read
-            }
+            FsOperation::ReadText
+            | FsOperation::ReadBytes
+            | FsOperation::List
+            | FsOperation::Search => self.authority.filesystem.read,
             FsOperation::WriteText | FsOperation::WriteBytes => self.authority.filesystem.write,
             _ => return Err(VmError::Invariant("filesystem operation type")),
         };
@@ -2598,6 +2600,18 @@ impl<'provider> BrokerEffects<'provider> {
                         .into(),
                 )
             }),
+            FsOperation::Search => match args.get(2) {
+                Some(Value::String(query)) => broker.search(path, query).map(|matches| {
+                    Value::List(
+                        matches
+                            .into_iter()
+                            .map(search_match_value)
+                            .collect::<Vec<_>>()
+                            .into(),
+                    )
+                }),
+                _ => return Err(VmError::Invariant("filesystem search query type")),
+            },
             _ => unreachable!("filesystem operation was checked above"),
         };
         Self::file_effect_result(result)
@@ -2889,7 +2903,8 @@ impl EffectProvider for BrokerEffects<'_> {
             | FsOperation::ReadBytes
             | FsOperation::WriteText
             | FsOperation::WriteBytes
-            | FsOperation::List => self.filesystem_call(operation, args),
+            | FsOperation::List
+            | FsOperation::Search => self.filesystem_call(operation, args),
             FsOperation::HttpGet => self.http_call(args),
             FsOperation::PermissionRequestFile | FsOperation::PermissionRequestDirectory => {
                 self.permission_call(operation, args)
@@ -5660,6 +5675,18 @@ fn file_result(result: Result<Value, FileError>) -> Value {
         Ok(value) => ok_result(value),
         Err(error) => error_result(error.code.as_str(), error.message),
     }
+}
+
+fn search_match_value(value: SearchMatch) -> Value {
+    Value::Record(
+        vec![
+            ("column".into(), Value::Int(value.column)),
+            ("line".into(), Value::Int(value.line)),
+            ("path".into(), Value::String(value.path.into())),
+            ("text".into(), Value::String(value.text.into())),
+        ]
+        .into(),
+    )
 }
 
 const fn file_error_is_resource(code: FileErrorCode) -> bool {

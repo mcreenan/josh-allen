@@ -502,6 +502,9 @@ async fn workspace_io() returns Result<String, FileError>
   // `fs.list` returns UTF-8 entry names in ascending byte order.
   // The path `"."` identifies the workspace root.
   let entries = (await fs.list(workspace, "."))?;
+  // `fs.search` recursively finds literal, case-sensitive matches.
+  // Each result contains the path, line, first byte column, and line text.
+  let matches: List<SearchMatch> = (await fs.search(workspace, ".", "hello"))?;
   // `fs.read_text` returns `Ok` with valid UTF-8 text.
   // A failure returns `Err(FileError)`.
   await fs.read_text(workspace, "note.txt")

@@ -294,3 +294,44 @@ optional = ["fs.read"]
     let denied = josh(&["run", package.to_str().unwrap()]);
     assert_completed(&denied, "[]");
 }
+
+#[test]
+fn run_searches_workspace_text_files_recursively() {
+    let directory = TestDirectory::new("search");
+    let workspace = directory.path().join("workspace");
+    fs::create_dir_all(workspace.join("nested")).unwrap();
+    fs::write(workspace.join("alpha.txt"), "first\nfind me here\n").unwrap();
+    fs::write(workspace.join("nested/beta.txt"), "find me too\n").unwrap();
+    fs::write(workspace.join("binary"), [0xff, 0x00]).unwrap();
+    let source = directory.path().join("search.allen");
+    fs::write(
+        &source,
+        r#"manifest {
+  language: "0.1"
+  entry: main
+  capabilities: [fs.read(workdir)]
+}
+
+export async fn main(query: String)
+  returns Result<List<SearchMatch>, FileError> effects [fs.read] {
+  await fs.search(fs.workspace(), ".", query)
+}
+"#,
+    )
+    .unwrap();
+
+    let output = josh(&[
+        "run",
+        "--grant",
+        "fs.read",
+        "--workdir",
+        workspace.to_str().unwrap(),
+        "--input",
+        r#""find me""#,
+        source.to_str().unwrap(),
+    ]);
+    assert_completed(
+        &output,
+        r#"{"tag":"Ok","value":[{"column":1,"line":2,"path":"alpha.txt","text":"find me here"},{"column":1,"line":1,"path":"nested/beta.txt","text":"find me too"}]}"#,
+    );
+}

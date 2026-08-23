@@ -3547,7 +3547,7 @@ fn operation_allows_error_code(operation: FsOperation, code: &str) -> bool {
                 | "fs.unavailable"
                 | "fs.unsupported_platform"
         ),
-        FsOperation::List => matches!(
+        FsOperation::List | FsOperation::Search => matches!(
             code,
             "fs.hard_link_denied"
                 | "fs.invalid_path"
@@ -3628,7 +3628,8 @@ fn close_provider_error(
                 | FsOperation::ReadBytes
                 | FsOperation::WriteText
                 | FsOperation::WriteBytes
-                | FsOperation::List,
+                | FsOperation::List
+                | FsOperation::Search,
             ),
             VmError::CapabilityMissing,
         ) => (1, "fs.unavailable", "filesystem provider is unavailable"),
@@ -8676,6 +8677,7 @@ mod tests {
             FsOperation::WriteText,
             FsOperation::WriteBytes,
             FsOperation::List,
+            FsOperation::Search,
             FsOperation::HttpGet,
             FsOperation::PermissionRequestFile,
             FsOperation::PermissionRequestDirectory,

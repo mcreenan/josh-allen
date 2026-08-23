@@ -17,6 +17,7 @@
     "external_filesystem_grants": "conforming",
     "external_filesystem_revocation": "conforming",
     "filesystem_effects": "conforming",
+    "filesystem_search": "conforming",
     "https_get": "conforming",
     "host_destination_denial": "conforming",
     "immutable_effective_manifest_grants": "conforming",

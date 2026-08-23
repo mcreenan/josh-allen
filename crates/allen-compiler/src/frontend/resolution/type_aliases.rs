@@ -6,7 +6,8 @@ use super::{
     contains_affine, contains_stored_sub_agent, contains_workspace,
     external_directory_request_type, external_file_request_type, file_error_type,
     http_response_type, model_error_type, network_error_type, permission_error_type,
-    record_field_value_type, resolve_import_path, sub_agent_error_type, user_error_type,
+    record_field_value_type, resolve_import_path, search_match_type, sub_agent_error_type,
+    user_error_type,
 };
 
 pub(super) fn resolve_record_layout(
@@ -69,6 +70,7 @@ pub(super) fn builtin_semantic_type(name: &str) -> Option<SemanticType> {
         "ExternalFileRequest" => external_file_request_type(),
         "ExternalDirectoryRequest" => external_directory_request_type(),
         "HttpResponse" => http_response_type(),
+        "SearchMatch" => search_match_type(),
         "FileError" => file_error_type(),
         "NetworkError" => network_error_type(),
         "AgentError" => agent_error_type(),

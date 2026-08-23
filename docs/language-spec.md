@@ -614,6 +614,9 @@ async fn fs.write_bytes(workspace: Workspace, path: String, value: Bytes)
   returns Result<Void, FileError> effects [fs.write]
 async fn fs.list(workspace: Workspace, path: String)
   returns Result<List<String>, FileError> effects [fs.read]
+record SearchMatch { column: Int line: Int path: String text: String }
+async fn fs.search(workspace: Workspace, path: String, query: String)
+  returns Result<List<SearchMatch>, FileError> effects [fs.read]
 ```
 
 `ExternalFsAccess` has the exact variants `Read`, `Write`, and `ReadWrite`.
@@ -667,8 +670,17 @@ status is not a transport error.
 discriminator; messages are bounded, safe, and nonsecret.
 Its code and safe message do not expose an ambient path. A filesystem call is
 lazy and starts only when its future is awaited or spawned. `fs.list` returns
-UTF-8 entry names in ascending byte order. The exact path `.` selects the
-workspace root. No other `.` component is valid.
+UTF-8 entry names in ascending byte order. `fs.search` recursively scans regular
+UTF-8 files for a literal, case-sensitive query. It returns at most one match
+per line with the first matching one-based UTF-8 byte column. Matches are
+ordered by normalized path and then one-based line number. Search includes
+hidden files and does not apply ignore files. It skips symbolic links, special
+files, and files with non-UTF-8 contents; multiply-linked regular files remain
+denied. An empty query matches every non-final line, including empty lines. The
+filesystem entry limit applies to each searched directory and to the total
+match count. A nonrecursive external directory grant searches only its
+direct-child files. The exact path `.` selects the workspace root. No other
+`.` component is valid.
 
 `Workspace` is opaque. Source cannot construct, compare, encode, narrow, or
 widen it. A reference can be copied and passed within one execution, but each
@@ -1287,6 +1299,7 @@ trap or stop. The canonical machine-readable registry is
 | `async fn fs.write_text(Workspace, String, String) returns Result<Void, FileError> effects [fs.write]` | `FileError` | `fs.permission_denied`, `fs.unavailable`, `fs.hard_link_denied`, `fs.invalid_path`, `fs.io`, `fs.not_directory`, `fs.special_file_denied`, `fs.symlink_denied`, `fs.target_changed`, `fs.unsupported_platform`, `resource.limit` | caller for `fs.unavailable`, `fs.io`, `fs.target_changed`; never otherwise | `Err`; `resource.limit` is a terminal trap and joins |
 | `async fn fs.write_bytes(Workspace, String, Bytes) returns Result<Void, FileError> effects [fs.write]` | `FileError` | `fs.permission_denied`, `fs.unavailable`, `fs.hard_link_denied`, `fs.invalid_path`, `fs.io`, `fs.not_directory`, `fs.special_file_denied`, `fs.symlink_denied`, `fs.target_changed`, `fs.unsupported_platform`, `resource.limit` | caller for `fs.unavailable`, `fs.io`, `fs.target_changed`; never otherwise | `Err`; `resource.limit` is a terminal trap and joins |
 | `async fn fs.list(Workspace, String) returns Result<List<String>, FileError> effects [fs.read]` | `FileError` | `fs.permission_denied`, `fs.unavailable`, `fs.hard_link_denied`, `fs.invalid_path`, `fs.io`, `fs.not_directory`, `fs.not_found`, `fs.special_file_denied`, `fs.symlink_denied`, `fs.target_changed`, `fs.unsupported_platform`, `fs.invalid_utf8`, `resource.limit` | caller for `fs.unavailable`, `fs.io`, `fs.target_changed`; never otherwise | `Err`; `resource.limit` is a terminal trap and joins |
+| `async fn fs.search(Workspace, String, String) returns Result<List<SearchMatch>, FileError> effects [fs.read]` | `FileError` | `fs.permission_denied`, `fs.unavailable`, `fs.hard_link_denied`, `fs.invalid_path`, `fs.io`, `fs.is_directory`, `fs.not_directory`, `fs.not_found`, `fs.special_file_denied`, `fs.symlink_denied`, `fs.target_changed`, `fs.unsupported_platform`, `fs.invalid_utf8`, `resource.limit` | caller for `fs.unavailable`, `fs.io`, `fs.target_changed`; never otherwise | `Err`; `resource.limit` is a terminal trap and joins |
 | `async fn http.get(String) returns Result<HttpResponse, NetworkError> effects [net.http_get]` | `NetworkError` | `net.permission_denied`, `network.unavailable`, `net.invalid_limits`, `net.invalid_url`, `net.origin_denied`, `net.destination_denied`, `net.dns`, `net.dns_timeout`, `net.peer_mismatch`, `net.connect_timeout`, `net.first_byte_timeout`, `net.idle_timeout`, `net.total_timeout`, `net.redirect_invalid`, `net.protocol`, `net.unsupported_encoding`, `net.tls`, `net.io`, `resource.limit` | caller for unavailable, DNS, timeout, TLS, and I/O; never otherwise | `Err`; `resource.limit` is a terminal trap and joins |
 | `async fn agent.message(String) returns Result<Void, AgentError> effects [agent.message]` | `AgentError` | `agent.unavailable`, `agent.denied` | caller / never denied | ordinary `Err` |
 | `async fn agent.ask<T>(Prompt<T>) returns Result<T, AgentError> effects [agent.ask]` | `AgentError` | `agent.unavailable`, `agent.denied`, `agent.validation_failed` | caller / never denied | ordinary `Err` |

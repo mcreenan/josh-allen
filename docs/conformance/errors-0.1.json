@@ -813,6 +813,25 @@
       ]
     },
     {
+      "operation": "fs.search",
+      "codes": [
+        "fs.hard_link_denied",
+        "fs.invalid_path",
+        "fs.invalid_utf8",
+        "fs.io",
+        "fs.is_directory",
+        "fs.not_directory",
+        "fs.not_found",
+        "fs.permission_denied",
+        "fs.special_file_denied",
+        "fs.symlink_denied",
+        "fs.target_changed",
+        "fs.unavailable",
+        "fs.unsupported_platform",
+        "resource.limit"
+      ]
+    },
+    {
       "operation": "http.get",
       "codes": [
         "net.connect_timeout",

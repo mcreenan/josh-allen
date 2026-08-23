@@ -3234,6 +3234,7 @@ fn encode_instruction(
                 crate::EffectOperation::SubAgentRun => 14,
                 crate::EffectOperation::SubAgentMessage => 15,
                 crate::EffectOperation::SubAgentAsk => 16,
+                crate::EffectOperation::Search => 17,
             });
             encode_registers(output, arguments)?;
         }
@@ -4409,6 +4410,7 @@ impl<'a> Reader<'a> {
                     14 => crate::EffectOperation::SubAgentRun,
                     15 => crate::EffectOperation::SubAgentMessage,
                     16 => crate::EffectOperation::SubAgentAsk,
+                    17 => crate::EffectOperation::Search,
                     _ => return Err(invalid_scalar("effect operation")),
                 },
                 arguments: self.operand_registers(&mut operand_budget)?,

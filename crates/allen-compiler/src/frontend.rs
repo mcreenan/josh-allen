@@ -8,9 +8,9 @@ use allen_bytecode::{
     NumericBinaryOp, RecordField, Register, SafeCollectionOperation, StringOperation, ValueType,
     agent_error_type, external_directory_request_type, external_file_request_type, file_error_type,
     http_response_type, is_strict_schema_type, model_error_type, network_error_type,
-    permission_error_type, prompt_output_type, prompt_type, sub_agent_error_type,
-    task_snapshot_type, transcript_message_type, transcript_part_enum_type, transcript_query_type,
-    transcript_snapshot_type, user_error_type,
+    permission_error_type, prompt_output_type, prompt_type, search_match_type,
+    sub_agent_error_type, task_snapshot_type, transcript_message_type, transcript_part_enum_type,
+    transcript_query_type, transcript_snapshot_type, user_error_type,
 };
 use allen_schema::{FrozenCatalog, mangle_source_segment};
 use std::collections::{BTreeMap, BTreeSet};

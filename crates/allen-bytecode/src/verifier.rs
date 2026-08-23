@@ -3454,6 +3454,7 @@ fn verify_instruction_types(
                             | EffectOperation::WriteText
                             | EffectOperation::WriteBytes
                             | EffectOperation::List
+                            | EffectOperation::Search
                     ) {
                         "filesystem operation requires its matching effect"
                     } else {
@@ -3680,7 +3681,9 @@ fn effect_operation_signature(
         EffectOperation::ReadText | EffectOperation::ReadBytes | EffectOperation::List => {
             vec![workspace, string]
         }
-        EffectOperation::WriteText => vec![workspace, string.clone(), string],
+        EffectOperation::WriteText | EffectOperation::Search => {
+            vec![workspace, string.clone(), string]
+        }
         EffectOperation::WriteBytes => vec![workspace, string, ValueType::Bytes],
         EffectOperation::HttpGet | EffectOperation::AgentMessage => {
             vec![ValueType::String]

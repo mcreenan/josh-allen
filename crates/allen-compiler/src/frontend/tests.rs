@@ -472,6 +472,10 @@ async fn list() returns Result<List<String>, FileError> effects [fs.read] {
   let workspace = fs.workspace();
   await fs.list(workspace, "")
 }
+async fn search() returns Result<List<SearchMatch>, FileError> effects [fs.read] {
+  let workspace = fs.workspace();
+  await fs.search(workspace, ".", "needle")
+}
 export async fn main() returns Result<String, FileError> effects [fs.read] {
   let workspace = fs.workspace();
   await fs.read_text(workspace, "notes.txt")
@@ -495,6 +499,7 @@ export async fn main() returns Result<String, FileError> effects [fs.read] {
             FsOperation::WriteText,
             FsOperation::WriteBytes,
             FsOperation::List,
+            FsOperation::Search,
         ] {
             assert!(operations.contains(&operation));
         }

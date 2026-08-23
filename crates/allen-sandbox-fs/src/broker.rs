@@ -87,6 +87,19 @@ pub struct WorkspaceUsage {
     pub write_bytes: u64,
 }
 
+/// One line containing a literal filesystem search query.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SearchMatch {
+    /// Normalized path relative to the capability root.
+    pub path: String,
+    /// One-based line number.
+    pub line: i64,
+    /// One-based UTF-8 byte column of the first match on the line.
+    pub column: i64,
+    /// Matching line without its line ending.
+    pub text: String,
+}
+
 /// Execution-wide filesystem accounting shared by every capability root.
 #[derive(Clone)]
 pub struct ExecutionAccounting {
@@ -862,6 +875,153 @@ impl WorkspaceBroker {
         Ok(names)
     }
 
+    /// Recursively search regular UTF-8 files for a literal, case-sensitive string.
+    ///
+    /// Results are ordered by path and then line number. Each matching line appears once and
+    /// reports the byte column of its first match. Symbolic links and special files are skipped,
+    /// as are files whose contents are not valid UTF-8.
+    ///
+    /// # Errors
+    ///
+    /// Returns a safe error for a denied right, invalid path, denied directory component,
+    /// multiply-linked file, exhausted limit, or descriptor I/O failure.
+    pub fn search(&self, path: &str, query: &str) -> Result<Vec<SearchMatch>, FileError> {
+        self.require_read()?;
+        let CapabilityRoot::Directory { recursive, .. } = &self.root else {
+            require_file_root_path(path)?;
+            return Err(error(
+                FileErrorCode::NotDirectory,
+                "a file grant cannot search a directory",
+            ));
+        };
+        let path = ValidatedPath::directory(path, self.limits)?;
+        let directory = self.open_directory(&path)?;
+        let mut components = path
+            .components
+            .iter()
+            .map(|component| (*component).to_owned())
+            .collect::<Vec<_>>();
+        let mut matches = Vec::new();
+        self.search_directory(&directory, &mut components, query, *recursive, &mut matches)?;
+        matches.sort_unstable_by(|left, right| {
+            left.path
+                .as_bytes()
+                .cmp(right.path.as_bytes())
+                .then_with(|| left.line.cmp(&right.line))
+        });
+        Ok(matches)
+    }
+
+    fn search_directory(
+        &self,
+        directory: &Dir,
+        components: &mut Vec<String>,
+        query: &str,
+        recursive: bool,
+        matches: &mut Vec<SearchMatch>,
+    ) -> Result<(), FileError> {
+        self.charge_operation()?;
+        let entries = directory.entries().map_err(map_io)?;
+        let mut names = Vec::new();
+        for entry in entries {
+            let entry = entry.map_err(map_io)?;
+            if names.len() >= self.limits.max_entries {
+                return Err(error(
+                    FileErrorCode::TooManyEntries,
+                    "a searched directory exceeds the entry limit",
+                ));
+            }
+            names.push(entry.file_name().into_string().map_err(|_| {
+                error(
+                    FileErrorCode::InvalidUtf8,
+                    "a directory entry name is not valid UTF-8",
+                )
+            })?);
+        }
+        names.sort_unstable_by(|left, right| left.as_bytes().cmp(right.as_bytes()));
+
+        for name in names {
+            components.push(name.clone());
+            self.validate_search_path(components)?;
+            let metadata = directory.symlink_metadata(&name).map_err(map_io)?;
+            if metadata.is_symlink() || (!metadata.is_dir() && !metadata.is_file()) {
+                components.pop();
+                continue;
+            }
+            if metadata.is_dir() {
+                if recursive {
+                    let child = directory.open_dir_nofollow(&name).map_err(map_io)?;
+                    self.search_directory(&child, components, query, true, matches)?;
+                }
+            } else {
+                validate_regular(&metadata)?;
+                self.charge_operation()?;
+                let mut options = OpenOptions::new();
+                options.read(true);
+                options.follow(FollowSymlinks::No);
+                options.nonblock(true);
+                let mut file = directory.open_with(&name, &options).map_err(map_io)?;
+                let bytes = self.read_opened_file(&mut file)?;
+                if let Ok(text) = String::from_utf8(bytes) {
+                    let result_path = components.join("/");
+                    for (line_index, line) in text.lines().enumerate() {
+                        let Some(column) = line.find(query) else {
+                            continue;
+                        };
+                        if matches.len() >= self.limits.max_entries {
+                            return Err(error(
+                                FileErrorCode::TooManyEntries,
+                                "the filesystem search exceeds the match limit",
+                            ));
+                        }
+                        matches.push(SearchMatch {
+                            path: result_path.clone(),
+                            line: i64::try_from(line_index + 1).map_err(|_| {
+                                error(
+                                    FileErrorCode::FileTooLarge,
+                                    "a search match exceeds the integer range",
+                                )
+                            })?,
+                            column: i64::try_from(column + 1).map_err(|_| {
+                                error(
+                                    FileErrorCode::FileTooLarge,
+                                    "a search match exceeds the integer range",
+                                )
+                            })?,
+                            text: line.to_owned(),
+                        });
+                    }
+                }
+            }
+            components.pop();
+        }
+        Ok(())
+    }
+
+    fn validate_search_path(&self, components: &[String]) -> Result<(), FileError> {
+        if components.len() > self.limits.max_path_depth {
+            return Err(invalid_path(
+                "a filesystem search path exceeds the component limit",
+            ));
+        }
+        let path_bytes = components
+            .iter()
+            .try_fold(components.len().saturating_sub(1), |total, component| {
+                total.checked_add(component.len())
+            });
+        let Some(path_bytes) = path_bytes else {
+            return Err(invalid_path(
+                "a filesystem search path exceeds the byte limit",
+            ));
+        };
+        if path_bytes > self.limits.max_path_bytes {
+            return Err(invalid_path(
+                "a filesystem search path exceeds the byte limit",
+            ));
+        }
+        Ok(())
+    }
+
     fn require_read(&self) -> Result<(), FileError> {
         if self.rights.read {
             Ok(())
@@ -1456,6 +1616,74 @@ mod tests {
         assert_eq!(broker.usage().operations, 5);
         assert_eq!(broker.usage().read_bytes, 6);
         assert_eq!(broker.usage().write_bytes, 11);
+    }
+
+    #[test]
+    fn searches_utf8_files_recursively_in_stable_order() {
+        let root = TestDir::new();
+        fs::create_dir(root.path().join("a")).unwrap();
+        fs::create_dir(root.path().join("nested")).unwrap();
+        fs::write(root.path().join(".hidden"), b"needle hidden\n").unwrap();
+        fs::write(
+            root.path().join("a.txt"),
+            b"Needle no\nprefix needle and needle\n",
+        )
+        .unwrap();
+        fs::write(root.path().join("a/z.txt"), b"needle in child\n").unwrap();
+        fs::write(root.path().join("nested/b.txt"), "\u{e9} needle\n").unwrap();
+        fs::write(root.path().join("binary"), [0xff, 0x00]).unwrap();
+        symlink("a.txt", root.path().join("linked")).unwrap();
+        let broker = root.broker();
+
+        assert_eq!(
+            broker.search(".", "needle").unwrap(),
+            vec![
+                SearchMatch {
+                    path: ".hidden".to_owned(),
+                    line: 1,
+                    column: 1,
+                    text: "needle hidden".to_owned(),
+                },
+                SearchMatch {
+                    path: "a.txt".to_owned(),
+                    line: 2,
+                    column: 8,
+                    text: "prefix needle and needle".to_owned(),
+                },
+                SearchMatch {
+                    path: "a/z.txt".to_owned(),
+                    line: 1,
+                    column: 1,
+                    text: "needle in child".to_owned(),
+                },
+                SearchMatch {
+                    path: "nested/b.txt".to_owned(),
+                    line: 1,
+                    column: 4,
+                    text: "\u{e9} needle".to_owned(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn search_enforces_the_match_limit() {
+        let root = TestDir::new();
+        fs::write(root.path().join("many.txt"), b"match\nmatch\n").unwrap();
+        let broker = WorkspaceBroker::open_ambient(
+            root.path(),
+            Rights::READ_ONLY,
+            WorkspaceLimits {
+                max_entries: 1,
+                ..WorkspaceLimits::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            broker.search(".", "match").unwrap_err().code,
+            FileErrorCode::TooManyEntries
+        );
     }
 
     #[test]

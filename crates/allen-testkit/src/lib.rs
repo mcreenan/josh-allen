@@ -1552,6 +1552,7 @@ impl<P: EffectProvider, S: ToolResultSchema, R: Redactor, C: ReplayRecordingPoli
                 | EffectOperation::WriteText
                 | EffectOperation::WriteBytes
                 | EffectOperation::List
+                | EffectOperation::Search
         ) {
             let Some(Value::Workspace(handle)) = arguments.first() else {
                 return Err(VmError::ResponseValidationError);
@@ -2100,6 +2101,7 @@ impl<S: ToolResultSchema> EffectProvider for ReplayingEffectProvider<S> {
                 | EffectOperation::WriteText
                 | EffectOperation::WriteBytes
                 | EffectOperation::List
+                | EffectOperation::Search
         ) {
             let Some(Value::Workspace(handle)) = arguments.first() else {
                 return Err(VmError::ReplayRuntimeDiverged);
@@ -2439,7 +2441,7 @@ fn operation_allows_replayed_error_code(operation: EffectOperation, code: &str) 
                 | "fs.unavailable"
                 | "fs.unsupported_platform"
         ),
-        EffectOperation::List => matches!(
+        EffectOperation::List | EffectOperation::Search => matches!(
             code,
             "fs.hard_link_denied"
                 | "fs.invalid_path"
@@ -2730,6 +2732,7 @@ fn operation_for_effect_kind(effect: &EffectKind, name: &str) -> Option<EffectOp
         (EffectKind::Call(_), "fs.write" | "fs.write_text") => Some(EffectOperation::WriteText),
         (EffectKind::Call(_), "fs.write_bytes") => Some(EffectOperation::WriteBytes),
         (EffectKind::Call(_), "fs.list") => Some(EffectOperation::List),
+        (EffectKind::Call(_), "fs.search") => Some(EffectOperation::Search),
         (EffectKind::Call(_), "net.http_get" | "http.get") => Some(EffectOperation::HttpGet),
         (EffectKind::Call(_), "permission.request_external_fs" | "permission.request_file") => {
             Some(EffectOperation::PermissionRequestFile)
@@ -2784,6 +2787,7 @@ fn validate_current_operation_raw_error(
         | EffectOperation::WriteText
         | EffectOperation::WriteBytes
         | EffectOperation::List
+        | EffectOperation::Search
         | EffectOperation::HttpGet => matches!(error, RecordedVmError::CapabilityMissing),
         EffectOperation::PermissionRequestFile | EffectOperation::PermissionRequestDirectory => {
             matches!(
@@ -4082,6 +4086,10 @@ mod tests {
             ),
             (EffectOperation::List, &[RecordedVmError::CapabilityMissing]),
             (
+                EffectOperation::Search,
+                &[RecordedVmError::CapabilityMissing],
+            ),
+            (
                 EffectOperation::HttpGet,
                 &[RecordedVmError::CapabilityMissing],
             ),
@@ -4290,6 +4298,7 @@ mod tests {
             (EffectOperation::WriteText, "fs.io"),
             (EffectOperation::WriteBytes, "fs.permission_denied"),
             (EffectOperation::List, "fs.invalid_utf8"),
+            (EffectOperation::Search, "fs.invalid_utf8"),
             (EffectOperation::HttpGet, "network.unavailable"),
             (
                 EffectOperation::PermissionRequestFile,
