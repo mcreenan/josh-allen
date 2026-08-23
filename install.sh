@@ -2,8 +2,8 @@
 # Install prebuilt JOSH/ALLEN binaries and connect them to installed agent hosts.
 set -euo pipefail
 
-release_base_url="${JOSH_ALLEN_RELEASE_BASE_URL:-https://github.com/mcreenan/allen/releases/latest/download}"
-marketplace_source="mcreenan/allen"
+release_base_url="${JOSH_ALLEN_RELEASE_BASE_URL:-https://github.com/mcreenan/josh-allen/releases/latest/download}"
+marketplace_source="mcreenan/josh-allen"
 marketplace_name="josh-allen"
 plugin_id="josh-allen@josh-allen"
 configured_hosts=0

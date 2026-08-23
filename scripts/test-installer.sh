@@ -86,7 +86,7 @@ case "$*" in
       printf '{"marketplaces":[]}\n'
     fi
     ;;
-  "plugin marketplace add mcreenan/allen")
+  "plugin marketplace add mcreenan/josh-allen")
     touch "$INSTALL_TEST_STATE/codex-marketplace"
     printf 'codex add-marketplace\n' >>"$INSTALL_TEST_LOG"
     ;;
@@ -118,7 +118,7 @@ case "$*" in
       printf '[]\n'
     fi
     ;;
-  "plugin marketplace add mcreenan/allen")
+  "plugin marketplace add mcreenan/josh-allen")
     touch "$INSTALL_TEST_STATE/claude-marketplace"
     printf 'claude add-marketplace\n' >>"$INSTALL_TEST_LOG"
     ;;

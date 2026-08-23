@@ -10,7 +10,7 @@ The prebuilt installer supports:
 You need Python 3 and `curl`. Rust is not required. Run one command:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/mcreenan/allen/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/mcreenan/josh-allen/main/install.sh | bash
 ```
 
 The installer downloads the latest `0.1.x` release, verifies its SHA-256
@@ -38,8 +38,8 @@ build the binaries yourself. You need Rust 1.85 or newer, Python 3, and Git.
 Clone the repository and install both binaries from the checkout:
 
 ```sh
-git clone https://github.com/mcreenan/allen.git
-cd allen
+git clone https://github.com/mcreenan/josh-allen.git
+cd josh-allen
 cargo install --locked --path crates/allen-cli --bin allen
 cargo install --locked --path crates/josh --bin josh
 ```
@@ -72,7 +72,7 @@ The prebuilt installer writes to `~/.local/bin`. To choose another directory,
 set `JOSH_ALLEN_INSTALL_DIR` for the `bash` process:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/mcreenan/allen/main/install.sh | JOSH_ALLEN_INSTALL_DIR=/absolute/bin bash
+curl -fsSL https://raw.githubusercontent.com/mcreenan/josh-allen/main/install.sh | JOSH_ALLEN_INSTALL_DIR=/absolute/bin bash
 ```
 
 The MCP server looks for `josh` on `PATH`. Set `JOSH_ALLEN_JOSH_BIN` to its
