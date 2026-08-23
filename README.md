@@ -1,4 +1,8 @@
-# JOSH/ALLEN
+<p align="center">
+  <img src="assets/josh-allen-logo-ai-visor-master.png" alt="JOSH/ALLEN logo" width="256" height="256">
+</p>
+
+<h1 align="center">JOSH/ALLEN</h1>
 
 JOSH/ALLEN is a small language and host for running agent-written programs
 with typed inputs, declared effects, and narrow capabilities.
