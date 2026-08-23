@@ -55,6 +55,89 @@ An evaluation plan checks a model result through declared review operations.
 
 Usage records the resources that one request consumed.
 
+## Concrete example: Zendesk support routing
+
+This example drafts a response for one Zendesk ticket. The ticket can contain
+private customer data and a screenshot.
+
+The host offers Amazon Bedrock, Google Vertex AI, and a local Ollama service.
+The exact model principals come from the frozen host catalog.
+
+The tool, event, and route names are proposed ALLEN adapters.
+
+| Proposal concept | Named service, tool, or event | Concrete use |
+|---|---|---|
+| Start event | `zendesk.ticket.created@1` | Start one response workflow. |
+| Private route | `models.ollama.local@1` | Process restricted tickets on the local host. |
+| Primary public route | `models.amazon_bedrock.anthropic@1` | Draft a public documentation response. |
+| Fallback route | `models.google_vertex_ai.gemini@1` | Continue after one listed Bedrock error. |
+| Image input | `tools.aws_s3.get_artifact_reference@1` | Supply the Zendesk screenshot by reference. |
+| Independent review | Bedrock and Vertex AI principals | Require two separate typed review results. |
+| Private approval | `zendesk.manager_approval.submitted@1` | Approve one local Ollama draft without remote disclosure. |
+| Final sink | `tools.zendesk.tickets.add_comment@1` | Add the approved response to the ticket. |
+
+The proposed adapter names do not fix a vendor model name in the language.
+Preflight binds each route to one exact provider and model principal.
+
+Tickets with `Private` data use only the local Ollama route. The host rejects
+Bedrock and Vertex AI before it discloses the prompt.
+
+Public documentation tickets can use Bedrock with Vertex AI as a fallback. The
+fallback uses the remaining workflow cost and time budget.
+
+Illustrative future syntax follows. This syntax is not valid ALLEN `0.1`.
+
+```allen
+let policy = match ticket.data_class {
+  Private => ModelPolicy {
+    accepted_routes: ["models.ollama.local@1"],
+    retention: Retention.None,
+    total_cost_microunits: 0,
+  },
+  Public => ModelPolicy {
+    accepted_routes: [
+      "models.amazon_bedrock.anthropic@1",
+      "models.google_vertex_ai.gemini@1",
+    ],
+    retention: Retention.None,
+    total_cost_microunits: 300000,
+  },
+};
+
+let draft = await model.with_fallback(make_prompt(ticket), policy)?;
+
+let approved = match ticket.data_class {
+  Private => await event.wait<ZendeskManagerApproval>({
+    name: "zendesk.manager_approval.submitted@1",
+    subject_digest: digest(draft),
+  })?,
+  Public => await model.quorum({
+    independence: PrincipalPolicy.SeparateProviders,
+    required: 2,
+    request: review_prompt(draft),
+    routes: [
+      "models.amazon_bedrock.anthropic@1",
+      "models.google_vertex_ai.gemini@1",
+    ],
+  })?,
+};
+
+await tools.zendesk.tickets.add_comment.call({
+  body: approved_response(draft, approved),
+  ticket_id: ticket.id,
+})?;
+```
+
+The screenshot stays in Amazon S3. The selected route receives a typed artifact
+reference only when it accepts image input and the ticket labels.
+
+If Bedrock returns a listed temporary error, the workflow can select Vertex AI.
+It cannot use Vertex AI after a privacy-policy failure.
+
+Public tickets get two review results with separate provider principals and
+receipts. Private tickets wait for one Zendesk manager event. A model
+confidence value remains untrusted and does not count as a review.
+
 ## Requirement type
 
 Illustrative future syntax follows. This syntax is not valid ALLEN `0.1`.
@@ -259,6 +342,13 @@ The runtime returns a typed unavailable result or rejects these conditions:
 
 ## Acceptance tests
 
+- Start one workflow from `zendesk.ticket.created@1`.
+- Route a private ticket only to local Ollama.
+- Reject Bedrock and Vertex AI before private prompt disclosure.
+- Use Vertex AI after one listed Bedrock temporary error.
+- Keep both routes inside one total cost budget.
+- Require separate Bedrock and Vertex AI review principals.
+- Send only the approved response to the Zendesk comment tool.
 - Select a model that meets context, artifact, and privacy requirements.
 - Reject all routes before prompt disclosure when privacy proof is absent.
 - Keep fallback attempts within one total cost budget.

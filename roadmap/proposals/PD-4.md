@@ -57,6 +57,78 @@ A trust store contains accepted trust roots and verification policy.
 
 A subject is the exact typed value that an actor approves or acts on.
 
+## Concrete example: GitHub release identity chain
+
+This example starts in GitHub Actions and publishes a package to npm. It uses
+AWS STS for restricted build authority and Sigstore for artifact verification.
+
+The tool and event names are proposed ALLEN adapters.
+
+| Proposal concept | Named service, tool, or event | Concrete use |
+|---|---|---|
+| Agent principal | `github_actions.oidc.subject@1` | Identify one GitHub Actions workflow run. |
+| Restricted delegation | `tools.aws_sts.assume_role_with_web_identity@1` | Give the run one short AWS role session. |
+| Validation receipt | `tools.sigstore.cosign.verify@1` | Verify the signed release artifact. |
+| User approval | `github.deployment_review.submitted@1` | Approve one production deployment plan. |
+| Host effect receipt | `tools.npm.publish@1` | Bind the host-observed npm response to the package and digest. |
+| Provider receipt | `tools.sigstore.rekor.verify_inclusion@1` | Verify a signed Sigstore Rekor inclusion proof. |
+| Audit event | `npm.package.visible@1` | Confirm the published package and artifact digest. |
+
+The GitHub OIDC adapter creates `Principal<Agent>` after token validation. The
+principal identifies the repository, workflow, commit, and run subject.
+
+The AWS STS adapter returns a delegation receipt. The receipt limits the role
+session to one S3 artifact prefix and one expiration time.
+
+Sigstore verification returns `ValidationReceipt<Artifact>`. The receipt binds
+the artifact digest, accepted signer, and verification policy.
+
+The GitHub deployment review approves one exact release-plan digest. A review
+for commit `4fd28aa` cannot approve commit `983bc10`.
+
+Illustrative future syntax follows. This syntax is not valid ALLEN `0.1`.
+
+```allen
+let run: Principal<Agent> =
+  await github_actions.authenticate_oidc(event.oidc_token)?;
+
+let aws = await tools.aws_sts.assume_role_with_web_identity.call({
+  principal: run,
+  role: "arn:aws:iam::123456789012:role/release-build",
+  scope: "s3://release-artifacts/josh-allen/0.2.0/",
+})?;
+
+let artifact = await tools.sigstore.cosign.verify.call({
+  digest: build.artifact_digest,
+  trust_policy: "josh-allen-release-v1",
+})?;
+
+let approval = await event.wait<GitHubDeploymentReview>({
+  name: "github.deployment_review.submitted@1",
+  subject_digest: digest(release_plan),
+})?;
+
+let published = await tools.npm.publish.call({
+  approval: approval.receipt,
+  artifact: artifact.verified,
+  package: "josh-allen",
+  version: "0.2.0",
+})?;
+```
+
+The npm adapter returns a host-level effect receipt in this example. It proves
+what the JOSH host observed. It does not claim that npm signed the response or
+that every npm mirror already has the package.
+
+The later `npm.package.visible@1` event supplies that separate observation. The
+workflow checks its package version and artifact digest.
+
+This chain produces three evidence levels. Sigstore Rekor supplies signed
+provider evidence for its transparency-log entry. The JOSH host issues a host
+receipt for the npm HTTP response that it observed. The ALLEN runtime issues a
+runtime receipt after it validates `PublishResult`. These receipts make
+different claims.
+
 ## Principal types
 
 Source uses specific principal types:
@@ -193,8 +265,10 @@ record DelegationClaims {
 The runtime checks that the delegated authority is no greater than the parent
 authority. The runtime also checks each child operation against the receipt.
 
-A child test agent can receive file-read and test-tool authority. It does not
-receive release-publish authority unless the receipt includes that effect.
+For example, the GitHub Actions principal can delegate one short AWS STS role
+session to a GitHub Copilot coding agent. The delegation permits reads from one
+Amazon S3 log prefix and writes to branch `repair/0.2.0-build`. It does not
+permit `tools.npm.publish@1`.
 
 ## Receipt issuers
 
@@ -206,9 +280,10 @@ The proposal defines three evidence levels:
 
 These levels are not equal.
 
-A host can prove that it received a model response. Only an accepted model
-provider can attest that its service produced the response. A runtime can prove
-schema validation. It cannot prove that the response is correct.
+A JOSH host can prove that it received an Amazon Bedrock response. Only an
+accepted Amazon Bedrock issuer can attest that its service produced the
+response. The ALLEN runtime can prove schema validation. It cannot prove that
+the response is correct.
 
 The receipt type and issuer claims must identify the evidence level.
 
@@ -313,8 +388,14 @@ The verifier must reject these conditions:
 
 ## Acceptance tests
 
+- Authenticate one GitHub Actions OIDC subject as an agent principal.
+- Restrict one AWS STS session to the declared S3 prefix.
+- Verify one artifact through the Sigstore Cosign adapter.
+- Bind a GitHub deployment review to one release-plan digest.
+- Bind an npm host receipt to one package version and artifact.
+- Reject an npm visibility event with a different digest.
 - Reject a source-constructed principal.
-- Verify a provider receipt on a second host.
+- Verify a signed Sigstore Rekor provider receipt on a second host.
 - Reject an approval after one subject field changes.
 - Reject a child operation outside delegated authority.
 - Distinguish provider, host, and runtime receipts.

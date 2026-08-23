@@ -57,6 +57,98 @@ content.
 
 A content capability permits one declared content operation.
 
+## Concrete example: Twilio call transcription
+
+This example transcribes one support call. Twilio supplies audio frames and a
+final recording artifact. Amazon Transcribe supplies partial and final text.
+
+The workflow stores the final transcript in Amazon S3. It posts that document
+to Slack after policy approval.
+
+The tool and event names are proposed ALLEN adapters.
+
+| Proposal concept | Named service, tool, or event | Concrete use |
+|---|---|---|
+| Input stream | `twilio.media.stream.started@1` | Open one Twilio call-audio stream. |
+| Stream consumer | `tools.aws_transcribe.streaming.start@1` | Convert audio frames to typed transcript events. |
+| Backpressure | Twilio adapter receive window | Limit unprocessed audio frames. |
+| Resume limit | Amazon Transcribe streaming adapter | Declare that this adapter has no resumable cursor. |
+| Resumable position | `tools.apache_kafka.consume@1` | Resume an audit stream from one committed Kafka offset. |
+| Audio artifact | `twilio.recording.completed@1` | Receive the final call recording as a typed artifact. |
+| Document artifact | `tools.aws_s3.put_object@1` | Store the final transcript document. |
+| Image artifact | `zendesk.ticket.attachment_added@1` | Receive a screenshot for the linked support ticket. |
+| Multimodal analysis | `tools.google_cloud_vision.annotate_image@1` | Inspect an attached screenshot. |
+| Approval event | `slack.interaction.transcript_approved@1` | Approve one exact transcript digest. |
+| Final sink | `tools.slack.files.upload@1` | Upload the approved transcript to Slack. |
+
+Illustrative future syntax follows. This syntax is not valid ALLEN `0.1`.
+
+```allen
+let audio: Stream<TwilioAudioFrame> =
+  await event.open_stream("twilio.media.stream.started@1")?;
+
+let transcript: Stream<AmazonTranscriptEvent> =
+  await tools.aws_transcribe.streaming.start.call({
+    audio,
+    language: "en-US",
+    max_buffer_frames: 50,
+  })?;
+
+mut final_segments: List<TranscriptSegment> = [];
+
+await transcript.for_each(fn(event: AmazonTranscriptEvent) returns Void {
+  match event {
+    Partial { text: _ } => Void,
+    Final { segment } => final_segments.push(segment),
+  }
+});
+
+let recording = await event.wait<TwilioRecordingCompleted>({
+  name: "twilio.recording.completed@1",
+  subject: event.call_id,
+})?;
+
+let document = make_transcript(final_segments, recording.audio_artifact);
+let stored = await tools.aws_s3.put_object.call({
+  bucket: "support-call-artifacts",
+  key: event.call_id + "/transcript.json",
+  value: encode(document),
+})?;
+
+let approval = await event.wait<SlackTranscriptApproval>({
+  name: "slack.interaction.transcript_approved@1",
+  subject_digest: digest(document),
+})?;
+
+await tools.slack.files.upload.call({
+  approval: approval.receipt,
+  channel: "support-review",
+  artifact: stored.artifact_reference,
+})?;
+```
+
+Partial Amazon Transcribe text cannot become the final `Transcript` value. The
+runtime accepts only final segments for that value.
+
+The Amazon S3 reference does not grant source permission to read the object.
+Slack receives the artifact only after the sink policy accepts its labels.
+
+If Zendesk adds a screenshot, `zendesk.ticket.attachment_added@1` supplies its
+image reference. The workflow passes that reference to Google Cloud Vision. It
+does not place raw image bytes in the prompt or Slack message.
+
+If Twilio sends frames faster than Amazon Transcribe accepts them, the adapter
+closes its receive window. The runtime ends the stream when the bounded buffer
+still exceeds policy.
+
+This Amazon Transcribe adapter declares no resumable cursor. A host restart
+cannot continue the old transcription session. A durable workflow must retain
+the S3 audio artifact and start a new transcription operation.
+
+The Apache Kafka adapter gives a contrasting case. Its cursor binds the topic,
+partition, consumer group, and committed offset. A workflow can resume that
+audit stream only when the manifest grants the same Kafka scope.
+
 ## Stream type
 
 `Stream<T>` is affine. Source can move it, read it, or cancel it. Source cannot
@@ -65,13 +157,17 @@ copy it or place it in an unrestricted aggregate.
 Illustrative future syntax follows. This syntax is not valid ALLEN `0.1`.
 
 ```allen
-let stream: Stream<ModelEvent<Summary>> =
-  await model.stream(request)?;
+let stream: Stream<AmazonTranscriptEvent> =
+  await tools.aws_transcribe.streaming.start.call({
+    audio: twilio_audio,
+    language: "en-US",
+    max_buffer_frames: 50,
+  })?;
 
-await stream.for_each(fn(event: ModelEvent<Summary>) returns Void {
+await stream.for_each(fn(event: AmazonTranscriptEvent) returns Void {
   match event {
-    Progress { text } => report_progress(text),
-    Final { value } => store(value),
+    Partial { text } => report_progress(text),
+    Final { segment } => store(segment),
   }
 });
 ```
@@ -185,15 +281,16 @@ The sink policy from PD-3 controls that transfer.
 
 ## Multimodal prompts
 
-A prompt can contain typed content parts:
+For example, Google Vertex AI Gemini can inspect an Amazon S3 image reference.
+The prompt contains a typed image part:
 
 ```allen
-prompt {
+await models.google_vertex_ai.gemini.request(prompt {
   system: "Inspect the damage in the image.",
   data: { inspection_id },
   content: [PromptPart.Image(photo)],
   output: InspectionResult,
-}
+})?;
 ```
 
 The selected model policy must accept the artifact kind, media type, size, and
@@ -269,10 +366,19 @@ The runtime must reject these conditions:
 
 ## Acceptance tests
 
+- Open one stream from `twilio.media.stream.started@1`.
+- Apply backpressure before the Twilio frame buffer exceeds its limit.
+- Send final audio frames to Amazon Transcribe in order.
+- Reject partial Amazon Transcribe text as a final transcript.
+- Bind `twilio.recording.completed@1` to the same Twilio call ID.
+- Store the transcript through the Amazon S3 adapter.
+- Upload only an authorized S3 artifact reference to Slack.
+- Bind the Slack approval event to the final transcript digest.
+- Pass a screenshot reference to Google Cloud Vision without raw byte access.
 - Consume a bounded stream without full response buffering.
 - Stop producer reads when the buffer reaches its limit.
 - Cancel a stream and reject a late item.
-- Resume a supported stream from an accepted cursor.
+- Resume `tools.apache_kafka.consume@1` from an accepted offset cursor.
 - Reject a cursor for a different request.
 - Pass an image reference without granting byte access.
 - Reject a multimodal prompt on a text-only provider.

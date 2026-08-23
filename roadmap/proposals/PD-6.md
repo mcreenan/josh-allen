@@ -53,6 +53,77 @@ A quorum accepts a declared number of compatible results.
 
 A supervisor owns child tasks and applies a bounded failure policy.
 
+## Concrete example: PagerDuty incident triage
+
+This example starts when PagerDuty opens a production incident. The workflow
+collects evidence from Datadog and Amazon CloudWatch.
+
+The tool and event names are proposed ALLEN adapters.
+
+| Proposal concept | Named service, tool, or event | Concrete use |
+|---|---|---|
+| Start event | `pagerduty.incident.triggered@1` | Start one triage workflow. |
+| Local deadline | `tools.datadog.logs.query@1` | Stop one log query after eight seconds. |
+| First-success | Datadog and `tools.aws_cloudwatch_logs.query@1` | Use the first valid log sample. |
+| Cancellation | `tools.aws_cloudwatch_logs.stop_query@1` | Stop the losing CloudWatch query. |
+| Retry | `tools.aws_s3.get_object@1` | Retry a read-only runbook download. |
+| Supervisor | GitHub Issues and Slack | Keep the incident issue and notification tasks in one scope. |
+| Quorum | Snyk, VirusTotal, and ClamAV | Require two matching malware decisions. |
+
+Illustrative future syntax follows. This syntax is not valid ALLEN `0.1`.
+
+```allen
+await scope {
+  let token = cancel.token();
+
+  let datadog = spawn deadline.after_seconds(8, token.child(), fn() {
+    tools.datadog.logs.query.call({
+      service: event.service,
+      start_time: event.started_at,
+    })
+  });
+
+  let cloudwatch = spawn deadline.after_seconds(8, token.child(), fn() {
+    tools.aws_cloudwatch_logs.query.call({
+      log_group: event.log_group,
+      start_time: event.started_at,
+    })
+  });
+
+  let logs = await first_success([datadog, cloudwatch], {
+    retryable: ["datadog.timeout", "cloudwatch.throttled"],
+  })?;
+  token.cancel_remaining();
+
+  let runbook = await retry({
+    attempts: 3,
+    call: tools.aws_s3.get_object.call({
+      bucket: "production-runbooks",
+      key: event.service + ".md",
+    }),
+    retryable: ["s3.slow_down", "s3.unavailable"],
+  })?;
+
+  await supervisor.all([
+    tools.github.issues.create.call(make_issue(event, logs, runbook)),
+    tools.slack.chat.post_message.call(make_alert(event, logs)),
+  ])?;
+}
+```
+
+The Datadog and CloudWatch operations are read-only in this example. The
+runtime can cancel the losing query without an ambiguous mutation.
+
+The Amazon S3 retry keeps one request digest. Each attempt stays inside the
+total incident deadline.
+
+The GitHub Issues and Slack calls change external state. Their adapters must
+meet PD-2 before the supervisor can retry them.
+
+For a suspected malicious file, the workflow starts Snyk, VirusTotal, and
+ClamAV scans. A pure function compares their typed decisions. The workflow
+accepts a two-of-three quorum and retains all three receipts.
+
 ## Cancellation model
 
 The first version uses owner-driven cancellation. A task cannot cancel an
@@ -66,8 +137,14 @@ Illustrative future syntax follows. This syntax is not valid ALLEN `0.1`.
 ```allen
 await scope {
   let token = cancel.token();
-  let left = spawn query(primary, token.child());
-  let right = spawn query(backup, token.child());
+  let left = spawn tools.datadog.logs.query.call(
+    datadog_query,
+    token.child(),
+  );
+  let right = spawn tools.aws_cloudwatch_logs.query.call(
+    cloudwatch_query,
+    token.child(),
+  );
 
   let result = await race.first_ok([left, right]);
   token.cancel_remaining();
@@ -237,6 +314,12 @@ The compiler or runtime must reject these conditions:
 
 ## Acceptance tests
 
+- Start triage from `pagerduty.incident.triggered@1`.
+- Select the first valid Datadog or CloudWatch log result.
+- Cancel the losing CloudWatch query through its named stop tool.
+- Retry an Amazon S3 runbook read within one total deadline.
+- Keep GitHub Issues and Slack mutations under one supervisor.
+- Retain Snyk, VirusTotal, and ClamAV quorum receipts.
 - Race two read-only providers and cancel the loser.
 - Resolve two cases that become ready at one scheduler point.
 - Reject a race that loses task ownership.

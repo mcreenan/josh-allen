@@ -53,6 +53,67 @@ Negotiation matches requirements to the host catalog.
 
 Selection is the deterministic result of negotiation.
 
+## Concrete example: GitHub Issues or Jira Cloud
+
+This example runs one incident workflow on two hosts. One host has GitHub
+Issues. The other host has Jira Cloud.
+
+Both adapters implement the proposed `IssueTracker@1` interface. Slack is an
+optional notification interface.
+
+| Requirement | Host A implementation | Host B implementation |
+|---|---|---|
+| `IssueTracker@1` | `tools.github.issues@2` | `tools.jira_cloud.issues@1` |
+| `ObjectStore@1` | `tools.aws_s3.objects@1` | `tools.google_cloud_storage.objects@1` |
+| `Notifier@1` | `tools.slack.chat@1` | Unavailable |
+
+The GitHub adapter maps `project` to a repository. The Jira Cloud adapter maps
+`project` to a Jira project key. Both adapters return the same exact interface
+type.
+
+The object-store interface writes one incident report. Host A selects Amazon
+S3. Host B selects Google Cloud Storage.
+
+Illustrative future syntax follows. This syntax is not valid ALLEN `0.1`.
+
+```allen
+let tracker = tools.select_required<IssueTracker>();
+let objects = tools.select_required<ObjectStore>();
+let notifier = tools.select_optional<Notifier>();
+
+let issue = await tracker.create({
+  project: input.project,
+  summary: input.summary,
+  body: input.report,
+})?;
+
+let stored = await objects.put({
+  key: "incidents/" + issue.value.id + ".json",
+  value: encode(input.report),
+})?;
+
+match notifier {
+  Available(slack) => await slack.post({
+    channel: "incident-response",
+    text: issue.value.url,
+  }),
+  Unavailable(_) => Ok(Void),
+}
+```
+
+On Host A, the issue URL points to GitHub Issues. On Host B, the URL points to
+Jira Cloud. Source uses the same `IssueTracker@1` result type.
+
+Host B continues when Slack is unavailable. The optional result does not give
+source an untyped Slack fallback.
+
+If the Jira adapter omits one required output field, preflight rejects it. The
+runtime does not discover the mismatch after issue creation.
+
+Events can use the selected implementation identity. For example, Host A can
+receive `github.issue.closed@1`. Host B can receive `jira.issue.updated@1` with
+status `Done`. Both adapters lower the event to `IssueClosed@1`.
+
 ## Interface contract
 
 An interface includes:
@@ -216,6 +277,12 @@ Preflight returns a typed unavailable result or a diagnostic for these cases:
 
 ## Acceptance tests
 
+- Select `tools.github.issues@2` as `IssueTracker@1` on Host A.
+- Select `tools.jira_cloud.issues@1` as `IssueTracker@1` on Host B.
+- Select Amazon S3 on Host A and Google Cloud Storage on Host B.
+- Continue without Slack on Host B.
+- Lower GitHub and Jira close events to one typed interface event.
+- Reject a Jira adapter that omits one required result field.
 - Select one of two compatible tools by declared preference.
 - Return typed unavailability for a missing optional tool.
 - Fail load for a missing required interface.

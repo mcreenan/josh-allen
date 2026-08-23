@@ -58,6 +58,77 @@ Retention policy controls storage time and deletion behavior.
 
 Context assembly selects memory records for one prompt or child request.
 
+## Concrete example: PagerDuty incident memory
+
+This example stores durable incident decisions in Amazon DynamoDB. It indexes
+approved summaries in Amazon OpenSearch Service.
+
+PagerDuty and Slack provide the external events. Amazon S3 stores large
+evidence files outside the memory record.
+
+The tool and event names are proposed ALLEN adapters.
+
+| Proposal concept | Named service, tool, or event | Concrete use |
+|---|---|---|
+| Namespace | DynamoDB table `incident-memory-prod` | Store records for one production tenant. |
+| Start event | `pagerduty.incident.triggered@1` | Create the first incident record. |
+| Update event | `slack.message.posted@1` | Append one approved operator decision. |
+| Compare-and-set | `tools.aws_dynamodb.update_item@1` | Update only the expected record version. |
+| Expiration | DynamoDB TTL policy | Expire routine incident context after 90 days. |
+| Evidence artifact | `tools.aws_s3.put_object@1` | Store a large log bundle by digest. |
+| Typed index | `tools.amazon_opensearch.index@1` | Index an approved incident summary. |
+| Context query | `tools.amazon_opensearch.search@1` | Find related incidents for one service. |
+
+The memory capability grants access to one table partition. The partition key
+is tenant `production-us`. Source cannot select another tenant string and gain
+access.
+
+Illustrative future syntax follows. This syntax is not valid ALLEN `0.1`.
+
+```allen
+let memory: Memory<IncidentRecord, ReadAppendUpdate> =
+  memory.namespace<IncidentRecord>("incident-memory-prod");
+
+let created = await memory.append(IncidentRecord {
+  incident_id: event.pagerduty_incident_id,
+  service: event.service,
+  status: IncidentStatus.Open,
+  summary: event.summary,
+})?;
+
+let evidence = await tools.aws_s3.put_object.call({
+  bucket: "incident-evidence-prod",
+  key: event.pagerduty_incident_id + "/logs.tar.zst",
+  value: log_bundle,
+})?;
+
+let updated = await tools.aws_dynamodb.update_item.call({
+  expected_version: created.version,
+  incident_id: created.record_id,
+  evidence: evidence.artifact_reference,
+})?;
+
+await tools.amazon_opensearch.index.call({
+  index: "approved-incident-summaries-v1",
+  record_id: updated.record_id,
+  summary: approved_summary,
+})?;
+```
+
+A second Slack operator can update the same incident. DynamoDB rejects the
+update when its expected version is stale. The workflow reads the new version
+and asks the operator to resolve the conflict.
+
+The adapter denies normal record access after 90 days. DynamoDB TTL can remove
+the item later. The deletion receipt states what the adapter can prove. It does
+not claim that every backup copy disappeared.
+
+OpenSearch receives only an approved summary. It does not receive raw PagerDuty
+notes, Slack secrets, or the Amazon S3 log bundle.
+
+A context query can return five related summaries for the same service. The
+query result records the OpenSearch index version and result order.
+
 ## Namespace contract
 
 A namespace declaration includes:
@@ -84,17 +155,20 @@ execution, widen, or serialize the capability.
 Illustrative future syntax follows. This syntax is not valid ALLEN `0.1`.
 
 ```allen
-let memory: Memory<ReleaseDecision, ReadAppend> =
-  memory.namespace<ReleaseDecision>("release-decisions");
+let memory: Memory<IncidentRecord, ReadAppend> =
+  memory.namespace<IncidentRecord>("incident-memory-prod");
 
-let stored = await memory.append(ReleaseDecision {
-  commit,
-  decision,
-  receipt,
+let stored = await memory.append(IncidentRecord {
+  incident_id: "P12345",
+  service: "checkout-api",
+  status: IncidentStatus.Open,
+  summary: "PagerDuty reported elevated checkout errors.",
 })?;
 ```
 
-The result includes a record ID, version token, and mutation receipt.
+The host binds `incident-memory-prod` to the DynamoDB table and tenant partition
+from the manifest grant. Source cannot create a grant by naming a table. The
+result includes a record ID, version token, and mutation receipt.
 
 ## Record metadata
 
@@ -259,6 +333,13 @@ The runtime must reject these conditions:
 
 ## Acceptance tests
 
+- Create one record from `pagerduty.incident.triggered@1`.
+- Restrict DynamoDB access to tenant `production-us`.
+- Reject one stale DynamoDB expected-version update.
+- Store large evidence in Amazon S3 instead of the memory record.
+- Index only approved summaries in Amazon OpenSearch Service.
+- Preserve the OpenSearch index version in query results.
+- Apply the declared DynamoDB TTL policy without claiming full erasure.
 - Deny access without a namespace capability.
 - Prevent one tenant from reading another tenant namespace.
 - Reject an update with a stale version token.

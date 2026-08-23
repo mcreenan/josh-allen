@@ -53,6 +53,70 @@ committed the operation.
 Compensation is a new effect. Compensation does not remove the first effect
 from history.
 
+## Concrete example: Stripe checkout
+
+This example processes one Shopify order. It uses Stripe for payment and
+PostgreSQL for the local order record.
+
+The tool and event names are proposed ALLEN adapters. They do not claim that
+the external services use these ALLEN names.
+
+| Proposal concept | Named service, tool, or event | Concrete use |
+|---|---|---|
+| Read-only effect | `tools.stripe.payment_intents.retrieve@1` | Read the current Stripe payment state. |
+| Idempotent effect | `tools.stripe.payment_intents.create@1` | Create one payment intent for one Shopify order. |
+| Completion event | `stripe.payment_intent.succeeded@1` | Resume the workflow after Stripe confirms payment. |
+| Transactional effect | `tools.postgresql.orders.commit@1` | Commit the order row and payment receipt together. |
+| Compensatable effect | `tools.stripe.refunds.create@1` | Refund a captured payment after inventory failure. |
+| At-most-once effect | `tools.sendgrid.mail.send@1` | Send one receipt when the adapter cannot prove deduplication. |
+| Reconciliation | `tools.stripe.payment_intents.retrieve@1` | Query Stripe after a lost create response. |
+
+The workflow receives `shopify.order.created@1` with order ID `S-1042`. It
+derives `shopify:S-1042:payment` as the payment idempotency key.
+
+Illustrative future syntax follows. This syntax is not valid ALLEN `0.1`.
+
+```allen
+let payment = await effect.idempotent(
+  key: "shopify:S-1042:payment",
+  call: tools.stripe.payment_intents.create.call({
+    amount_minor: 12900,
+    currency: "USD",
+    order_id: "S-1042",
+  }),
+)?;
+
+checkpoint {
+  payment_id: payment.value.id,
+  payment_receipt: payment.receipt,
+};
+
+let paid = await event.wait<StripePaymentIntentSucceeded>({
+  correlation: payment.value.id,
+  name: "stripe.payment_intent.succeeded@1",
+})?;
+
+await tools.postgresql.orders.commit.call({
+  order_id: "S-1042",
+  payment_receipt: paid.receipt,
+})?;
+```
+
+If the create response does not arrive, the runtime keeps the same key. The
+Stripe adapter returns the prior payment intent or queries it by stored data.
+
+If inventory allocation later fails, source calls
+`tools.stripe.refunds.create@1`. The refund receipt does not remove the payment
+receipt. Workflow history contains both actions.
+
+The SendGrid adapter uses `at_most_once` in this example. The adapter selected
+this class because it cannot prove safe retry behavior for the configured send
+operation. An ambiguous SendGrid result stops automatic retry.
+
+The PostgreSQL adapter exposes a typed transaction operation. It commits the
+order row and payment receipt in one database transaction. It does not claim a
+distributed transaction with Stripe.
+
 ## Tool contract changes
 
 Each state-changing tool operation declares its effect class. It also declares
@@ -67,9 +131,9 @@ Illustrative tool metadata follows:
 {
   "effect_class": "idempotent",
   "idempotency_key": "required",
-  "operation": "github.create_issue",
-  "reconcile": "github.get_idempotent_result",
-  "version": "2.1.0"
+  "operation": "stripe.payment_intents.create",
+  "reconcile": "stripe.payment_intents.retrieve",
+  "version": "1.0.0"
 }
 ```
 
@@ -81,12 +145,16 @@ Illustrative future syntax follows. This syntax is not valid ALLEN `0.1`.
 
 ```allen
 let outcome = await effect.idempotent(
-  key: release.id,
-  call: tools.release.publish.call({ release }),
+  key: "shopify:S-1042:payment",
+  call: tools.stripe.payment_intents.create.call({
+    amount_minor: 12900,
+    currency: "USD",
+    order_id: "S-1042",
+  }),
 )?;
 
 checkpoint {
-  publish_receipt: outcome.receipt,
+  payment_receipt: outcome.receipt,
 };
 ```
 
@@ -158,12 +226,16 @@ the original receipt type that it accepts.
 Illustrative future syntax follows:
 
 ```allen
-let reservation = await tools.inventory.reserve.call(input)?;
+let payment = await tools.stripe.payment_intents.retrieve.call({
+  payment_intent_id,
+})?;
 
-match await tools.inventory.release.call({
-  original: reservation.receipt,
+match await tools.stripe.refunds.create.call({
+  amount_minor: payment.value.amount_received,
+  original: payment_creation_receipt,
+  payment_intent_id: payment.value.id,
 }) {
-  Ok(released) => Ok(released),
+  Ok(refund) => Ok(refund),
   Err(error) => Err(error),
 }
 ```
@@ -233,6 +305,12 @@ The runtime must reject these conditions:
 
 ## Acceptance tests
 
+- Create one Stripe payment intent for Shopify order `S-1042`.
+- Reuse the same Stripe key after a lost provider response.
+- Resume from `stripe.payment_intent.succeeded@1` once.
+- Commit one PostgreSQL order row with the payment receipt.
+- Record a Stripe refund as a separate compensating effect.
+- Stop after an ambiguous SendGrid send result.
 - Lose the first provider response and retry with the same key.
 - Confirm that the provider returns one mutation and one result.
 - Reject the same key with changed input.

@@ -52,6 +52,72 @@ Endorsement increases an integrity claim.
 
 Validation checks structure. Validation does not prove that content is true.
 
+## Concrete example: GitHub support triage
+
+This example processes a customer comment on a private GitHub issue. The
+workflow sends a safe summary to Slack.
+
+The tool and event names are proposed ALLEN adapters.
+
+| Proposal concept | Named service, tool, or event | Concrete use |
+|---|---|---|
+| Untrusted source | `github.issue_comment.created@1` | Receive user-controlled GitHub Markdown. |
+| Secret source | `tools.aws_secrets_manager.get_secret_value@1` | Read a Salesforce access token. |
+| Private source | `tools.salesforce.accounts.get@1` | Read the customer account and support tier. |
+| Validation | `tools.clamav.scan_attachment@1` | Scan a GitHub attachment before extraction. |
+| Declassification | `tools.microsoft_presidio.redact@1` | Remove email addresses and account numbers. |
+| Endorsement | `slack.interaction.approval_submitted@1` | Approve one redacted escalation summary. |
+| Public sink | `tools.slack.chat.post_message@1` | Post the approved summary to a Slack channel. |
+
+The GitHub comment starts as `Untrusted`. Exact JSON validation gives the value
+a known shape. It does not make the comment trustworthy.
+
+The Salesforce account starts as `Private`. The AWS secret remains `Secret`.
+Neither value can enter the Slack tool call.
+
+Illustrative future syntax follows. This syntax is not valid ALLEN `0.1`.
+
+```allen
+let comment: Untrusted<GitHubComment> = event.input();
+
+let token: Secret<String> =
+  await tools.aws_secrets_manager.get_secret_value.call({
+    secret_id: "support/salesforce-token",
+  })?;
+
+let account: Private<SalesforceAccount> =
+  await tools.salesforce.accounts.get.call({
+    access_token: token,
+    account_id: comment.value.account_id,
+  })?;
+
+let redacted = await tools.microsoft_presidio.redact.call({
+  text: comment.value.body,
+})?;
+
+let summary = make_summary(redacted.value, account.value.support_tier);
+let approved = await event.wait<SupportManagerApproval>({
+  name: "slack.interaction.approval_submitted@1",
+  subject_digest: digest(summary),
+})?;
+
+await tools.slack.chat.post_message.call({
+  channel: "customer-escalations",
+  text: approved.value.summary,
+})?;
+```
+
+The compiler rejects a Slack message that contains `token`. It also rejects a
+message that contains the unredacted Salesforce account.
+
+Microsoft Presidio produces a derived value. Its redaction receipt identifies
+the input digest and policy. The Slack interaction event endorses only the
+exact summary digest.
+
+If a GitHub attachment exists, ClamAV scans it before text extraction. A clean
+scan endorses the file bytes for extraction. It does not prove that extracted
+claims are true.
+
 ## Type behavior
 
 Labels compose with existing types.
@@ -75,23 +141,32 @@ For integrity, the result keeps the least trusted input label.
 For origin, the result records each applicable source. The implementation can
 use a bounded origin set or a canonical derived-origin digest.
 
-## Example
+## Additional concrete example: Amazon S3 to Amazon Bedrock
 
 Illustrative future syntax follows. This syntax is not valid ALLEN `0.1`.
 
 ```allen
-let notes: Secret<String> = await fs.read_text(workspace, "notes.txt")?;
-let page: Untrusted<Bytes> = (await http.get(url))?.body;
+let notes: Secret<String> = await tools.aws_s3.get_object.call({
+  bucket: "support-private-notes",
+  key: "accounts/A-2048.txt",
+})?;
+
+let page: Untrusted<Bytes> =
+  (await tools.github.repos.get_readme.call({
+    owner: "acme",
+    repository: "product-docs",
+  }))?.body;
 
 // The compiler rejects this call without a matching release policy.
-await model.request(prompt {
+await models.amazon_bedrock.anthropic.request(prompt {
   system: "Summarize the notes.",
   data: { notes },
   output: Summary,
 });
 ```
 
-The model sink declares which confidentiality labels it accepts. The selected
+The Amazon S3 object remains `Secret`. The GitHub README remains `Untrusted`.
+The Amazon Bedrock route declares which confidentiality labels it accepts. Its
 provider policy can make that sink more restrictive.
 
 ## Sources
@@ -228,6 +303,12 @@ The compiler or runtime must reject these conditions:
 
 ## Acceptance tests
 
+- Label `github.issue_comment.created@1` content as untrusted.
+- Keep the AWS Secrets Manager value secret through Salesforce access.
+- Reject the secret in a Slack tool input.
+- Keep the Salesforce account private after schema validation.
+- Record the Microsoft Presidio redaction as a derived value.
+- Bind `slack.interaction.approval_submitted@1` to one summary digest.
 - Reject secret file content in an unapproved model prompt.
 - Permit an approved redacted value and record its derivation.
 - Keep `Untrusted` after exact JSON schema validation.
