@@ -1,0 +1,64 @@
+manifest {
+  language: "0.1"
+  entry: main
+  capabilities: [agent.ask, user.ask]
+  tools: {
+    required: [
+      { name: "allen_integration_echo", version: ">=1.0.0, <2.0.0" }
+    ]
+  }
+}
+
+record Drift {
+  id: String
+  production: Bool
+  reversible: Bool
+}
+
+record ScopeReview {
+  blocked_ids: List<String>
+  note: String
+  safe_ids: List<String>
+}
+
+record RemediationResult {
+  approved: Bool
+  receipt: String
+  status: String
+}
+
+export async fn main() returns RemediationResult effects [agent.ask, tool.allen_integration_echo@1, user.ask] {
+  let drift = [
+    Drift { id: "sg-web", production: true, reversible: true },
+    Drift { id: "db-encryption", production: true, reversible: false }
+  ];
+  let review = match await agent.ask<ScopeReview>(prompt {
+    system: "Classify only reversible drift as safe. Return sg-web in safe_ids and db-encryption in blocked_ids."
+    data: { drift }
+    output: ScopeReview
+  }) {
+    Ok(value) => value
+    Err(_) => ScopeReview { blocked_ids: [], note: "agent unavailable", safe_ids: [] }
+  };
+  let policy_matches = review.safe_ids == ["sg-web"] && review.blocked_ids == ["db-encryption"];
+  if (policy_matches) {
+    let approved = match await user.ask<Bool>(prompt {
+      system: "Approve applying only reversible drift item sg-web? db-encryption remains blocked. Return true or false."
+      data: { review }
+      output: Bool
+    }) {
+      Ok(value) => value
+      Err(_) => false
+    };
+    if (approved) {
+      match await tools.allen_integration_echo.call({ text: "dry-run apply drift item: sg-web" }) {
+        Ok(output) => RemediationResult { approved: true, receipt: output.text, status: "safe remediation dry run complete" }
+        Err(_) => RemediationResult { approved: false, receipt: "none", status: "dry-run tool unavailable" }
+      }
+    } else {
+      RemediationResult { approved: false, receipt: "none", status: "user declined" }
+    }
+  } else {
+    RemediationResult { approved: false, receipt: "none", status: "agent scope rejected by policy" }
+  }
+}

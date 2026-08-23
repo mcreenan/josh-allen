@@ -1,0 +1,15 @@
+fn survivor_zero_based(size: Int, step: Int) returns Int {
+  mut survivor: Int = 0;
+  for current_size in 1..(size + 1) {
+    survivor = (survivor + step) % current_size;
+  }
+  survivor
+}
+
+fn survivor(size: Int, step: Int) returns Int {
+  survivor_zero_based(size, step) + 1
+}
+
+export fn main() returns (Int, Int, Int, Int) {
+  (survivor(1, 3), survivor(5, 2), survivor(7, 3), survivor(41, 3))
+}

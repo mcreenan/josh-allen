@@ -1,0 +1,12 @@
+import { prepare } from "./support.allen";
+import { target_path } from "text_utils/src/text.allen";
+
+export async fn main(input: String) returns Result<String, FileError> effects [fs.read, fs.write] {
+  let workspace = fs.workspace();
+  let path = target_path();
+  let content = prepare(input);
+  let written = (await fs.write_text(workspace, path, content))?;
+  await fs.read_text(workspace, path)
+}
+
+export fn status() returns String { "ready" }

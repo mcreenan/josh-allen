@@ -1,0 +1,83 @@
+record Projection {
+  capabilities: List<String>
+  limits: Map<String, Int>
+  tools: List<String>
+}
+
+fn same<T: Eq>(left: T, right: T) returns Bool {
+  left == right
+}
+
+fn require_ready(ready: Bool) returns Void {
+  if (!ready) { stop("not ready") }
+}
+
+export fn summarize(values: List<Int>, text: String) returns String
+  effects [capability.inspect] {
+  mut total: Int = 0;
+  for value in values {
+    total += value % 3;
+    if (total > 100) {
+      break;
+    } else if (value == 0) {
+      continue;
+    }
+  }
+  for index in 0..length(values) {
+    total -= index;
+  }
+  while (total < 0) {
+    total += 1;
+  }
+  loop {
+    total *= 2;
+    total /= 2;
+    total %= 7;
+    break;
+  }
+
+  let appended = list.append(values, total);
+  let replaced = list.set(appended, 0, total);
+  let first = list.get(replaced, 0);
+  let changed = list.try_set(replaced, 0, total);
+  let byte = bytes.get(to_bytes(text), 0);
+  let mapped = map.get(map { "total": total }, "total");
+  let sum = int.checked_add(total, 1);
+  let difference = int.checked_sub(total, 1);
+  let product = int.checked_mul(total, 2);
+  let quotient = int.checked_div(total, 2);
+  let remainder = int.checked_rem(total, 2);
+  let negated = int.checked_neg(total);
+
+  let split = string.split(text, ",");
+  let joined = string.join([text], " | ");
+  let byte_length = string.byte_length(joined);
+  let scalar = string.get(joined, 0);
+  let prefix = string.slice(joined, 0, 1);
+  let found = string.find(joined, text);
+  let valid = string.contains(joined, text)
+    && string.starts_with(joined, text)
+    || string.ends_with(joined, text);
+  let trimmed = string.trim_ascii(joined);
+  let decoded = string.from_utf8(to_bytes(joined));
+  let granted = capability.is_granted("net.http_get");
+  let grants = capability.granted();
+  `total ${to_string(total)}: ${string.concat(joined, text)}`
+}
+
+export async fn delegate(request: Prompt<String>, projection: Projection)
+  returns Result<String, SubAgentError>
+  effects [sub_agent.run, model.request, user.ask, permission.request_external_fs]
+{
+  await sub_agent.run<String>(request, projection)
+}
+
+export fn select_error(
+  agent: AgentError,
+  user: UserError,
+  sub_agent: SubAgentError,
+  model: ModelError,
+  permission: PermissionError,
+) returns PermissionError {
+  permission
+}

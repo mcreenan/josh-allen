@@ -1,0 +1,64 @@
+manifest {
+  language: "0.1"
+  entry: main
+  capabilities: [model.request, user.ask]
+}
+
+record Signals {
+  checkout_errors_per_thousand: Int
+  database_errors_per_thousand: Int
+  regions_affected: Int
+}
+
+record Hypothesis {
+  component: String
+  confidence: Int
+  evidence: String
+}
+
+record TriageReport {
+  action: String
+  approved: Bool
+  severity: String
+  suspected_component: String
+}
+
+export async fn main() returns TriageReport effects [model.request, user.ask] {
+  let signals = Signals {
+    checkout_errors_per_thousand: 184,
+    database_errors_per_thousand: 3,
+    regions_affected: 3
+  };
+  let severity = if (
+    signals.checkout_errors_per_thousand >= 100 && signals.regions_affected >= 2
+  ) { "SEV-1" } else { "SEV-2" };
+
+  let hypothesis = match await model.request<Hypothesis>(prompt {
+    system: "Identify the likeliest component from checkout-api or database. Ground the answer only in the supplied rates. Confidence is 0 through 100."
+    data: { signals }
+    output: Hypothesis
+  }) {
+    Ok(value) => value
+    Err(_) => Hypothesis { component: "unconfirmed", confidence: 0, evidence: "model unavailable" }
+  };
+  let valid = (hypothesis.component == "checkout-api" || hypothesis.component == "database")
+    && hypothesis.confidence >= 0 && hypothesis.confidence <= 100;
+  if (valid && hypothesis.component == "checkout-api" && hypothesis.confidence >= 70) {
+    let approved = match await user.ask<Bool>(prompt {
+      system: "Approve isolating checkout-api from new traffic? Return true or false."
+      data: { hypothesis, severity }
+      output: Bool
+    }) {
+      Ok(value) => value
+      Err(_) => false
+    };
+    TriageReport {
+      action: if (approved) { "isolate checkout-api" } else { "observe only" },
+      approved,
+      severity,
+      suspected_component: hypothesis.component
+    }
+  } else {
+    TriageReport { action: "escalate invalid or weak hypothesis", approved: false, severity, suspected_component: "unconfirmed" }
+  }
+}

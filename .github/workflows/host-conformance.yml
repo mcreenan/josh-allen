@@ -1,0 +1,39 @@
+name: Host conformance
+
+on:
+  pull_request:
+  push:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  conformance:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      HOST_CONFORMANCE_FUZZ_RUNS: "256"
+      HOST_CONFORMANCE_EVIDENCE_DIR: ${{ runner.temp }}/allen-host-conformance
+      HOST_CONFORMANCE_FUZZ_TOOLCHAIN: nightly
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.85.0
+          components: clippy, rustfmt
+      - name: Install nightly fuzz toolchain
+        run: rustup toolchain install nightly --profile minimal
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz --locked --version 0.12.0
+      - name: Test the installer
+        run: scripts/test-installer.sh
+      - name: Run conformance and fuzz smoke targets
+        run: scripts/host-conformance.sh
+      - name: Upload deterministic evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: host-conformance-evidence
+          path: ${{ runner.temp }}/allen-host-conformance
+          if-no-files-found: warn

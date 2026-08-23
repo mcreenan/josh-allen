@@ -1,0 +1,51 @@
+manifest {
+  language: "0.1"
+  entry: main
+  capabilities: [agent.ask]
+}
+
+record Reproduction {
+  assertions: Int
+  id: String
+  reproduces: Bool
+  setup_steps: Int
+}
+
+record Priority {
+  case_id: String
+  reason: String
+}
+
+record MinimizationReport {
+  minimum_steps: Int
+  selected_case: String
+  selection: String
+}
+
+export async fn main() returns MinimizationReport effects [agent.ask] {
+  let probes = [
+    Reproduction { assertions: 12, id: "full-suite", reproduces: true, setup_steps: 8 },
+    Reproduction { assertions: 3, id: "cache-race", reproduces: true, setup_steps: 3 },
+    Reproduction { assertions: 2, id: "timeout-race", reproduces: true, setup_steps: 3 },
+    Reproduction { assertions: 1, id: "single-request", reproduces: false, setup_steps: 1 }
+  ];
+  mut minimum = 100;
+  for probe in probes {
+    if (probe.reproduces && probe.setup_steps < minimum) { minimum = probe.setup_steps; }
+  }
+
+  let choice = match await agent.ask<Priority>(prompt {
+    system: "Two equally small failures remain. Pick cache-race or timeout-race for the next investigation; do not invent another case."
+    data: { minimum_steps: minimum, probes }
+    output: Priority
+  }) {
+    Ok(value) => value
+    Err(_) => Priority { case_id: "cache-race", reason: "agent unavailable" }
+  };
+  let allowed = choice.case_id == "cache-race" || choice.case_id == "timeout-race";
+  MinimizationReport {
+    minimum_steps: minimum,
+    selected_case: if (allowed) { choice.case_id } else { "cache-race" },
+    selection: if (allowed) { "agent-prioritized bounded tie" } else { "invalid agent choice replaced deterministically" }
+  }
+}

@@ -1,0 +1,12 @@
+manifest {
+  language: "0.1"
+  entry: main
+  capabilities: [agent.message]
+}
+
+export async fn main() returns String effects [agent.message] {
+  match await agent.message("Hello from an ALLEN program running through JOSH.") {
+    Ok(_) => "message accepted"
+    Err(error) => error.code
+  }
+}

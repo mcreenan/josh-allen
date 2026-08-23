@@ -1,0 +1,117 @@
+fn range_total(start: Int, end: Int) returns Int {
+  mut total = 0;
+  for index in start..end {
+    total = total + index;
+  }
+  total
+}
+
+fn range_snapshot_total() returns Int {
+  mut start = 1;
+  mut end = 4;
+  mut total = 0;
+  for value in start..end {
+    total = total + value;
+    start = 100;
+    end = 0 - 100;
+  }
+  total
+}
+
+fn while_total(limit: Int) returns Int {
+  mut index = 0;
+  mut total = 0;
+  while (index < limit) {
+    total = total + index;
+    index = index + 1;
+  }
+  total
+}
+
+fn break_after_three() returns Int {
+  mut value = 0;
+  loop {
+    value = value + 1;
+    if (value == 3) { break; }
+  }
+  value
+}
+
+fn nested_continue() returns Int {
+  mut total = 0;
+  for outer in 0..3 {
+    mut inner = 0;
+    loop {
+      inner = inner + 1;
+      if (inner == 1) { continue; }
+      total = total + outer;
+      break;
+    }
+  }
+  total
+}
+
+fn list_snapshot_total() returns Int {
+  mut values: List<Int> = [1, 2, 3];
+  mut total = 0;
+  for value in values {
+    total = total + value;
+    values = [99];
+  }
+  total
+}
+
+fn bytes_total() returns Int {
+  mut total = 0;
+  for byte in b"\x01\x02\xff" {
+    total = total + byte;
+  }
+  total
+}
+
+fn map_order() returns Int {
+  let values = map { "b": 2, "a": 1 };
+  mut packed = 0;
+  for (key, value) in values {
+    if (key == "a") {
+      packed = packed * 10 + value;
+    } else {
+      packed = packed * 10 + value;
+    }
+  }
+  packed
+}
+
+fn wildcard_count() returns Int {
+  mut count = 0;
+  for _ in [4, 5, 6] {
+    count = count + 1;
+  }
+  count
+}
+
+fn empty_count() returns Int {
+  let values: List<Int> = [];
+  mut count = 0;
+  for _ in values {
+    count = count + 1;
+  }
+  count
+}
+
+export fn main() returns (Int, Int, Int, Int, Int, Int, Int, Int, Int, Int, Int, Int) {
+  (
+    range_total(0, 5),
+    while_total(5),
+    break_after_three(),
+    nested_continue(),
+    list_snapshot_total(),
+    bytes_total(),
+    map_order(),
+    wildcard_count(),
+    empty_count(),
+    range_total(0 - 2, 2),
+    range_total(9223372036854775806, 9223372036854775807),
+    range_snapshot_total(),
+  )
+}

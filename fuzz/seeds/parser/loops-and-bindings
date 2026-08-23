@@ -1,0 +1,13 @@
+export fn main() returns Void {
+  let entries = map { "b": 2, "a": 1 };
+  for (key, value) in entries {
+    while (value > 0) {
+      loop {
+        if (key == "a") { continue; }
+        break;
+      }
+      break;
+    }
+  }
+  for _ in [1, 2, 3] { () }
+}

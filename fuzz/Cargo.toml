@@ -1,0 +1,71 @@
+[package]
+name = "allen-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+allen-bytecode = { path = "../crates/allen-bytecode" }
+allen-compiler = { path = "../crates/allen-compiler" }
+allen-http-get = { path = "../crates/allen-http-get" }
+allen-schema = { path = "../crates/allen-schema" }
+allen-testkit = { path = "../crates/allen-testkit" }
+allen-vm = { path = "../crates/allen-vm" }
+josh-protocol = { path = "../crates/josh-protocol" }
+libfuzzer-sys = "0.4"
+
+# Keep cargo-fuzz's standalone package out of the primary workspace.
+[workspace]
+members = ["."]
+
+[[bin]]
+name = "artifact_decoder"
+path = "fuzz_targets/artifact_decoder.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "bytecode_verifier"
+path = "fuzz_targets/bytecode_verifier.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "parser"
+path = "fuzz_targets/parser.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "protocol_decoder"
+path = "fuzz_targets/protocol_decoder.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "closed_error_replay"
+path = "fuzz_targets/closed_error_replay.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "schema_converter"
+path = "fuzz_targets/schema_converter.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "url_policy"
+path = "fuzz_targets/url_policy.rs"
+test = false
+doc = false
+bench = false

@@ -1,0 +1,8 @@
+async fn number() returns Int { 1 }
+
+export async fn main() returns Void effects [task.spawn] {
+  loop {
+    let task = spawn number();
+    continue;
+  }
+}

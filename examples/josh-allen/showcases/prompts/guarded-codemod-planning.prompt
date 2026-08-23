@@ -1,0 +1,4 @@
+Inspect a small, representative set of repository files and identify a useful
+repetitive refactor. Build a reviewable codemod plan, apply deterministic safety
+rules to every proposed edit, and use judgment only for ambiguous cases. Do not
+modify the repository; report approved, quarantined, and skipped changes.

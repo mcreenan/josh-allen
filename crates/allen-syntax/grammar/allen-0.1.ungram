@@ -1,0 +1,88 @@
+// ALLEN 0.1 concrete syntax inventory. Lexical terminals are quoted tokens;
+// they are intentionally not AST nodes. See docs/language-spec.md section 3.4.
+Source = InlineManifest? ImportDeclaration* Declaration* 'EOF'
+InlineManifest = 'manifest' '{' ManifestField (','? ManifestField)* ','? '}'
+ManifestField = 'language' ':' language_value:'string-literal'
+  | 'entry' ':' entry_name:'identifier'
+  | 'capabilities' ':' '[' (Capability (',' Capability)* ','?)? ']'
+  | 'http_origins' ':' '[' (http_origins:'string-literal' (',' http_origins:'string-literal')* ','?)? ']'
+  | 'tools' ':' '{' 'required' ':' '[' (ToolRequirement (',' ToolRequirement)* ','?)? ']' ','? '}'
+Capability = 'effect-id' ('(' 'identifier' ')')?
+ToolRequirement = '{' 'name' ':' tool_name:'string-literal' ',' 'version' ':' tool_version:'string-literal' ','? '}'
+ImportDeclaration = 'import' '{' ImportName (',' ImportName)* ','? '}' 'from' import_source:'string-literal' ';'
+ImportName = imported_name:'identifier' ('as' local_name:'identifier')?
+Declaration = RecordDeclaration | EnumDeclaration | TypeAliasDeclaration | FunctionDeclaration
+RecordDeclaration = 'export'? 'record' 'identifier' '{' (RecordField (','? RecordField)* ','?)? '}'
+RecordField = 'identifier' ':' Type
+EnumDeclaration = 'export'? 'enum' 'identifier' '{' EnumVariant (','? EnumVariant)* ','? '}'
+EnumVariant = 'identifier'
+  | 'identifier' '(' Type (',' Type)* ','? ')'
+  | 'identifier' '{' (RecordField (','? RecordField)* ','?)? '}'
+TypeAliasDeclaration = 'export'? 'type' 'identifier' '=' Type
+FunctionDeclaration = 'export'? 'async'? 'fn' 'identifier' GenericParameters? '(' (Parameter (',' Parameter)* ','?)? ')' 'returns' Type EffectClause? Body
+GenericParameters = '<' GenericParameter (',' GenericParameter)* ','? '>'
+GenericParameter = 'identifier' ':' 'Eq'
+Parameter = 'identifier' ':' Type
+EffectClause = 'effects' '[' ('effect-id' (',' 'effect-id')* ','?)? ']'
+Body = '{' Statement* Expression? '}'
+Statement = ('let' | 'mut') binding_name:'identifier' (':' Type)? '=' initializer:Expression ';'
+  | assignment_target:'identifier' ('=' | '+=' | '-=' | '*=' | '/=' | '%=') assignment_value:Expression ';'
+  | 'return' return_value:Expression? ';'
+  | ConditionalExpression
+  | WhileStatement | LoopStatement | ForStatement
+  | 'break' ';' | 'continue' ';'
+WhileStatement = 'while' '(' Expression ')' Body
+LoopStatement = 'loop' Body
+ForStatement = 'for' LoopBinding 'in' iterable:Expression ('..' range_end:Expression)? Body
+LoopBinding = 'identifier' | '_' | '(' LoopBindingItem ',' (LoopBindingItem (',' LoopBindingItem)* ','?)? ')'
+LoopBindingItem = 'identifier' | '_'
+Type = NamedType | GenericType | TupleType | RecordType | FunctionType
+NamedType = segments:'identifier' ('.' segments:'identifier')*
+GenericType = ('List' | 'Option' | 'Future' | 'Task' | 'Prompt') '<' type_argument:Type '>'
+  | ('Map' | 'Result') '<' first_type_argument:Type ',' second_type_argument:Type '>'
+TupleType = '(' (Type ',' (Type (',' Type)* ','?)?)? ')'
+RecordType = '{' (RecordField (','? RecordField)* ','?)? '}'
+FunctionType = 'fn' '(' (parameter_types:Type (',' parameter_types:Type)* ','?)? ')' 'returns' return_type:Type EffectClause?
+Expression = Disjunction
+Disjunction = Conjunction ('||' Conjunction)*
+Conjunction = Equality ('&&' Equality)*
+Equality = Comparison (('==' | '!=') Comparison)*
+Comparison = Addition (('<' | '<=' | '>' | '>=') Addition)*
+Addition = Multiplication (('+' | '-') Multiplication)*
+Multiplication = Unary (('*' | '/' | '%') Unary)*
+Unary = ('!' | '-' | 'await' | 'spawn') Unary | Postfix
+Postfix = Primary ('[' indices:Expression ']' | '.' field_names:'identifier' | call_type_arguments:TypeArgument? '(' (arguments:Expression (',' arguments:Expression)* ','?)? ')' | '?')*
+TypeArgument = '<' Type '>'
+Primary = Literal | TemplateLiteral | 'identifier' | 'map' | 'Some' | 'Ok' | 'Err'
+  | EnumRecordConstructor | QualifiedEnum
+  | RecordConstructor | AnonymousRecord | ListLiteral | MapLiteral | TupleOrGroup | MatchExpression
+  | ConditionalExpression | Closure | PromptExpression | AwaitBlock
+Literal = 'int-literal' | 'float-literal' | 'string-literal' | 'bytes-literal'
+  | 'true' | 'false' | 'None' | '(' ')'
+TemplateLiteral = open_backtick:'`' (TemplateSegment | TemplateInterpolation)* close_backtick:'`'
+TemplateSegment = TemplateTextOrEscape TemplateTextOrEscape*
+TemplateTextOrEscape = 'template-text-scalar' | 'template-escape'
+TemplateInterpolation = '${' Expression '}'
+QualifiedEnum = enum_name:'identifier' '.' variant_name:'identifier'
+EnumRecordConstructor = enum_name:'identifier' '.' variant_name:'identifier' '{' (RecordValueField (','? RecordValueField)* ','?)? '}'
+RecordConstructor = 'identifier' '{' (RecordValueField (','? RecordValueField)* ','?)? '}'
+AnonymousRecord = '{' (RecordValueField (','? RecordValueField)* ','?)? '}'
+RecordValueField = 'identifier' (':' Expression)?
+ListLiteral = '[' (Expression (',' Expression)* ','?)? ']'
+MapLiteral = 'map' '{' (keys:Expression ':' values:Expression (','? keys:Expression ':' values:Expression)* ','?)? '}'
+TupleOrGroup = '(' Expression (',' (Expression (',' Expression)* ','?)?)? ')'
+MatchExpression = 'match' scrutinee:Expression '{' MatchArm (','? MatchArm)* ','? '}'
+ConditionalExpression = 'if' '(' condition:Expression ')' then_branch:Body ('else' (else_if:ConditionalExpression | else_branch:Body))?
+MatchArm = Pattern '=>' Expression
+Pattern = '_' | 'true' | 'false' | RecordPattern | EnumPattern
+  | 'None' | ('Some' | 'Ok' | 'Err') '(' (binding_name:'identifier' | '_') ')'
+RecordPattern = 'identifier' '{' (PatternField (','? PatternField)* ','?)? '}'
+EnumPattern = enum_name:'identifier' '.' variant_name:'identifier' ( '(' (binding_names:'identifier' | '_') (',' (binding_names:'identifier' | '_'))* ','? ')'
+  | '{' (PatternField (','? PatternField)* ','?)? '}' )?
+PatternField = field_name:'identifier' (':' (binding_name:'identifier' | '_'))?
+Closure = 'fn' '(' (Parameter (',' Parameter)* ','?)? ')' 'returns' Type EffectClause? Body
+PromptExpression = 'prompt' '{' PromptField (','? PromptField)* ','? '}'
+PromptField = 'system' ':' system_value:Expression | 'context' ':' context_value:Expression
+  | 'data' ':' data_value:Expression | 'output' ':' output_type:Type
+  | 'policy' ':' '{' 'max_attempts' ':' max_attempts_value:'int-literal' ','? '}'
+AwaitBlock = 'await' Body

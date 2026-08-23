@@ -1,0 +1,11 @@
+fn factorial(value: Int) returns Int {
+  mut result: Int = 1;
+  for factor in 2..(value + 1) {
+    result *= factor;
+  }
+  result
+}
+
+export fn main() returns (Int, Int, Int, Int) {
+  (factorial(0), factorial(1), factorial(5), factorial(10))
+}

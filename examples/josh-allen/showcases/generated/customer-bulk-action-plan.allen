@@ -1,0 +1,89 @@
+manifest {
+  language: "0.1"
+  entry: main
+  capabilities: [agent.ask]
+}
+
+record CustomerAccount {
+  account_id: String
+  active: Bool
+  consented: Bool
+  balance_cents: Int
+  compliance_hold: Bool
+  eligibility_ambiguous: Bool
+}
+
+record AmbiguousAccountDecision {
+  account_id: String
+  disposition: String
+  rationale: String
+}
+
+record BulkActionPlan {
+  fixture: String
+  batch_limit: Int
+  approved_ids: List<String>
+  rejected_ids: List<String>
+  review_required_ids: List<String>
+  dry_run: String
+}
+
+export async fn main() returns BulkActionPlan effects [agent.ask] {
+  // Clearly synthetic and bounded: these six records are the entire fixture.
+  let accounts = [
+    CustomerAccount { account_id: "SYNTH-CRM-0001", active: true, consented: true, balance_cents: 0, compliance_hold: false, eligibility_ambiguous: false },
+    CustomerAccount { account_id: "SYNTH-CRM-0002", active: false, consented: true, balance_cents: 0, compliance_hold: false, eligibility_ambiguous: false },
+    CustomerAccount { account_id: "SYNTH-CRM-0003", active: true, consented: true, balance_cents: 0, compliance_hold: false, eligibility_ambiguous: true },
+    CustomerAccount { account_id: "SYNTH-CRM-0004", active: true, consented: true, balance_cents: 0, compliance_hold: false, eligibility_ambiguous: false },
+    CustomerAccount { account_id: "SYNTH-CRM-0005", active: true, consented: false, balance_cents: 0, compliance_hold: false, eligibility_ambiguous: false },
+    CustomerAccount { account_id: "SYNTH-CRM-0006", active: true, consented: true, balance_cents: 0, compliance_hold: false, eligibility_ambiguous: false }
+  ];
+  let batch_limit = 2;
+
+  // Exactly one account needs judgment; hard eligibility checks remain in ALLEN.
+  let ambiguous = match await agent.ask<AmbiguousAccountDecision>(prompt {
+    system: "Classify only synthetic account SYNTH-CRM-0003 as approve, reject, or review. Use only the embedded fields. Keep account_id exact; choose review when the fixture is insufficient."
+    data: { account: accounts[2], allowed_dispositions: ["approve", "reject", "review"] }
+    output: AmbiguousAccountDecision
+  }) {
+    Ok(value) => value
+    Err(_) => AmbiguousAccountDecision { account_id: "SYNTH-CRM-0003", disposition: "review", rationale: "agent unavailable" }
+  };
+
+  mut approved_ids: List<String> = [];
+  mut rejected_ids: List<String> = [];
+  mut review_required_ids: List<String> = [];
+
+  for account in accounts {
+    let hard_eligible = account.active && account.consented && account.balance_cents == 0 && !account.compliance_hold;
+    if (!hard_eligible) {
+      rejected_ids = list.append(rejected_ids, account.account_id);
+    } else if (account.eligibility_ambiguous) {
+      let decision_valid = ambiguous.account_id == account.account_id &&
+        (ambiguous.disposition == "approve" || ambiguous.disposition == "reject" || ambiguous.disposition == "review");
+      if (!decision_valid || ambiguous.disposition == "review") {
+        review_required_ids = list.append(review_required_ids, account.account_id);
+      } else if (ambiguous.disposition == "reject") {
+        rejected_ids = list.append(rejected_ids, account.account_id);
+      } else if (length(approved_ids) < batch_limit) {
+        approved_ids = list.append(approved_ids, account.account_id);
+      } else {
+        rejected_ids = list.append(rejected_ids, account.account_id);
+      }
+    } else if (length(approved_ids) < batch_limit) {
+      approved_ids = list.append(approved_ids, account.account_id);
+    } else {
+      // Strictly reject otherwise-eligible overflow; approvals can never exceed two.
+      rejected_ids = list.append(rejected_ids, account.account_id);
+    }
+  }
+
+  BulkActionPlan {
+    fixture: "synthetic customer accounts; exactly 6 records",
+    batch_limit,
+    approved_ids,
+    rejected_ids,
+    review_required_ids,
+    dry_run: "No CRM query or update occurred. This MVP cannot invoke arbitrary tools, access permissions, or reach the network from inside ALLEN."
+  }
+}

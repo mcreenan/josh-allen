@@ -1,0 +1,26 @@
+// pi π stays in trivia
+/* nested /* snow 雪 */ comment */
+import {thing as alias} from "pkg/é";
+record Box { value: List<String>, }
+fn render() returns String {
+  let text = "héllo\n";
+  let bytes = b"A\x42";
+  return `snow 雪 \``;
+}
+fn classify(value: Reading) returns Int {
+  let apply = fn(input: Int,) returns Int effects [tool.run@2,] { input };
+  match value {
+    None => apply(0)
+    Some(number) => apply(number),
+    Ok(_) => 1
+    Err(error) => 0,
+    Reading.Empty => 0
+    Reading.Number(number,) => number,
+    Reading.Named { value, label: _, } => value
+    Box { value: inner, } => inner,
+    true => 1
+    false => 0,
+    _ => 0
+  }
+}
+export type Texts = List<String>

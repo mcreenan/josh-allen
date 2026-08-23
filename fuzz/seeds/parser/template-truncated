@@ -1,0 +1,2 @@
+export fn malformed(value: String) returns String {
+  let text = `unterminated ${if (true) { `nested \q ${value}

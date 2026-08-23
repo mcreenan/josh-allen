@@ -1,0 +1,28 @@
+fn euler_totient(value: Int) returns Int {
+  mut remaining = value;
+  mut result = value;
+  mut factor: Int = 2;
+  while (factor * factor <= remaining) {
+    if (remaining % factor == 0) {
+      while (remaining % factor == 0) {
+        remaining /= factor;
+      }
+      result -= result / factor;
+    }
+    factor += 1;
+  }
+  if (remaining > 1) {
+    result -= result / remaining;
+  }
+  result
+}
+
+export fn main() returns (Int, Int, Int, Int, Int) {
+  (
+    euler_totient(1),
+    euler_totient(9),
+    euler_totient(10),
+    euler_totient(36),
+    euler_totient(97),
+  )
+}

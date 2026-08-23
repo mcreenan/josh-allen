@@ -1,0 +1,7 @@
+fn hidden() returns Int {
+  1
+}
+
+export fn visible() returns Int {
+  2
+}

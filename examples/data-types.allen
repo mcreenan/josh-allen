@@ -1,0 +1,48 @@
+record Point {
+  x: Int
+  y: Int
+}
+
+type Measurements = List<Int>
+type PointView = Point
+
+record Coordinates {
+  y: Int
+  x: Int
+}
+
+enum Reading {
+  Empty
+  Number(Int)
+  Named { value: Int, label: String }
+}
+
+export fn main() returns (Coordinates, Reading, Int, Int, String, Option<Int>, Result<Int, String>, Int, Option<Point>, Option<String>, Bool) {
+  let point: PointView = Point { y: 2, x: 1 };
+  let coordinates: Coordinates = point;
+  let sum = match point {
+    Point { x, y } => x + y
+  };
+  let reading = Reading.Named { value: 7, label: "cpu" };
+  let measured = match reading {
+    Reading.Empty => 0
+    Reading.Number(value) => value
+    Reading.Named { value, label: _ } => value
+  };
+  let measurements: Measurements = [sum, measured];
+  let flag = if (measured > 0) { "yes" } else { "no" };
+  let option: Option<Int> = Some(measured);
+  let selected = match option {
+    None => 0
+    Some(value) => value
+  };
+  let result: Result<Int, String> = Ok(selected + 1);
+  let result_value = match result {
+    Ok(value) => value
+    Err(_) => 0
+  };
+  let erased = to_unknown(point);
+  let narrowed: Option<Point> = narrow<Point>(erased);
+  let wrong: Option<String> = narrow<String>(erased);
+  (coordinates, reading, measurements[0], measurements[1], flag, option, result, result_value, narrowed, wrong, point == coordinates)
+}

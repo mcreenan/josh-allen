@@ -1,0 +1,13 @@
+enum State {
+  Ready
+  Waiting
+  Failed
+}
+
+export fn main() returns Int {
+  let state = State.Ready;
+  match state {
+    State.Ready => 1
+    State.Waiting => 2
+  }
+}

@@ -1,0 +1,22 @@
+manifest {
+  language: "0.1"
+  entry: main
+  capabilities: [sub_agent.run]
+}
+
+record Projection {
+  capabilities: List<String>
+  limits: Map<String, Int>
+  tools: List<String>
+}
+
+export async fn main() returns String effects [sub_agent.run] {
+  let projection = Projection { capabilities: [], limits: map {}, tools: [] };
+  match await sub_agent.run<String>(prompt {
+    system: "Return one short sentence explaining what this sub-agent demonstrated."
+    output: String
+  }, projection) {
+    Ok(answer) => answer
+    Err(error) => error.code
+  }
+}

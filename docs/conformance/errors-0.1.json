@@ -1,0 +1,936 @@
+{
+  "profile": "errors-0.1",
+  "bytecode_version": 13,
+  "channels": [
+    "diagnostic",
+    "result",
+    "trap",
+    "stopped"
+  ],
+  "registry": [
+    {
+      "code": "ARTIFACT_DIGEST_MISMATCH",
+      "channel": "diagnostic",
+      "retryable": "never"
+    },
+    {
+      "code": "ARTIFACT_DUPLICATE_SECTION",
+      "channel": "diagnostic",
+      "retryable": "never"
+    },
+    {
+      "code": "ARTIFACT_INVALID_DEBUG",
+      "channel": "diagnostic",
+      "retryable": "never"
+    },
+    {
+      "code": "ARTIFACT_INVALID_HEADER",
+      "channel": "diagnostic",
+      "retryable": "never"
+    },
+    {
+      "code": "ARTIFACT_INVALID_MAGIC",
+      "channel": "diagnostic",
+      "retryable": "never"
+    },
+    {
+      "code": "ARTIFACT_INVALID_SCALAR",
+      "channel": "diagnostic",
+      "retryable": "never"
+    },
+    {
+      "code": "ARTIFACT_INVALID_UTF8",
+      "channel": "diagnostic",
+      "retryable": "never"
+    },
+    {
+      "code": "ARTIFACT_LIMIT_EXCEEDED",
+      "channel": "diagnostic",
+      "retryable": "never"
+    },
+    {
+      "code": "ARTIFACT_MISSING_SECTION",
+      "channel": "diagnostic",
+      "retryable": "never"
+    },
+    {
+      "code": "ARTIFACT_NON_CANONICAL",
+      "channel": "diagnostic",
+      "retryable": "never"
+    },
+    {
+      "code": "ARTIFACT_SECTION_ORDER",
+      "channel": "diagnostic",
+      "retryable": "never"
+    },
+    {
+      "code": "ARTIFACT_SECTION_TOO_LARGE",
+      "channel": "diagnostic",
+      "retryable": "never"
+    },
+    {
+      "code": "ARTIFACT_TOO_LARGE",
+      "channel": "diagnostic",
+      "retryable": "never"
+    },
+    {
+      "code": "ARTIFACT_TRAILING_BYTES",
+      "channel": "diagnostic",
+      "retryable": "never"
+    },
+    {
+      "code": "ARTIFACT_TRUNCATED",
+      "channel": "diagnostic",
+      "retryable": "never"
+    },
+    {
+      "code": "ARTIFACT_UNKNOWN_SECTION",
+      "channel": "diagnostic",
+      "retryable": "never"
+    },
+    {
+      "code": "ARTIFACT_UNSUPPORTED_PROFILE",
+      "channel": "diagnostic",
+      "retryable": "never"
+    },
+    {
+      "code": "ARTIFACT_UNSUPPORTED_VERSION",
+      "channel": "diagnostic",
+      "retryable": "never"
+    },
+    {
+      "code": "ARTIFACT_VERIFICATION_FAILED",
+      "channel": "diagnostic",
+      "retryable": "never"
+    },
+    {
+      "code": "E0002",
+      "channel": "diagnostic",
+      "retryable": "never"
+    },
+    {
+      "code": "E0003",
+      "channel": "diagnostic",
+      "retryable": "never"
+    },
+    {
+      "code": "E0004",
+      "channel": "diagnostic",
+      "retryable": "never"
+    },
+    {
+      "code": "E0005",
+      "channel": "diagnostic",
+      "retryable": "never"
+    },
+    {
+      "code": "E2003",
+      "channel": "diagnostic",
+      "retryable": "never"
+    },
+    {
+      "code": "E2009",
+      "channel": "diagnostic",
+      "retryable": "never"
+    },
+    {
+      "code": "E2011",
+      "channel": "diagnostic",
+      "retryable": "never"
+    },
+    {
+      "code": "E2012",
+      "channel": "diagnostic",
+      "retryable": "never"
+    },
+    {
+      "code": "E2015",
+      "channel": "diagnostic",
+      "retryable": "never"
+    },
+    {
+      "code": "E2016",
+      "channel": "diagnostic",
+      "retryable": "never"
+    },
+    {
+      "code": "E2017",
+      "channel": "diagnostic",
+      "retryable": "never"
+    },
+    {
+      "code": "E2018",
+      "channel": "diagnostic",
+      "retryable": "never"
+    },
+    {
+      "code": "E2019",
+      "channel": "diagnostic",
+      "retryable": "never"
+    },
+    {
+      "code": "E2020",
+      "channel": "diagnostic",
+      "retryable": "never"
+    },
+    {
+      "code": "E2403",
+      "channel": "diagnostic",
+      "retryable": "never"
+    },
+    {
+      "code": "E3002",
+      "channel": "diagnostic",
+      "retryable": "never"
+    },
+    {
+      "code": "E3003",
+      "channel": "diagnostic",
+      "retryable": "never"
+    },
+    {
+      "code": "E3005",
+      "channel": "diagnostic",
+      "retryable": "never"
+    },
+    {
+      "code": "E3007",
+      "channel": "diagnostic",
+      "retryable": "never"
+    },
+    {
+      "code": "E3008",
+      "channel": "diagnostic",
+      "retryable": "never"
+    },
+    {
+      "code": "E3010",
+      "channel": "diagnostic",
+      "retryable": "never"
+    },
+    {
+      "code": "E3011",
+      "channel": "diagnostic",
+      "retryable": "never"
+    },
+    {
+      "code": "agent.denied",
+      "channel": "result",
+      "retryable": "never"
+    },
+    {
+      "code": "agent.unavailable",
+      "channel": "result",
+      "retryable": "caller"
+    },
+    {
+      "code": "agent.validation_failed",
+      "channel": "result",
+      "retryable": "caller"
+    },
+    {
+      "code": "arithmetic.division_by_zero",
+      "channel": "trap",
+      "retryable": "never"
+    },
+    {
+      "code": "arithmetic.overflow",
+      "channel": "trap",
+      "retryable": "never"
+    },
+    {
+      "code": "fs.hard_link_denied",
+      "channel": "result",
+      "retryable": "never"
+    },
+    {
+      "code": "fs.invalid_path",
+      "channel": "result",
+      "retryable": "never"
+    },
+    {
+      "code": "fs.invalid_utf8",
+      "channel": "result",
+      "retryable": "never"
+    },
+    {
+      "code": "fs.io",
+      "channel": "result",
+      "retryable": "caller"
+    },
+    {
+      "code": "fs.is_directory",
+      "channel": "result",
+      "retryable": "never"
+    },
+    {
+      "code": "fs.not_directory",
+      "channel": "result",
+      "retryable": "never"
+    },
+    {
+      "code": "fs.not_found",
+      "channel": "result",
+      "retryable": "never"
+    },
+    {
+      "code": "fs.permission_denied",
+      "channel": "result",
+      "retryable": "never"
+    },
+    {
+      "code": "fs.special_file_denied",
+      "channel": "result",
+      "retryable": "never"
+    },
+    {
+      "code": "fs.symlink_denied",
+      "channel": "result",
+      "retryable": "never"
+    },
+    {
+      "code": "fs.target_changed",
+      "channel": "result",
+      "retryable": "caller"
+    },
+    {
+      "code": "fs.unavailable",
+      "channel": "result",
+      "retryable": "caller"
+    },
+    {
+      "code": "fs.unsupported_platform",
+      "channel": "result",
+      "retryable": "never"
+    },
+    {
+      "code": "index.out_of_bounds",
+      "channel": "trap",
+      "retryable": "never"
+    },
+    {
+      "code": "lock.invalid",
+      "channel": "diagnostic",
+      "retryable": "never"
+    },
+    {
+      "code": "lock.mismatch",
+      "channel": "diagnostic",
+      "retryable": "never"
+    },
+    {
+      "code": "lock.non_canonical",
+      "channel": "diagnostic",
+      "retryable": "never"
+    },
+    {
+      "code": "manifest.capability",
+      "channel": "diagnostic",
+      "retryable": "never"
+    },
+    {
+      "code": "manifest.dependency",
+      "channel": "diagnostic",
+      "retryable": "never"
+    },
+    {
+      "code": "manifest.entry",
+      "channel": "diagnostic",
+      "retryable": "never"
+    },
+    {
+      "code": "manifest.invalid",
+      "channel": "diagnostic",
+      "retryable": "never"
+    },
+    {
+      "code": "manifest.limit",
+      "channel": "diagnostic",
+      "retryable": "never"
+    },
+    {
+      "code": "manifest.tool",
+      "channel": "diagnostic",
+      "retryable": "never"
+    },
+    {
+      "code": "map.duplicate_key",
+      "channel": "trap",
+      "retryable": "never"
+    },
+    {
+      "code": "map.key_not_found",
+      "channel": "trap",
+      "retryable": "never"
+    },
+    {
+      "code": "model.denied",
+      "channel": "result",
+      "retryable": "never"
+    },
+    {
+      "code": "model.unavailable",
+      "channel": "result",
+      "retryable": "caller"
+    },
+    {
+      "code": "model.validation_failed",
+      "channel": "result",
+      "retryable": "caller"
+    },
+    {
+      "code": "net.connect_timeout",
+      "channel": "result",
+      "retryable": "caller"
+    },
+    {
+      "code": "net.destination_denied",
+      "channel": "result",
+      "retryable": "never"
+    },
+    {
+      "code": "net.dns",
+      "channel": "result",
+      "retryable": "caller"
+    },
+    {
+      "code": "net.dns_timeout",
+      "channel": "result",
+      "retryable": "caller"
+    },
+    {
+      "code": "net.first_byte_timeout",
+      "channel": "result",
+      "retryable": "caller"
+    },
+    {
+      "code": "net.idle_timeout",
+      "channel": "result",
+      "retryable": "caller"
+    },
+    {
+      "code": "net.invalid_limits",
+      "channel": "result",
+      "retryable": "never"
+    },
+    {
+      "code": "net.invalid_url",
+      "channel": "result",
+      "retryable": "never"
+    },
+    {
+      "code": "net.io",
+      "channel": "result",
+      "retryable": "caller"
+    },
+    {
+      "code": "net.origin_denied",
+      "channel": "result",
+      "retryable": "never"
+    },
+    {
+      "code": "net.peer_mismatch",
+      "channel": "result",
+      "retryable": "never"
+    },
+    {
+      "code": "net.permission_denied",
+      "channel": "result",
+      "retryable": "never"
+    },
+    {
+      "code": "net.protocol",
+      "channel": "result",
+      "retryable": "never"
+    },
+    {
+      "code": "net.redirect_invalid",
+      "channel": "result",
+      "retryable": "never"
+    },
+    {
+      "code": "net.tls",
+      "channel": "result",
+      "retryable": "caller"
+    },
+    {
+      "code": "net.total_timeout",
+      "channel": "result",
+      "retryable": "caller"
+    },
+    {
+      "code": "net.unsupported_encoding",
+      "channel": "result",
+      "retryable": "never"
+    },
+    {
+      "code": "network.unavailable",
+      "channel": "result",
+      "retryable": "caller"
+    },
+    {
+      "code": "package.count_limit",
+      "channel": "diagnostic",
+      "retryable": "never"
+    },
+    {
+      "code": "package.dependency_cycle",
+      "channel": "diagnostic",
+      "retryable": "never"
+    },
+    {
+      "code": "package.depth_limit",
+      "channel": "diagnostic",
+      "retryable": "never"
+    },
+    {
+      "code": "package.duplicate_identity",
+      "channel": "diagnostic",
+      "retryable": "never"
+    },
+    {
+      "code": "package.io",
+      "channel": "diagnostic",
+      "retryable": "never"
+    },
+    {
+      "code": "package.language",
+      "channel": "diagnostic",
+      "retryable": "never"
+    },
+    {
+      "code": "package.language_conflict",
+      "channel": "diagnostic",
+      "retryable": "never"
+    },
+    {
+      "code": "package.missing_source",
+      "channel": "diagnostic",
+      "retryable": "never"
+    },
+    {
+      "code": "package.module_limit",
+      "channel": "diagnostic",
+      "retryable": "never"
+    },
+    {
+      "code": "package.name",
+      "channel": "diagnostic",
+      "retryable": "never"
+    },
+    {
+      "code": "package.path_escape",
+      "channel": "diagnostic",
+      "retryable": "never"
+    },
+    {
+      "code": "package.source_bytes_limit",
+      "channel": "diagnostic",
+      "retryable": "never"
+    },
+    {
+      "code": "package.special_file",
+      "channel": "diagnostic",
+      "retryable": "never"
+    },
+    {
+      "code": "package.symlink",
+      "channel": "diagnostic",
+      "retryable": "never"
+    },
+    {
+      "code": "package.version",
+      "channel": "diagnostic",
+      "retryable": "never"
+    },
+    {
+      "code": "package.version_conflict",
+      "channel": "diagnostic",
+      "retryable": "never"
+    },
+    {
+      "code": "permission.denied",
+      "channel": "result",
+      "retryable": "never"
+    },
+    {
+      "code": "permission.unavailable",
+      "channel": "result",
+      "retryable": "caller"
+    },
+    {
+      "code": "protocol.violation",
+      "channel": "trap",
+      "retryable": "never"
+    },
+    {
+      "code": "replay.diverged",
+      "channel": "diagnostic",
+      "retryable": "never"
+    },
+    {
+      "code": "replay.runtime_diverged",
+      "channel": "trap",
+      "retryable": "never"
+    },
+    {
+      "code": "resource.input_bytes",
+      "channel": "diagnostic",
+      "retryable": "never"
+    },
+    {
+      "code": "resource.limit",
+      "channel": "trap",
+      "retryable": "never"
+    },
+    {
+      "code": "runtime.cancelled",
+      "channel": "trap",
+      "retryable": "never"
+    },
+    {
+      "code": "runtime.capability_denied",
+      "channel": "diagnostic",
+      "retryable": "never"
+    },
+    {
+      "code": "runtime.entry_not_found",
+      "channel": "diagnostic",
+      "retryable": "never"
+    },
+    {
+      "code": "runtime.invalid_input",
+      "channel": "diagnostic",
+      "retryable": "never"
+    },
+    {
+      "code": "runtime.manifest_invalid",
+      "channel": "diagnostic",
+      "retryable": "never"
+    },
+    {
+      "code": "runtime.panic",
+      "channel": "trap",
+      "retryable": "never"
+    },
+    {
+      "code": "runtime.timeout",
+      "channel": "trap",
+      "retryable": "never"
+    },
+    {
+      "code": "runtime.workspace_unavailable",
+      "channel": "diagnostic",
+      "retryable": "never"
+    },
+    {
+      "code": "schema.cyclic_reference",
+      "channel": "diagnostic",
+      "retryable": "never"
+    },
+    {
+      "code": "schema.duplicate_key",
+      "channel": "diagnostic",
+      "retryable": "never"
+    },
+    {
+      "code": "schema.invalid_bound",
+      "channel": "diagnostic",
+      "retryable": "never"
+    },
+    {
+      "code": "schema.invalid_form",
+      "channel": "diagnostic",
+      "retryable": "never"
+    },
+    {
+      "code": "schema.invalid_json",
+      "channel": "diagnostic",
+      "retryable": "never"
+    },
+    {
+      "code": "schema.invalid_reference",
+      "channel": "diagnostic",
+      "retryable": "never"
+    },
+    {
+      "code": "schema.limit",
+      "channel": "diagnostic",
+      "retryable": "never"
+    },
+    {
+      "code": "schema.unsorted_set",
+      "channel": "diagnostic",
+      "retryable": "never"
+    },
+    {
+      "code": "schema.unsupported_keyword",
+      "channel": "diagnostic",
+      "retryable": "never"
+    },
+    {
+      "code": "schema.unused_definition",
+      "channel": "diagnostic",
+      "retryable": "never"
+    },
+    {
+      "code": "sub_agent.denied",
+      "channel": "result",
+      "retryable": "never"
+    },
+    {
+      "code": "sub_agent.unavailable",
+      "channel": "result",
+      "retryable": "caller"
+    },
+    {
+      "code": "sub_agent.validation_failed",
+      "channel": "result",
+      "retryable": "caller"
+    },
+    {
+      "code": "tool.catalog_mismatch",
+      "channel": "diagnostic",
+      "retryable": "never"
+    },
+    {
+      "code": "tool.denied",
+      "channel": "result",
+      "retryable": "never"
+    },
+    {
+      "code": "tool.schema",
+      "channel": "result",
+      "retryable": "never"
+    },
+    {
+      "code": "tool.unavailable",
+      "channel": "result",
+      "retryable": "caller"
+    },
+    {
+      "code": "user.denied",
+      "channel": "result",
+      "retryable": "never"
+    },
+    {
+      "code": "user.unavailable",
+      "channel": "result",
+      "retryable": "caller"
+    },
+    {
+      "code": "user.validation_failed",
+      "channel": "result",
+      "retryable": "caller"
+    }
+  ],
+  "operations": [
+    {
+      "operation": "fs.read_text",
+      "codes": [
+        "fs.hard_link_denied",
+        "fs.invalid_path",
+        "fs.invalid_utf8",
+        "fs.io",
+        "fs.is_directory",
+        "fs.not_directory",
+        "fs.not_found",
+        "fs.permission_denied",
+        "fs.special_file_denied",
+        "fs.symlink_denied",
+        "fs.target_changed",
+        "fs.unavailable",
+        "fs.unsupported_platform",
+        "resource.limit"
+      ]
+    },
+    {
+      "operation": "fs.read_bytes",
+      "codes": [
+        "fs.hard_link_denied",
+        "fs.invalid_path",
+        "fs.io",
+        "fs.is_directory",
+        "fs.not_directory",
+        "fs.not_found",
+        "fs.permission_denied",
+        "fs.special_file_denied",
+        "fs.symlink_denied",
+        "fs.target_changed",
+        "fs.unavailable",
+        "fs.unsupported_platform",
+        "resource.limit"
+      ]
+    },
+    {
+      "operation": "fs.write_text",
+      "codes": [
+        "fs.hard_link_denied",
+        "fs.invalid_path",
+        "fs.io",
+        "fs.not_directory",
+        "fs.permission_denied",
+        "fs.special_file_denied",
+        "fs.symlink_denied",
+        "fs.target_changed",
+        "fs.unavailable",
+        "fs.unsupported_platform",
+        "resource.limit"
+      ]
+    },
+    {
+      "operation": "fs.write_bytes",
+      "codes": [
+        "fs.hard_link_denied",
+        "fs.invalid_path",
+        "fs.io",
+        "fs.not_directory",
+        "fs.permission_denied",
+        "fs.special_file_denied",
+        "fs.symlink_denied",
+        "fs.target_changed",
+        "fs.unavailable",
+        "fs.unsupported_platform",
+        "resource.limit"
+      ]
+    },
+    {
+      "operation": "fs.list",
+      "codes": [
+        "fs.hard_link_denied",
+        "fs.invalid_path",
+        "fs.invalid_utf8",
+        "fs.io",
+        "fs.not_directory",
+        "fs.not_found",
+        "fs.permission_denied",
+        "fs.special_file_denied",
+        "fs.symlink_denied",
+        "fs.target_changed",
+        "fs.unavailable",
+        "fs.unsupported_platform",
+        "resource.limit"
+      ]
+    },
+    {
+      "operation": "http.get",
+      "codes": [
+        "net.connect_timeout",
+        "net.destination_denied",
+        "net.dns",
+        "net.dns_timeout",
+        "net.first_byte_timeout",
+        "net.idle_timeout",
+        "net.invalid_limits",
+        "net.invalid_url",
+        "net.io",
+        "net.origin_denied",
+        "net.peer_mismatch",
+        "net.permission_denied",
+        "net.protocol",
+        "net.redirect_invalid",
+        "net.tls",
+        "net.total_timeout",
+        "net.unsupported_encoding",
+        "network.unavailable",
+        "resource.limit"
+      ]
+    },
+    {
+      "operation": "agent.message",
+      "codes": [
+        "agent.denied",
+        "agent.unavailable"
+      ]
+    },
+    {
+      "operation": "agent.ask",
+      "codes": [
+        "agent.denied",
+        "agent.unavailable",
+        "agent.validation_failed"
+      ]
+    },
+    {
+      "operation": "agent.transcript",
+      "codes": [
+        "agent.denied",
+        "agent.unavailable"
+      ]
+    },
+    {
+      "operation": "model.request",
+      "codes": [
+        "model.denied",
+        "model.unavailable",
+        "model.validation_failed"
+      ]
+    },
+    {
+      "operation": "user.ask",
+      "codes": [
+        "user.denied",
+        "user.unavailable",
+        "user.validation_failed"
+      ]
+    },
+    {
+      "operation": "sub_agent.create",
+      "codes": [
+        "sub_agent.denied",
+        "sub_agent.unavailable"
+      ]
+    },
+    {
+      "operation": "sub_agent.run",
+      "codes": [
+        "sub_agent.denied",
+        "sub_agent.unavailable",
+        "sub_agent.validation_failed"
+      ]
+    },
+    {
+      "operation": "sub_agent.message",
+      "codes": [
+        "sub_agent.denied",
+        "sub_agent.unavailable"
+      ]
+    },
+    {
+      "operation": "sub_agent.ask",
+      "codes": [
+        "sub_agent.denied",
+        "sub_agent.unavailable",
+        "sub_agent.validation_failed"
+      ]
+    },
+    {
+      "operation": "permission.request_file",
+      "codes": [
+        "permission.denied",
+        "permission.unavailable"
+      ]
+    },
+    {
+      "operation": "permission.request_directory",
+      "codes": [
+        "permission.denied",
+        "permission.unavailable"
+      ]
+    },
+    {
+      "operation": "generated_tool.call",
+      "codes": [
+        "tool.denied",
+        "tool.schema",
+        "tool.unavailable"
+      ]
+    }
+  ],
+  "outcomes": [
+    {
+      "outcome": "stopped",
+      "channel": "stopped"
+    }
+  ]
+}

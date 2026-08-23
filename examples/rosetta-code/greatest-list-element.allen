@@ -1,0 +1,13 @@
+fn greatest(values: List<Int>) returns Int {
+  mut result = values[0];
+  for value in values {
+    if (value > result) {
+      result = value;
+    }
+  }
+  result
+}
+
+export fn main() returns Int {
+  greatest([-3, 17, 4, 12, 9])
+}

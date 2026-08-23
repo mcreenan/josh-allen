@@ -1,0 +1,2 @@
+/* outer // quote " brace { /* nested */ still outer */ // line
+export fn main() returns Int { 8 }

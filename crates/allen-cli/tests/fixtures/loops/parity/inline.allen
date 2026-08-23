@@ -1,0 +1,25 @@
+manifest {
+  language: "0.1"
+  entry: main
+  capabilities: []
+}
+
+fn total(values: List<Int>) returns Int {
+  mut total = 0;
+  for value in values {
+    total = total + value;
+  }
+  total
+}
+
+export fn main() returns Int {
+  mut value = 0;
+  while (value < 3) {
+    value = value + 1;
+  }
+  loop {
+    if (value == 6) { break; }
+    value = value + 1;
+  }
+  total([1, 2, 3]) + value
+}

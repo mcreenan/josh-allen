@@ -1,0 +1,17 @@
+manifest {
+  language: "0.1"
+  entry: main
+  capabilities: []
+  tools: {
+    required: [
+      { name: "allen_integration_echo", version: ">=1.0.0, <2.0.0" }
+    ]
+  }
+}
+
+export async fn main() returns String effects [tool.allen_integration_echo@1] {
+  match await tools.allen_integration_echo.call({ text: "hello through JOSH" }) {
+    Ok(output) => output.text
+    Err(_) => "echo unavailable"
+  }
+}

@@ -1,0 +1,38 @@
+#!/usr/bin/env bash
+# Launch the JOSH/ALLEN stdio MCP bridge.
+set -euo pipefail
+
+script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+plugin_root="$(cd -- "$script_dir/.." && pwd)"
+server="$plugin_root/mcp/server.py"
+
+if [[ ! -f "$server" ]]; then
+  printf '%s\n' "josh-allen-mcp: bridge server is missing: $server" >&2
+  exit 2
+fi
+
+if [[ -n "${JOSH_ALLEN_JOSH_BIN:-}" ]]; then
+  if [[ ! -x "$JOSH_ALLEN_JOSH_BIN" ]]; then
+    printf '%s\n' "josh-allen-mcp: JOSH_ALLEN_JOSH_BIN is not executable" >&2
+    exit 2
+  fi
+elif command -v josh >/dev/null 2>&1; then
+  JOSH_ALLEN_JOSH_BIN="$(command -v josh)"
+  export JOSH_ALLEN_JOSH_BIN
+elif [[ -x "${HOME:-}/.local/bin/josh" ]]; then
+  JOSH_ALLEN_JOSH_BIN="${HOME}/.local/bin/josh"
+  export JOSH_ALLEN_JOSH_BIN
+elif [[ -f "$plugin_root/../../Cargo.toml" ]] && command -v cargo >/dev/null 2>&1; then
+  repo_root="$(cd -- "$plugin_root/../.." && pwd)"
+  if [[ ! -x "$repo_root/target/debug/josh" ]]; then
+    printf '%s\n' "josh-allen-mcp: building the local JOSH executable" >&2
+    (cd "$repo_root" && cargo build -p josh)
+  fi
+  JOSH_ALLEN_JOSH_BIN="$repo_root/target/debug/josh"
+  export JOSH_ALLEN_JOSH_BIN
+else
+  printf '%s\n' "josh-allen-mcp: JOSH is missing; install the josh executable on PATH" >&2
+  exit 2
+fi
+
+exec python3 "$server"

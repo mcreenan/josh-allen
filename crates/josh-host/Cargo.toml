@@ -1,0 +1,23 @@
+[package]
+name = "josh-host"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+allen-bytecode = { path = "../allen-bytecode" }
+allen-compiler = { path = "../allen-compiler" }
+allen-package = { path = "../allen-package" }
+allen-runtime = { path = "../allen-runtime" }
+allen-sandbox-fs = { path = "../allen-sandbox-fs" }
+allen-schema = { path = "../allen-schema" }
+allen-vm = { path = "../allen-vm" }
+base64 = "0.22"
+josh-protocol = { path = "../josh-protocol" }
+serde = "1.0"
+serde_json = "1.0"
+sha2 = "0.10"
+
+[lints]
+workspace = true

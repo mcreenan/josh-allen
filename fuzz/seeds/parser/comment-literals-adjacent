@@ -1,0 +1,4 @@
+export fn main() returns (String, Bytes, Int) {
+  ("// /* */", b"// /* */", /* before */ 8 // after
+  )
+}

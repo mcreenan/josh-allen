@@ -1,0 +1,4 @@
+Reconcile a tiny, non-sensitive set of invoice-like records using exact
+integer-cent arithmetic. Match everything deterministic first, use judgment
+only for an ambiguous vendor description, and return reconciled totals plus a
+clear exception list. Do not access a real accounting system.

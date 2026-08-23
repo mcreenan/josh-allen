@@ -1,0 +1,19 @@
+async fn answer() returns Int {
+  42
+}
+
+export async fn main() returns (String, Int, Option<String>, Int, String, Int) effects [debug.inspect, task.spawn] {
+  await {
+    let task = spawn answer();
+    let snapshot = allen.internal.task_snapshot(task);
+    let value = await task;
+    (
+      snapshot.function,
+      snapshot.id,
+      snapshot.location,
+      snapshot.owner_id,
+      snapshot.state,
+      value,
+    )
+  }
+}

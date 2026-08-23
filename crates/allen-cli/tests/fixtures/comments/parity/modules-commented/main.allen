@@ -1,0 +1,7 @@
+// The imported module is comment-bearing too.
+import { answer } from "./support.allen"; /* import boundary */
+
+export fn main() returns Int {
+  let delimiters = ("// /* */", b"// /* */");
+  answer() /* expression boundary */
+}

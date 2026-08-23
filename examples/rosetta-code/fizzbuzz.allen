@@ -1,0 +1,19 @@
+fn is_divisible(value: Int, divisor: Int) returns Bool {
+  value % divisor == 0
+}
+
+fn fizzbuzz(value: Int) returns String {
+  if (is_divisible(value, 15)) {
+    "FizzBuzz"
+  } else if (is_divisible(value, 3)) {
+    "Fizz"
+  } else if (is_divisible(value, 5)) {
+    "Buzz"
+  } else {
+    "Number"
+  }
+}
+
+export fn main() returns (String, String, String, String, String) {
+  (fizzbuzz(1), fizzbuzz(3), fizzbuzz(5), fizzbuzz(15), fizzbuzz(98))
+}

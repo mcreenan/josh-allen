@@ -1,0 +1,83 @@
+manifest {
+  language: "0.1"
+  entry: main
+  capabilities: [agent.ask]
+}
+
+record FailureEvidence {
+  case_id: String
+  source: String
+  signature: String
+  setup_steps: Int
+  failed: Bool
+}
+
+record TieChoice {
+  case_id: String
+  reason: String
+}
+
+record ReproducerGroup {
+  group: String
+  members: Int
+  minimum_steps: Int
+  selected_case: Option<String>
+  basis: String
+}
+
+record ReductionReport {
+  evidence_count: Int
+  groups: Int
+  first: ReproducerGroup
+  second: ReproducerGroup
+  limitation: String
+}
+
+export async fn main() returns ReductionReport effects [agent.ask] {
+  // Bounded evidence embedded by Codex from repository test names/output.
+  // ALLEN itself cannot inspect files, run tests, use the shell, or access net.
+  let evidence = [
+    FailureEvidence { case_id: "syntax-contract", source: "crates/allen-syntax/tests/syntax_contract.rs", signature: "parse-tree-mismatch", setup_steps: 2, failed: true },
+    FailureEvidence { case_id: "typed-ast", source: "crates/allen-syntax/tests/typed_ast.rs", signature: "parse-tree-mismatch", setup_steps: 2, failed: true },
+    FailureEvidence { case_id: "runner-cli", source: "crates/josh/tests/runner_cli.rs", signature: "protocol-timeout", setup_steps: 2, failed: true },
+    FailureEvidence { case_id: "tool-roundtrip", source: "crates/josh/tests/tool_roundtrip.rs", signature: "protocol-timeout", setup_steps: 2, failed: true },
+    FailureEvidence { case_id: "editor-fixtures", source: "crates/allen-syntax/tests/editor_fixtures.rs", signature: "pass", setup_steps: 1, failed: false }
+  ];
+
+  mut syntax_min = 100;
+  mut protocol_min = 100;
+  mut syntax_members = 0;
+  mut protocol_members = 0;
+  for item in evidence {
+    if (item.failed && item.signature == "parse-tree-mismatch") {
+      syntax_members = syntax_members + 1;
+      if (item.setup_steps < syntax_min) { syntax_min = item.setup_steps; }
+    }
+    if (item.failed && item.signature == "protocol-timeout") {
+      protocol_members = protocol_members + 1;
+      if (item.setup_steps < protocol_min) { protocol_min = item.setup_steps; }
+    }
+  }
+
+  // Both groups are equally small; evidence cannot select which to investigate.
+  let tie = match await agent.ask<TieChoice>(prompt {
+    system: "Evidence leaves two minimal failure groups tied. Choose exactly syntax-contract or runner-cli. Do not add a case or claim a test was run."
+    data: { syntax_members, protocol_members, syntax_min, protocol_min }
+    output: TieChoice
+  }) {
+    Ok(value) => value
+    Err(_) => TieChoice { case_id: "syntax-contract", reason: "agent unavailable; deterministic fallback" }
+  };
+  let chosen = if (tie.case_id == "runner-cli") { "runner-cli" } else { "syntax-contract" };
+  let absent: Option<String> = None;
+  let first_selected = if (chosen == "syntax-contract") { Some(chosen) } else { absent };
+  let second_selected = if (chosen == "runner-cli") { Some(chosen) } else { absent };
+
+  ReductionReport {
+    evidence_count: 5,
+    groups: 2,
+    first: ReproducerGroup { group: "parse-tree-mismatch", members: syntax_members, minimum_steps: syntax_min, selected_case: first_selected, basis: if (chosen == "syntax-contract") { tie.reason } else { "deterministic grouping; tied group not selected" } },
+    second: ReproducerGroup { group: "protocol-timeout", members: protocol_members, minimum_steps: protocol_min, selected_case: second_selected, basis: if (chosen == "runner-cli") { tie.reason } else { "deterministic grouping; tied group not selected" } },
+    limitation: "MVP reduction only: Codex embedded 5 bounded observations; ALLEN did not run tests or access files, shell, or network."
+  }
+}

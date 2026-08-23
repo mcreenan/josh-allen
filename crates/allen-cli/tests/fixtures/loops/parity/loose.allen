@@ -1,0 +1,15 @@
+fn ordered_total(values: Map<String, Int>) returns Int {
+  mut total = 0;
+  for (key, value) in values {
+    if (key == "a") {
+      total = total + value;
+    } else {
+      total = total * 10 + value;
+    }
+  }
+  total
+}
+
+export fn main() returns Int {
+  ordered_total(map { "b": 2, "a": 1 })
+}

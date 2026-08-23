@@ -1,0 +1,13 @@
+async fn number() returns Void { () }
+
+async fn skipped() returns Void effects [task.spawn] {
+  while (false) {
+    let task = spawn number();
+    let ignored = await task;
+  }
+  ()
+}
+
+export async fn main() returns Void effects [task.spawn] {
+  await skipped()
+}

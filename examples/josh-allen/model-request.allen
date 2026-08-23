@@ -1,0 +1,15 @@
+manifest {
+  language: "0.1"
+  entry: main
+  capabilities: [model.request]
+}
+
+export async fn main() returns String effects [model.request] {
+  match await model.request<String>(prompt {
+    system: "Name one benefit of typed agent protocols in five words or fewer."
+    output: String
+  }) {
+    Ok(answer) => answer
+    Err(error) => error.code
+  }
+}

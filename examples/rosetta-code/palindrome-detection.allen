@@ -1,0 +1,17 @@
+fn reverse_digits(value: Int) returns Int {
+  mut remaining = value;
+  mut reversed: Int = 0;
+  while (remaining > 0) {
+    reversed = reversed * 10 + remaining % 10;
+    remaining /= 10;
+  }
+  reversed
+}
+
+fn is_palindrome(value: Int) returns Bool {
+  value == reverse_digits(value)
+}
+
+export fn main() returns (Bool, Bool) {
+  (is_palindrome(12321), is_palindrome(12345))
+}

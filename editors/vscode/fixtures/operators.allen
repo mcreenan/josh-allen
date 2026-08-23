@@ -1,0 +1,12 @@
+export fn main() returns Int {
+  mut total = -13;
+  total %= 5;
+  total += 10;
+  total -= 2;
+  total *= 3;
+  total /= 2;
+  let skipped_and = false && ((1 % 0) == 0);
+  let skipped_or = true || ((1 % 0) == 0);
+  if (skipped_and || skipped_or) { total = total % 8; }
+  total
+}

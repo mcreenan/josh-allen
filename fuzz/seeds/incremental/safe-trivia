@@ -1,0 +1,4 @@
+fn main() returns Int {
+  let value = 1;
+  value
+}

@@ -1,0 +1,44 @@
+{
+  "profile": "core-0.1",
+  "status": "conforming",
+  "completed_on": "2026-08-22",
+  "language_versions": ["0.1.0"],
+  "bytecode_versions": [13],
+  "required": {
+    "artifact_verification": "conforming",
+    "async_functions": "conforming",
+    "deterministic_evaluation": "conforming",
+    "deterministic_loops_and_iteration": "conforming",
+    "deterministic_scheduler": "conforming",
+    "effect_checking": "conforming",
+    "operators_and_short_circuiting": "conforming",
+    "exact_types": "conforming",
+    "resource_budgets": "conforming",
+    "structured_concurrency": "conforming",
+    "string_iteration_and_templates": "conforming",
+    "task_debug_observability": "conforming",
+    "task_ownership_verification": "conforming",
+    "transparent_type_aliases": "conforming",
+    "unicode_scalar_string_operations": "conforming",
+    "closed_error_model": "conforming"
+  },
+  "unsupported_optional_items": [
+    "detached tasks",
+    "effect polymorphism",
+    "general catch and throw syntax",
+    "live-object heap accounting",
+    "mutable aggregate values"
+  ],
+  "later_profiles": [
+    "manifests, packages, filesystems, external grants, and HTTP in sandbox-0.1",
+    "JOSH, tools, agents, prompts, models, sub-agents, and replay in host-0.1"
+  ],
+  "artifact_targets": ["portable"],
+  "validated_platforms": [
+    {
+      "os": "macos",
+      "arch": "arm64",
+      "status": "conforming"
+    }
+  ]
+}

@@ -1,0 +1,18 @@
+export fn main() returns (Int, Int, Int, String, Bytes, String, Float, Bool, Int, Int) {
+  let values = [10, 20];
+  let bytes = b"A";
+  let table = map { "b": 2, "a": 1 };
+  let pair = (7, "x");
+  (
+    values[1],
+    bytes[0],
+    table["a"],
+    pair[1],
+    to_bytes("ok"),
+    to_string(42),
+    -1.5 + 2.0 * 4.0 / 2.0 - 1.0,
+    !false && 1 < 2 || 3 == 4,
+    8 - 2 * 3 / 2,
+    -5,
+  )
+}

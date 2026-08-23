@@ -1,0 +1,5 @@
+import { second } from "./import-cycle-b.allen";
+
+export fn first() returns Int {
+  second()
+}

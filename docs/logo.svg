@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-labelledby="title desc">
+  <title id="title">ALLEN logo variant 14: Matched light</title>
+  <desc id="desc">Thinner brackets match the 18 px bot head.</desc>
+  <style>
+    .ink { stroke: #17202a; } .ink-fill { fill: #17202a; }
+    .paper-fill { fill: #f7f5ef; } .accent-fill { fill: #6d4aff; }
+  </style>
+
+      <path class="ink" d="m166 218-36 48 36 48m180-96 36 48-36 48"
+            fill="none" stroke-width="18" stroke-linecap="round" stroke-linejoin="round"/>
+    
+      <rect class="ink" x="193" y="219" width="126" height="94" rx="42" fill="none" stroke-width="18"/>
+      <path class="ink" d="M256 219v-40" fill="none" stroke-width="10" stroke-linecap="round"/><circle class="accent-fill" cx="256" cy="162" r="16"/>
+      <rect class="ink-fill" x="223" y="252" width="14" height="28" rx="7"/><rect class="ink-fill" x="275" y="252" width="14" height="28" rx="7"/>
+    </svg>

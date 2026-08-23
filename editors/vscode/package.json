@@ -1,0 +1,52 @@
+{
+  "name": "allen-language-support",
+  "displayName": "ALLEN Language Support",
+  "description": "Syntax highlighting and editor configuration for current ALLEN source.",
+  "version": "0.1.0",
+  "publisher": "allen-lang",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/mcreenan/allen.git",
+    "directory": "editors/vscode"
+  },
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Programming Languages"
+  ],
+  "files": [
+    "language-configuration.json",
+    "syntaxes"
+  ],
+  "scripts": {
+    "test": "node scripts/validate-grammar.cjs"
+  },
+  "contributes": {
+    "languages": [
+      {
+        "id": "allen",
+        "aliases": [
+          "ALLEN",
+          "allen"
+        ],
+        "extensions": [
+          ".allen"
+        ],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "allen",
+        "scopeName": "source.allen",
+        "path": "./syntaxes/allen.tmLanguage.json"
+      }
+    ]
+  },
+  "devDependencies": {
+    "vscode-oniguruma": "2.0.1",
+    "vscode-textmate": "9.2.1"
+  }
+}

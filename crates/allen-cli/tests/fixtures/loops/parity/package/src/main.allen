@@ -1,0 +1,12 @@
+export fn main() returns Int {
+  let values = map { "b": 2, "a": 1 };
+  mut total = 0;
+  for (key, value) in values {
+    if (key == "a") {
+      total = total + value;
+    } else {
+      total = total * 10 + value;
+    }
+  }
+  total
+}

@@ -1,0 +1,4 @@
+export async fn draft(input: String) returns Result<String, AgentError>
+  effects [agent.ask] {
+  let request = prompt {
+    system: "Draft a reply

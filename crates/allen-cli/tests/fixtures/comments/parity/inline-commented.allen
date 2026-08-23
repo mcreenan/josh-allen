@@ -1,0 +1,12 @@
+/// Comments are valid before and inside an inline manifest.
+manifest /* keyword boundary */ {
+  language: "0.1" // manifest line comment
+  entry: main
+  capabilities: [/* no capabilities */]
+}
+
+/*! No documentation semantics in current language. */
+export fn main() returns Int {
+  let delimiters = ("// /* */", b"// /* */");
+  /* operand boundary */ 8
+}

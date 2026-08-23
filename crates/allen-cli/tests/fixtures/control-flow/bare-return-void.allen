@@ -1,0 +1,8 @@
+fn exits() returns Void {
+  return;
+}
+
+export fn main() returns Void {
+  let unit = exits();
+  return;
+}

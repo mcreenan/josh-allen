@@ -1,0 +1,317 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "ALLEN",
+  "scopeName": "source.allen",
+  "patterns": [
+    {
+      "include": "#comments"
+    },
+    {
+      "include": "#declarations"
+    },
+    {
+      "include": "#strings"
+    },
+    {
+      "include": "#effect-targets"
+    },
+    {
+      "include": "#keywords"
+    },
+    {
+      "include": "#types"
+    },
+    {
+      "include": "#literals"
+    },
+    {
+      "include": "#field-labels"
+    },
+    {
+      "include": "#function-calls"
+    },
+    {
+      "include": "#operators"
+    },
+    {
+      "include": "#punctuation"
+    },
+    {
+      "include": "#type-like-identifiers"
+    }
+  ],
+  "repository": {
+    "comments": {
+      "patterns": [
+        {
+          "include": "#line-comment"
+        },
+        {
+          "include": "#block-comment"
+        }
+      ]
+    },
+    "line-comment": {
+      "match": "//.*$",
+      "name": "comment.line.double-slash.allen"
+    },
+    "block-comment": {
+      "name": "comment.block.allen",
+      "begin": "/\\*",
+      "beginCaptures": {
+        "0": {
+          "name": "punctuation.definition.comment.begin.allen"
+        }
+      },
+      "end": "\\*/",
+      "endCaptures": {
+        "0": {
+          "name": "punctuation.definition.comment.end.allen"
+        }
+      },
+      "patterns": [
+        {
+          "include": "#block-comment"
+        }
+      ]
+    },
+    "declarations": {
+      "patterns": [
+        {
+          "match": "\\b(?:(export)\\s+)?(record|enum|type)\\s+([A-Za-z_][A-Za-z0-9_]*)",
+          "captures": {
+            "1": {
+              "name": "storage.modifier.allen"
+            },
+            "2": {
+              "name": "storage.type.declaration.allen"
+            },
+            "3": {
+              "name": "entity.name.type.allen"
+            }
+          }
+        },
+        {
+          "match": "\\b(?:(export)\\s+)?(?:(async)\\s+)?(fn)\\s+([A-Za-z_][A-Za-z0-9_]*)",
+          "captures": {
+            "1": {
+              "name": "storage.modifier.allen"
+            },
+            "2": {
+              "name": "storage.modifier.async.allen"
+            },
+            "3": {
+              "name": "storage.type.function.allen"
+            },
+            "4": {
+              "name": "entity.name.function.allen"
+            }
+          }
+        }
+      ]
+    },
+    "strings": {
+      "patterns": [
+        {
+          "include": "#template-string"
+        },
+        {
+          "include": "#byte-string"
+        },
+        {
+          "include": "#string"
+        }
+      ]
+    },
+    "template-string": {
+      "name": "string.quoted.template.allen",
+      "begin": "`",
+      "beginCaptures": {
+        "0": {
+          "name": "punctuation.definition.string.begin.allen"
+        }
+      },
+      "end": "`|$",
+      "endCaptures": {
+        "0": {
+          "name": "punctuation.definition.string.end.allen"
+        }
+      },
+      "patterns": [
+        {
+          "include": "#template-interpolation"
+        },
+        {
+          "name": "constant.character.escape.allen",
+          "match": "\\\\(?:[\"`\\\\nrt0bf]|\\$\\{)"
+        }
+      ]
+    },
+    "template-interpolation": {
+      "name": "meta.interpolation.allen",
+      "begin": "\\$\\{",
+      "beginCaptures": {
+        "0": {
+          "name": "punctuation.section.interpolation.begin.allen"
+        }
+      },
+      "end": "\\}",
+      "endCaptures": {
+        "0": {
+          "name": "punctuation.section.interpolation.end.allen"
+        }
+      },
+      "patterns": [
+        {
+          "include": "#template-expression"
+        }
+      ]
+    },
+    "template-braces": {
+      "name": "meta.interpolation.braces.allen",
+      "begin": "\\{",
+      "beginCaptures": {
+        "0": {
+          "name": "punctuation.section.block.begin.allen"
+        }
+      },
+      "end": "\\}",
+      "endCaptures": {
+        "0": {
+          "name": "punctuation.section.block.end.allen"
+        }
+      },
+      "patterns": [
+        {
+          "include": "#template-expression"
+        }
+      ]
+    },
+    "template-expression": {
+      "patterns": [
+        {
+          "include": "#comments"
+        },
+        {
+          "include": "#strings"
+        },
+        {
+          "include": "#template-braces"
+        },
+        {
+          "include": "#effect-targets"
+        },
+        {
+          "include": "#keywords"
+        },
+        {
+          "include": "#types"
+        },
+        {
+          "include": "#literals"
+        },
+        {
+          "include": "#field-labels"
+        },
+        {
+          "include": "#function-calls"
+        },
+        {
+          "include": "#operators"
+        },
+        {
+          "include": "#punctuation"
+        },
+        {
+          "include": "#type-like-identifiers"
+        }
+      ]
+    },
+    "byte-string": {
+      "name": "string.quoted.double.bytes.allen",
+      "begin": "b\\\"",
+      "beginCaptures": {
+        "0": {
+          "name": "punctuation.definition.string.begin.allen"
+        }
+      },
+      "end": "\\\"|$",
+      "endCaptures": {
+        "0": {
+          "name": "punctuation.definition.string.end.allen"
+        }
+      },
+      "patterns": [
+        {
+          "name": "constant.character.escape.allen",
+          "match": "\\\\(?:[\\\"\\\\nrt0bf]|x[0-9A-Fa-f]{2})"
+        }
+      ]
+    },
+    "string": {
+      "name": "string.quoted.double.allen",
+      "begin": "\\\"",
+      "beginCaptures": {
+        "0": {
+          "name": "punctuation.definition.string.begin.allen"
+        }
+      },
+      "end": "\\\"|$",
+      "endCaptures": {
+        "0": {
+          "name": "punctuation.definition.string.end.allen"
+        }
+      },
+      "patterns": [
+        {
+          "name": "constant.character.escape.allen",
+          "match": "\\\\[\\\"\\\\nrt0bf]"
+        }
+      ]
+    },
+    "effect-targets": {
+      "match": "\\b(?:agent|user|sub_agent|model|tools?|fs|http|net|permission|capability)(?:\\.[A-Za-z_][A-Za-z0-9_]*)+(?:@[0-9]+)?\\b",
+      "name": "support.function.effect.allen"
+    },
+    "keywords": {
+      "match": "\\b(?:as|async|await|break|continue|effects|else|enum|export|fn|for|from|if|import|in|let|loop|manifest|map|match|mut|prompt|record|return|returns|spawn|type|while)\\b",
+      "name": "keyword.control.allen"
+    },
+    "types": {
+      "match": "\\b(?:Bool|Int|Float|String|Bytes|Void|Never|List|Map|Option|Result|unknown|Prompt|Future|Task|Workspace|ExternalFsAccess|SubAgent|ExternalFileRequest|ExternalDirectoryRequest|HttpResponse|FileError|NetworkError|AgentError|UserError|SubAgentError|ModelError|PermissionError|TranscriptPart|TranscriptMessage|TranscriptSnapshot|Eq)\\b",
+      "name": "support.type.allen"
+    },
+    "literals": {
+      "patterns": [
+        {
+          "match": "\\b(?:true|false|None|Some|Ok|Err)\\b",
+          "name": "constant.language.allen"
+        },
+        {
+          "match": "\\b[0-9]+(?:\\.[0-9]+(?:[eE][+-]?[0-9]+)?)?\\b",
+          "name": "constant.numeric.allen"
+        }
+      ]
+    },
+    "field-labels": {
+      "match": "\\b[A-Za-z_][A-Za-z0-9_]*\\b(?=\\s*:)",
+      "name": "variable.other.property.allen"
+    },
+    "function-calls": {
+      "match": "\\b[A-Za-z_][A-Za-z0-9_]*\\b(?=\\s*(?:<[^>]*>)?\\s*\\()",
+      "name": "entity.name.function.call.allen"
+    },
+    "operators": {
+      "match": "\\.\\.|=>|\\+=|-=|\\*=|/=|%=|==|!=|<=|>=|&&|\\|\\||[%+*/!<>=?@-]",
+      "name": "keyword.operator.allen"
+    },
+    "punctuation": {
+      "match": "[(){}\\[\\],.:;]",
+      "name": "punctuation.separator.allen"
+    },
+    "type-like-identifiers": {
+      "match": "\\b[A-Z][A-Za-z0-9_]*\\b",
+      "name": "entity.name.type.allen"
+    }
+  }
+}

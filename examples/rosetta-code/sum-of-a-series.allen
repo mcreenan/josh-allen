@@ -1,0 +1,11 @@
+fn sum_series(terms: Int) returns Int {
+  mut total: Int = 0;
+  for index in 1..(terms + 1) {
+    total += index * 2 - 1;
+  }
+  total
+}
+
+export fn main() returns Int {
+  sum_series(10)
+}

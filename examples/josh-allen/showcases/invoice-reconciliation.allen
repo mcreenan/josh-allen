@@ -1,0 +1,58 @@
+manifest {
+  language: "0.1"
+  entry: main
+  capabilities: [agent.message, model.request]
+}
+
+record Extraction {
+  amount_cents: Int
+  currency: String
+  invoice_id: String
+  vendor_id: String
+}
+
+record Reconciliation {
+  discrepancy_cents: Int
+  matched: Bool
+  status: String
+  vendor_id: String
+}
+
+export async fn main() returns Reconciliation effects [agent.message, model.request] {
+  let invoice_text = "ACME Clowd LLC | inv 8841 | USD 1,299.00";
+  let expected_id = "INV-8841";
+  let ledger_cents = 129900;
+
+  let extracted = match await model.request<Extraction>(prompt {
+    system: "Normalize the noisy invoice into the exact typed fields. Use vendor ID ACME-CLOUD when the text is an obvious spelling variant."
+    data: { invoice_text }
+    output: Extraction
+  }) {
+    Ok(value) => value
+    Err(_) => Extraction { amount_cents: 0, currency: "", invoice_id: "", vendor_id: "unresolved" }
+  };
+  let identity_matches = extracted.invoice_id == expected_id
+    && extracted.currency == "USD" && extracted.vendor_id == "ACME-CLOUD";
+  let discrepancy = extracted.amount_cents - ledger_cents;
+  let matched = identity_matches && discrepancy == 0;
+  let delivered = match await agent.message(if (matched) {
+    "ALLEN reconciled INV-8841 exactly; no payment exception."
+  } else {
+    "ALLEN quarantined INV-8841 after deterministic reconciliation failed."
+  }) {
+    Ok(_) => true
+    Err(_) => false
+  };
+  Reconciliation {
+    discrepancy_cents: discrepancy,
+    matched,
+    status: if (!delivered) {
+      "reconciliation complete; agent notification unavailable"
+    } else if (matched) {
+      "reconciled"
+    } else {
+      "quarantined"
+    },
+    vendor_id: extracted.vendor_id
+  }
+}

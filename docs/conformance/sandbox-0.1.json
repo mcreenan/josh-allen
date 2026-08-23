@@ -1,0 +1,57 @@
+{
+  "profile": "sandbox-0.1",
+  "status": "conforming",
+  "completed_on": "2026-08-16",
+  "language_versions": ["0.1.0"],
+  "bytecode_versions": [13],
+  "required": {
+    "bounded_package_loading": "conforming",
+    "canonical_lockfile": "conforming",
+    "cumulative_http_accounting": "conforming",
+    "descriptor_relative_workspace": "conforming",
+    "deterministic_loops_and_iteration": "conforming",
+    "entry_contracts": "conforming",
+    "exact_json_boundaries": "conforming",
+    "execution_scoped_opaque_handles": "conforming",
+    "external_filesystem_denial": "conforming",
+    "external_filesystem_grants": "conforming",
+    "external_filesystem_revocation": "conforming",
+    "filesystem_effects": "conforming",
+    "https_get": "conforming",
+    "host_destination_denial": "conforming",
+    "immutable_effective_manifest_grants": "conforming",
+    "local_source_packages": "conforming",
+    "manifest_preflight": "conforming",
+    "network_origin_policy": "conforming",
+    "optional_capabilities": "conforming",
+    "operators_and_short_circuiting": "conforming",
+    "reachable_package_identities": "conforming",
+    "shared_effect_accounting": "conforming",
+    "symlink_and_hard_link_rejection": "conforming"
+  },
+  "explicitly_unsupported": [
+    "build scripts",
+    "native libraries",
+    "package registries",
+    "process creation",
+    "raw sockets",
+    "remote package fetching"
+  ],
+  "validated_platforms": [
+    {
+      "os": "macos",
+      "arch": "arm64",
+      "status": "conforming"
+    },
+    {
+      "os": "linux",
+      "arch": "all",
+      "status": "unverified"
+    },
+    {
+      "os": "windows",
+      "arch": "all",
+      "status": "unsupported"
+    }
+  ]
+}

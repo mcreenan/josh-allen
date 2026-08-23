@@ -1,0 +1,6 @@
+é@
+record { value List }
+fn broken() returns Void { let bad = "oops\q"; }
+fn recovered() returns Void { return `ok ${1 + 2}`; }
+type BrokenAlias =
+record RecoveredAliasTarget {}

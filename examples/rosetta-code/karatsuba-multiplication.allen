@@ -1,0 +1,55 @@
+fn power_of_ten(exponent: Int) returns Int {
+  mut result: Int = 1;
+  for _ in 0..exponent {
+    result *= 10;
+  }
+  result
+}
+
+fn decimal_digits(value: Int) returns Int {
+  mut remaining = value;
+  mut digits: Int = 1;
+  while (remaining >= 10) {
+    remaining /= 10;
+    digits += 1;
+  }
+  digits
+}
+
+fn maximum(left: Int, right: Int) returns Int {
+  if (left > right) { left } else { right }
+}
+
+fn combine_product(left: Int, right: Int, split: Int) returns Int {
+  let place = power_of_ten(split);
+  let left_high = left / place;
+  let left_low = left % place;
+  let right_high = right / place;
+  let right_low = right % place;
+  let high_product = karatsuba(left_high, right_high);
+  let low_product = karatsuba(left_low, right_low);
+  let sum_product = karatsuba(left_high + left_low, right_high + right_low);
+  let middle_product = sum_product - high_product - low_product;
+  high_product * place * place + middle_product * place + low_product
+}
+
+fn split_product(left: Int, right: Int) returns Int {
+  let digits = maximum(decimal_digits(left), decimal_digits(right));
+  combine_product(left, right, digits / 2)
+}
+
+fn karatsuba(left: Int, right: Int) returns Int {
+  if (left < 10 || right < 10) {
+    left * right
+  } else {
+    split_product(left, right)
+  }
+}
+
+export fn main() returns (Int, Int, Int) {
+  (
+    karatsuba(12, 34),
+    karatsuba(1234, 5678),
+    karatsuba(12345, 6789),
+  )
+}

@@ -1,0 +1,4 @@
+export fn reserved(value: String) returns String {
+  // Conditionals, loops, and templates are current syntax.
+  if (true) { value } else if /* whitespace */ (false) { value } else { `template ${value}` }
+}

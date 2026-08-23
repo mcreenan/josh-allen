@@ -1,0 +1,4 @@
+export fn main() returns Int {
+  let value = to_unknown(1);
+  value + 1
+}

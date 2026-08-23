@@ -1,0 +1,9 @@
+manifest {
+  language: "0.1"
+  entry: main
+  capabilities: []
+}
+
+export fn main() returns Int {
+  42
+}

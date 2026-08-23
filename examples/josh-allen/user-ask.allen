@@ -1,0 +1,15 @@
+manifest {
+  language: "0.1"
+  entry: main
+  capabilities: [user.ask]
+}
+
+export async fn main() returns Bool effects [user.ask] {
+  match await user.ask<Bool>(prompt {
+    system: "Should this ALLEN execution return true?"
+    output: Bool
+  }) {
+    Ok(answer) => answer
+    Err(_) => false
+  }
+}

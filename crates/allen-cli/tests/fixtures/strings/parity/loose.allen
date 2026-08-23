@@ -1,0 +1,29 @@
+fn strings_report() returns Bool effects [capability.inspect] {
+  let scalars = "aé𝄞";
+  let combining = "é";
+  let slice = match string.slice(scalars, 1, 3) {
+    Some(value) => value,
+    None => "missing"
+  };
+  let split = match string.split("left::right", "::") {
+    Some(values) => string.join(values, "|"),
+    None => "missing"
+  };
+  let granted = capability.granted();
+  let capability_state = if (capability.is_granted("fs.read") || length(granted) != 0) {
+    "unexpected"
+  } else {
+    "denied"
+  };
+  let escaped = `\`\${\\\n\r\t`;
+  let rendered = `scalar:${slice};combining:${to_string(length(combining))};bytes:${to_string(string.byte_length(scalars))};${split};${capability_state}`;
+  string.get(scalars, 1) == Some("é") &&
+    string.get(scalars, -1) == None &&
+    string.contains(rendered, "scalar:é𝄞") &&
+    rendered == "scalar:é𝄞;combining:2;bytes:7;left|right;denied" &&
+    escaped == "`${\\\n\r\t"
+}
+
+export fn main() returns Bool effects [capability.inspect] {
+  strings_report()
+}

@@ -1,0 +1,4 @@
+export fn main() returns Void {
+  for (first,) in [1, 2] { () }
+  ()
+}

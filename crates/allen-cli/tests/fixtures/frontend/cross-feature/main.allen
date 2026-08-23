@@ -1,0 +1,43 @@
+import { identity } from "./support.allen";
+
+record Point {
+  x: Int
+  y: Int
+}
+
+enum Reading {
+  Number(Int)
+}
+
+async fn ready() returns Int {
+  7
+}
+
+export async fn main() returns (Float, Bytes, Int, String, Int, Int, Bool) effects [task.spawn] {
+  mut count: Int = 1;
+  count = count + 1;
+  let values: List<Int> = [10, 20];
+  let bytes = b"\x41\n";
+  let table = map { "value": 3 };
+  let pair = ("pair", count);
+  let point = Point { x: count, y: values[1] };
+  let record_total = match point {
+    Point { x, y } => x + y
+  };
+  let reading = Reading.Number(record_total);
+  let payload = match reading {
+    Reading.Number(value) => value
+  };
+  let generic = identity(payload);
+  let narrowed = narrow<Int>(to_unknown(generic));
+  let restored = match narrowed {
+    Some(value) => value
+    None => 0
+  };
+  let float = -to_float(restored) + 3.5;
+  let negated = !false;
+  let changed = list.set(list.append(values, bytes[0]), 1, table["value"]);
+  let task = spawn ready();
+  let completed = await task;
+  (float, to_bytes(to_string(restored)), changed[2], pair[0], pair[1], completed, negated)
+}

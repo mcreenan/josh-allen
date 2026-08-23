@@ -1,0 +1,12 @@
+[package]
+name = "allen-vm"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+allen-bytecode = { path = "../allen-bytecode" }
+
+[lints]
+workspace = true

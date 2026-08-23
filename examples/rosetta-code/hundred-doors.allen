@@ -1,0 +1,18 @@
+fn is_open(door: Int) returns Bool {
+  if (door <= 0) {
+    return false;
+  }
+  for candidate in 1..(door + 1) {
+    let square = candidate * candidate;
+    if (square == door) {
+      return true;
+    } else if (square > door) {
+      return false;
+    }
+  }
+  false
+}
+
+export fn main() returns (Bool, Bool, Bool, Bool, Bool, Bool) {
+  (is_open(1), is_open(2), is_open(4), is_open(10), is_open(16), is_open(100))
+}

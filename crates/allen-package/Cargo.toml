@@ -1,0 +1,19 @@
+[package]
+name = "allen-package"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+allen-schema = { path = "../allen-schema" }
+cap-fs-ext = "4.0.2"
+cap-std = "4.0.2"
+semver = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+sha2 = "0.10"
+toml = "0.8"
+url = "2.5"
+
+[lints]
+workspace = true

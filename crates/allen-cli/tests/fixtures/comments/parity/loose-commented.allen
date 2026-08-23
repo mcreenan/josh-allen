@@ -1,0 +1,7 @@
+//! Line comments are ordinary lexical whitespace.
+export /** block comments may nest /* without changing tokens */ */ fn main() returns Int {
+  let value = /* a comment with "quotes", \\slashes, and { braces } */ 8; // after a token
+  // Delimiters in these literals are data, not comments.
+  let delimiters = ("// /* */", b"// /* */");
+  value
+} // final line comment

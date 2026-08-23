@@ -1,0 +1,4 @@
+export fn main() returns Int {
+  for item in [1] { () }
+  item
+}

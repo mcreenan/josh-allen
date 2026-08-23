@@ -1,0 +1,8 @@
+export fn main() returns Int {
+  let value: Option<Int> = Some(1);
+  match value {
+    Some(number) => number
+    Some(_) => 0
+    None => 0
+  }
+}

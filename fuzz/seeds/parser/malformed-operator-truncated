@@ -1,0 +1,12 @@
+export fn malformed() returns Int {
+  mut value = 1;
+  value +
+  value %
+  value +=
+  value -=
+  value *=
+  value /=
+  value %=
+  false &&
+  true ||
+}

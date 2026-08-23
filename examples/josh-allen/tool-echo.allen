@@ -1,0 +1,18 @@
+manifest {
+  language: "0.1"
+  entry: main
+  capabilities: []
+}
+
+record ToolDescription {
+  name: String
+  description: String
+}
+
+record ToolCatalog {
+  tools: List<ToolDescription>
+}
+
+export fn main(catalog: ToolCatalog) returns ToolCatalog {
+  catalog
+}

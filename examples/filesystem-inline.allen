@@ -1,0 +1,10 @@
+manifest {
+  language: "0.1"
+  entry: main
+  capabilities: [fs.read(workdir)]
+}
+
+export async fn main() returns Result<String, FileError> effects [fs.read] {
+  let workspace = fs.workspace();
+  await fs.read_text(workspace, "message.txt")
+}

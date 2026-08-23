@@ -1,0 +1,24 @@
+async fn delayed(value: Int) returns Int {
+  value
+}
+
+async fn exits_early(flag: Bool) returns Void {
+  if (flag) {
+    return;
+  }
+  return;
+}
+
+export async fn main() returns Int effects [task.spawn] {
+  let unit = await exits_early(true);
+  let selected = if (true) {
+    await delayed(7)
+  } else {
+    let task = spawn delayed(99);
+    await task
+  };
+  if (false) {
+    stop("skipped")
+  }
+  selected
+}

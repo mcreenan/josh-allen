@@ -1,0 +1,7 @@
+fn add(left: Int, right: Int) returns Int {
+  left + right
+}
+
+export fn main() returns (Int, Int, Int) {
+  (add(1, 2), add(40, 2), add(0, 0))
+}

@@ -1,0 +1,26 @@
+fn fibonacci(position: Int) returns Int {
+  mut current: Int = 0;
+  mut next: Int = 1;
+  for _ in 0..position {
+    let following = current + next;
+    current = next;
+    next = following;
+  }
+  current
+}
+
+export fn main() returns (Int, Int, Int, Int, Int, Int, Int, Int, Int, Int, Int) {
+  (
+    fibonacci(0),
+    fibonacci(1),
+    fibonacci(2),
+    fibonacci(3),
+    fibonacci(4),
+    fibonacci(5),
+    fibonacci(6),
+    fibonacci(7),
+    fibonacci(8),
+    fibonacci(9),
+    fibonacci(10),
+  )
+}

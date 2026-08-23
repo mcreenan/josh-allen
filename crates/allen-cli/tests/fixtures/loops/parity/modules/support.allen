@@ -1,0 +1,7 @@
+export fn sum_range(start: Int, end: Int) returns Int {
+  mut total = 0;
+  for index in start..end {
+    total = total + index;
+  }
+  total
+}

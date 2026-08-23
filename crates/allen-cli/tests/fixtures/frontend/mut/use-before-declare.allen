@@ -1,0 +1,5 @@
+export fn main() returns Int {
+  value = 1;
+  mut value = 2;
+  value
+}

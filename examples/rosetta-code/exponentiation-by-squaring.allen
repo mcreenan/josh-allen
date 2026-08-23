@@ -1,0 +1,19 @@
+fn power(base: Int, exponent: Int) returns Int {
+  mut factor = base;
+  mut remaining = exponent;
+  mut result: Int = 1;
+  while (remaining > 0) {
+    if (remaining % 2 == 1) {
+      result *= factor;
+    }
+    remaining /= 2;
+    if (remaining > 0) {
+      factor *= factor;
+    }
+  }
+  result
+}
+
+export fn main() returns (Int, Int, Int) {
+  (power(2, 10), power(3, 7), power(5, 0))
+}

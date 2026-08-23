@@ -1,0 +1,4 @@
+fn try(value: String) returns String { value }
+fn catch(value: String) returns String { value }
+fn finally(value: String) returns String { value }
+fn throw(value: String) returns String { value }

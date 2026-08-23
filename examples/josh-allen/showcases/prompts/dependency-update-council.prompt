@@ -1,0 +1,4 @@
+Review a small dependency update proposal from this repository, or synthesize a
+representative one if needed. Apply hard compatibility and policy gates, obtain
+one independent advisory review, and return ACCEPT, REJECT, or HUMAN_REVIEW
+with reasons. Do not install or update any packages.

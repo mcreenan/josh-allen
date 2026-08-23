@@ -1,0 +1,33 @@
+export type Whole = Int
+
+export fn add(left: Int, right: Int) returns Int {
+  left + right
+}
+
+export fn same<T: Eq>(left: T, right: T) returns Bool {
+  left == right
+}
+
+export fn apply(callback: fn(Int) returns Int, value: Int) returns Int {
+  callback(value)
+}
+
+fn declared_effect() returns Int effects [fs.read] {
+  1
+}
+
+fn pure_identity(value: Int) returns Int {
+  value
+}
+
+fn transitive_effect() returns Int effects [fs.read] {
+  declared_effect()
+}
+
+fn callback_effect(callback: fn(Int) returns Int effects [fs.read]) returns Int effects [fs.read] {
+  callback(1)
+}
+
+fn closure_effect() returns fn(Int) returns Int effects [fs.read] effects [fs.read] {
+  fn(value: Int) returns Int effects [fs.read] { value + declared_effect() }
+}

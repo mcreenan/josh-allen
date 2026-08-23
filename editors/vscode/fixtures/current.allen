@@ -1,0 +1,47 @@
+import { normalize as local_normalize } from "./support.allen";
+
+record Point {
+  x: Int
+  y: Int
+}
+
+enum Reading {
+  Empty
+  Number(Int)
+  Named { value: Int, label: String }
+}
+
+export type Measurements = List<Int>
+
+export fn main() returns Int {
+  let point = Point { x: 1, y: 2 };
+  let bytes = b"\x00A\n";
+  let ratio: Float = -1.5e2 / 2.0;
+  mut retries: Int = 0;
+  retries = retries + bytes[0];
+  for byte in bytes {
+    retries = retries + byte;
+  }
+  for index in 0..2 {
+    if (index == 0) { continue; }
+    retries = retries + index;
+  }
+  let weights: Map<String, Int> = map { "later": 2, "first": 1 };
+  for (_, weight) in weights {
+    retries = retries + weight;
+  }
+  while (retries < 1000) {
+    retries = retries + 1;
+    if (retries == 100) { break; }
+  }
+  loop { break; }
+  let reading: Reading = Reading.Named { value: 40, label: "ready" };
+  if (point.x == 1) {
+    retries = retries + 1;
+  }
+  match reading {
+    Reading.Named { value, label: _ } => value + point.x
+    Reading.Empty => 0
+    Reading.Number(value) => value
+  }
+}

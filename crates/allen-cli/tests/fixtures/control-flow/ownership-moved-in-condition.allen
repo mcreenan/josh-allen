@@ -1,0 +1,13 @@
+async fn delayed(value: Int) returns Int {
+  value
+}
+
+async fn is_answer(task: Task<Int>) returns Bool {
+  let value = await task;
+  value == 42
+}
+
+export async fn main() returns Int effects [task.spawn] {
+  let task = spawn delayed(42);
+  if (await is_answer(task)) { 1 } else { 0 }
+}

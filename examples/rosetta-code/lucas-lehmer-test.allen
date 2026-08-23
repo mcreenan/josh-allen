@@ -1,0 +1,30 @@
+fn power_of_two(exponent: Int) returns Int {
+  mut result: Int = 1;
+  for _ in 0..exponent {
+    result *= 2;
+  }
+  result
+}
+
+fn lucas_lehmer(exponent: Int) returns Bool {
+  if (exponent == 2) {
+    return true;
+  }
+  let mersenne = power_of_two(exponent) - 1;
+  mut value: Int = 4;
+  for _ in 0..(exponent - 2) {
+    value = (value * value - 2) % mersenne;
+  }
+  value == 0
+}
+
+export fn main() returns (Bool, Bool, Bool, Bool, Bool, Bool) {
+  (
+    lucas_lehmer(2),
+    lucas_lehmer(3),
+    lucas_lehmer(5),
+    lucas_lehmer(7),
+    lucas_lehmer(11),
+    lucas_lehmer(13),
+  )
+}

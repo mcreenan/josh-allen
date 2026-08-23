@@ -1,0 +1,73 @@
+manifest {
+  language: "0.1"
+  entry: main
+  capabilities: [agent.ask]
+  tools: {
+    required: [
+      { name: "allen_integration_echo", version: ">=1.0.0, <2.0.0" }
+    ]
+  }
+}
+
+enum Eligibility {
+  Blocked
+  Eligible
+  NeedsJudgment
+}
+
+record Account {
+  balance_cents: Int
+  customer_id: String
+  eligibility: Eligibility
+}
+
+record ExceptionDecision {
+  approve: Bool
+  customer_id: String
+  reason: String
+}
+
+record OperationPlan {
+  blocked_accounts: Int
+  planned_writes: Int
+  receipt: String
+  status: String
+}
+
+export async fn main() returns OperationPlan effects [agent.ask, tool.allen_integration_echo@1] {
+  let accounts = [
+    Account { balance_cents: 0, customer_id: "C-101", eligibility: Eligibility.Eligible },
+    Account { balance_cents: 2400, customer_id: "C-102", eligibility: Eligibility.Blocked },
+    Account { balance_cents: 0, customer_id: "C-103", eligibility: Eligibility.Eligible },
+    Account { balance_cents: 0, customer_id: "C-104", eligibility: Eligibility.NeedsJudgment }
+  ];
+  mut eligible = 0;
+  mut blocked = 0;
+  for account in accounts {
+    if (account.eligibility == Eligibility.Eligible) { eligible += 1; }
+    if (account.eligibility == Eligibility.Blocked) { blocked += 1; }
+  }
+
+  let decision = match await agent.ask<ExceptionDecision>(prompt {
+    system: "Decide only whether C-104 qualifies for the credit. Keep customer_id exactly C-104."
+    data: { account: accounts[3], max_writes: 2 }
+    output: ExceptionDecision
+  }) {
+    Ok(value) => value
+    Err(_) => ExceptionDecision { approve: false, customer_id: "C-104", reason: "agent unavailable" }
+  };
+  let valid_exception = decision.customer_id == "C-104";
+  let requested = eligible + if (valid_exception && decision.approve) { 1 } else { 0 };
+  let capped = if (requested <= 2) { requested } else { 2 };
+  match await tools.allen_integration_echo.call({
+    text: string.concat("dry-run CRM credit writes: ", to_string(capped))
+  }) {
+    Ok(output) => OperationPlan {
+      blocked_accounts: blocked + if (requested > capped) { requested - capped } else { 0 },
+      planned_writes: capped,
+      receipt: output.text,
+      status: if (requested == capped) { "bounded dry run complete" } else { "write cap enforced" }
+    }
+    Err(_) => OperationPlan { blocked_accounts: blocked, planned_writes: 0, receipt: "none", status: "dry-run tool unavailable" }
+  }
+}

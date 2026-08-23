@@ -1,0 +1,7 @@
+fn is_even(value: Int) returns Bool {
+  value % 2 == 0
+}
+
+export fn main() returns (Bool, Bool) {
+  (is_even(42), is_even(17))
+}

@@ -1,0 +1,25 @@
+fn binary_search(values: List<Int>, target: Int) returns Int {
+  mut low: Int = 0;
+  mut high: Int = length(values) - 1;
+  while (low <= high) {
+    let middle = low + (high - low) / 2;
+    let value = values[middle];
+    if (value == target) {
+      return middle;
+    } else if (value < target) {
+      low = middle + 1;
+    } else {
+      high = middle - 1;
+    }
+  }
+  -1
+}
+
+export fn main() returns (Int, Int, Int) {
+  let values = [1, 4, 7, 9, 12, 18, 25];
+  (
+    binary_search(values, 1),
+    binary_search(values, 12),
+    binary_search(values, 8),
+  )
+}

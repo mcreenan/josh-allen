@@ -1,0 +1,14 @@
+manifest {
+  language: "0.1"
+  entry: main
+  capabilities: []
+}
+
+export fn main() returns Int {
+  let values = [4, 8];
+  let bytes = b"\x41";
+  let float = -to_float(values[0]) + 4.5;
+  let raw = to_bytes("ok");
+  let byte = bytes[0];
+  values[1]
+}

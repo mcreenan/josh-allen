@@ -1,0 +1,5 @@
+import { strings_report } from "./support.allen";
+
+export fn main() returns Bool effects [capability.inspect] {
+  strings_report()
+}

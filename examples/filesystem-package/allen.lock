@@ -1,0 +1,19 @@
+lock_version = 1
+language = "0.1.0"
+root = "filesystem-example@0.1.0"
+
+[[package]]
+name = "filesystem-example"
+version = "0.1.0"
+source = "."
+digest = "sha256:22213762f57a7a1563dd6b8c415f15ee96a7f46e2d270a9b0e3c584ce555b963"
+dependencies = [
+  { alias = "text_utils", package = "text-utils@1.0.0" },
+]
+
+[[package]]
+name = "text-utils"
+version = "1.0.0"
+source = "packages/text-utils"
+digest = "sha256:22070e3c1dc77ed5fc82d682cd70830b409f6f7c045779f679cde58103dfe1ef"
+dependencies = []

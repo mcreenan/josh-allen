@@ -1,0 +1,31 @@
+[workspace]
+members = [
+  "crates/allen-bytecode",
+  "crates/allen-cli",
+  "crates/allen-compiler",
+  "crates/allen-http-get",
+  "crates/allen-package",
+  "crates/allen-runtime",
+  "crates/allen-sandbox-fs",
+  "crates/allen-schema",
+  "crates/allen-syntax",
+  "crates/allen-testkit",
+  "crates/allen-vm",
+  "crates/josh-protocol",
+  "crates/josh-host",
+  "crates/josh",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "MIT"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+all = "warn"
+pedantic = "warn"

@@ -1,0 +1,12 @@
+[mcp_servers.josh_allen]
+command = "plugins/josh-allen/bin/josh-allen-mcp"
+required = true
+startup_timeout_sec = 20
+tool_timeout_sec = 3600
+enabled_tools = [
+  "allen_integration_echo",
+  "allen_session_cancel",
+  "allen_session_resume",
+  "allen_session_start",
+  "allen_session_status",
+]

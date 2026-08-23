@@ -1,0 +1,56 @@
+{
+  "profile": "host-0.1",
+  "status": "conforming",
+  "completed_on": "2026-08-16",
+  "language_versions": ["0.1.0"],
+  "bytecode_versions": [13],
+  "protocol_versions": ["josh/1.3"],
+  "required": {
+    "agent_and_typed_response_operations": "conforming",
+    "canary_secret_scans": "conforming",
+    "capability_inspection_replay_binding": "conforming",
+    "deterministic_record_replay": "conforming",
+    "fuzz_target_build": "conforming_stable_build",
+    "fuzz_live_execution": "unverified_optional_cargo_fuzz_unavailable",
+    "josh_protocol_and_tools": "conforming",
+    "loops_and_iteration": "conforming",
+    "operators_and_short_circuiting": "conforming",
+    "standalone_josh_grant_parity": "conforming",
+    "structured_sub_agents": "conforming",
+    "worker_process_isolation": "conforming_with_platform_exclusions",
+    "closed_result_provider_operations": "conforming",
+    "error_registry": "conforming"
+  },
+  "runner": {
+    "command": "scripts/host-conformance.sh",
+    "evidence_directory": "${TMPDIR:-/tmp}/allen-host-conformance",
+    "status": "passed_on_macos_arm64_2026-08-16"
+  },
+  "isolation": {
+    "claim": "ALLEN enforces language-level capability checks and is not described as an operating-system sandbox.",
+    "standalone_worker": "separate_process",
+    "worker_cpu_limit": "applied",
+    "worker_file_size_limit": "applied",
+    "worker_address_space_limit": "unsupported_on_validated_macos_arm64",
+    "embedded_execution": "weaker_process_isolation_mode",
+    "josh_provider_bridge": "weaker_process_isolation_mode"
+  },
+  "validated_platforms": [
+    {
+      "os": "macos",
+      "arch": "arm64",
+      "status": "conforming",
+      "claim": "host-0.1 conforms; worker process isolation is not an operating-system sandbox and the address-space limit is unsupported"
+    },
+    {
+      "os": "linux",
+      "arch": "all",
+      "status": "unverified"
+    },
+    {
+      "os": "windows",
+      "arch": "all",
+      "status": "unsupported"
+    }
+  ]
+}

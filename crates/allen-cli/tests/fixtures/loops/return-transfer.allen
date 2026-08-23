@@ -1,0 +1,13 @@
+async fn number() returns Int { 7 }
+
+async fn transfer() returns Task<Int> effects [task.spawn] {
+  let task = spawn number();
+  loop {
+    return task;
+  }
+}
+
+export async fn main() returns Int effects [task.spawn] {
+  let task = await transfer();
+  await task
+}

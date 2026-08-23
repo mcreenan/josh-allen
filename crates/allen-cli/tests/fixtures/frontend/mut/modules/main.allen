@@ -1,0 +1,5 @@
+import { increment } from "./support.allen";
+
+export fn main() returns Int {
+  increment(1)
+}

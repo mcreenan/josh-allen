@@ -1,0 +1,26 @@
+[package]
+name = "allen-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "allen"
+path = "src/main.rs"
+
+[dependencies]
+allen-bytecode = { path = "../allen-bytecode" }
+allen-compiler = { path = "../allen-compiler" }
+allen-package = { path = "../allen-package" }
+allen-runtime = { path = "../allen-runtime" }
+allen-sandbox-fs = { path = "../allen-sandbox-fs" }
+allen-schema = { path = "../allen-schema" }
+allen-vm = { path = "../allen-vm" }
+base64 = "0.22"
+rustix = { version = "1.1", features = ["process"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+[lints]
+workspace = true

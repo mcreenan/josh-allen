@@ -1,0 +1,13 @@
+async fn delayed(value: Int) returns Int {
+  value
+}
+
+export async fn main() returns Int effects [task.spawn] {
+  await {
+    let task = spawn delayed(42);
+    if (true) {
+      return 7;
+    }
+    42
+  }
+}

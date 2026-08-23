@@ -1,0 +1,10 @@
+import { sum_range } from "./support.allen";
+
+export fn main() returns Int {
+  let values: List<Int> = [1, 2, 3];
+  mut total = sum_range(0, length(values));
+  for value in values {
+    total = total + value;
+  }
+  total + 3
+}

@@ -1,0 +1,10 @@
+# Non-grammar lexical inventory. These remain tokens, never AST nodes.
+trivia:WHITESPACE
+trivia:NEWLINE
+trivia:LINE_COMMENT
+trivia:BLOCK_COMMENT
+special:TOMBSTONE
+# Context-neutral effect-ID separator plus lexer/parser recovery kinds.
+token:@
+special:ERROR_TOKEN
+special:MISSING

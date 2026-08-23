@@ -1,0 +1,10 @@
+export fn main() returns Int {
+  mut value = -13;
+  value %= 5;
+  value += 10;
+  value -= 2 * 3 % 4;
+  value *= 3 + 1;
+  value /= 2;
+  let selected = !false && value % 2 == 1 || false;
+  if (selected) { value } else { 0 }
+}

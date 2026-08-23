@@ -1,0 +1,6 @@
+export fn main() returns (Float, String, Bytes, List<Int>, Map<String, Int>, (Bool, Void)) {
+  let base: Int = 40;
+  mut answer = base;
+  answer += 2;
+  (to_float(answer), "core", b"\x00A", [answer, 7], map { "b": 2, "a": 1 }, (true, ()))
+}

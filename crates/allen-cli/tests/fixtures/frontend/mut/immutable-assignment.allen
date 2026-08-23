@@ -1,0 +1,5 @@
+export fn main() returns Int {
+  let value = 1;
+  value = 2;
+  value
+}

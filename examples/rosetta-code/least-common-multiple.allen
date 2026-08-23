@@ -1,0 +1,26 @@
+fn greatest_common_divisor(left: Int, right: Int) returns Int {
+  mut current = left;
+  mut next = right;
+  while (next != 0) {
+    let remainder = current % next;
+    current = next;
+    next = remainder;
+  }
+  current
+}
+
+fn least_common_multiple(left: Int, right: Int) returns Int {
+  if (left == 0 || right == 0) {
+    0
+  } else {
+    (left / greatest_common_divisor(left, right)) * right
+  }
+}
+
+export fn main() returns (Int, Int, Int) {
+  (
+    least_common_multiple(12, 18),
+    least_common_multiple(21, 6),
+    least_common_multiple(0, 7),
+  )
+}

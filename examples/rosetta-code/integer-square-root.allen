@@ -1,0 +1,25 @@
+fn integer_square_root(value: Int) returns Int {
+  if (value < 2) {
+    return value;
+  }
+  mut estimate = value / 2 + 1;
+  loop {
+    let next = (estimate + value / estimate) / 2;
+    if (next >= estimate) {
+      break;
+    }
+    estimate = next;
+  }
+  estimate
+}
+
+export fn main() returns (Int, Int, Int, Int, Int, Int) {
+  (
+    integer_square_root(0),
+    integer_square_root(1),
+    integer_square_root(2),
+    integer_square_root(15),
+    integer_square_root(16),
+    integer_square_root(2000000),
+  )
+}

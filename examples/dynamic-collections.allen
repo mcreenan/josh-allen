@@ -1,0 +1,10 @@
+export fn main() returns (Int, Int, List<Int>, List<Int>, List<Int>, Int) {
+  let original: List<Int> = [1, 2];
+  let appended = list.append(original, 3);
+  let replaced = list.set(appended, 1, 9);
+  mut total: Int = 0;
+  for value in replaced {
+    total += value;
+  }
+  (length(b"abc"), length(original), original, appended, replaced, total)
+}

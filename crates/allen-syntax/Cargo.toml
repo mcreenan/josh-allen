@@ -1,0 +1,18 @@
+[package]
+name = "allen-syntax"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+rowan = "=0.16.1"
+
+[build-dependencies]
+ungrammar = "=1.16.1"
+
+[dev-dependencies]
+ungrammar = "=1.16.1"
+
+[lints]
+workspace = true

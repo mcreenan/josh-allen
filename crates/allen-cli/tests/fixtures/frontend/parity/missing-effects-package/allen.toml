@@ -1,0 +1,10 @@
+[package]
+name = "frontend-missing-effects"
+version = "0.1.0"
+language = "^0.1"
+
+[[entry]]
+name = "main"
+function = "src/main.allen::main"
+input = "Void"
+output = "Int"

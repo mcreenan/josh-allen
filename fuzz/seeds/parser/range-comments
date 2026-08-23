@@ -1,0 +1,7 @@
+export fn main() returns Int {
+  mut total = 0;
+  for index in /* start */ 0 /* range */ .. /* end */ 3 {
+    total = total + index;
+  }
+  total
+}

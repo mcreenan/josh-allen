@@ -1,0 +1,35 @@
+[package]
+name = "filesystem-example"
+version = "0.1.0"
+language = "^0.1"
+
+[[entry]]
+name = "main"
+function = "src/main.allen::main"
+input = "String"
+output = "Result<String, FileError>"
+
+[[entry]]
+name = "status"
+function = "src/main.allen::status"
+input = "Void"
+output = "String"
+
+[capabilities]
+required = ["fs.read", "fs.write"]
+
+[limits]
+instructions = 100000
+heap_bytes = 8388608
+maximum_allocation_bytes = 1048576
+input_bytes = 1048576
+output_bytes = 1048576
+fs_operations = 16
+fs_read_bytes = 1048576
+fs_write_bytes = 1048576
+fs_file_bytes = 1048576
+fs_entries = 128
+
+[dependencies.text_utils]
+path = "packages/text-utils"
+version = "=1.0.0"

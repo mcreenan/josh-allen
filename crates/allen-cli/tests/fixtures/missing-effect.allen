@@ -1,0 +1,7 @@
+fn declared_effect() returns Int effects [fs.read] {
+  1
+}
+
+export fn main() returns Int {
+  declared_effect()
+}

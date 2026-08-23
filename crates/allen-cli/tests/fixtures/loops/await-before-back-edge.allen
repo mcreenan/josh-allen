@@ -1,0 +1,12 @@
+async fn number() returns Int { 7 }
+
+export async fn main() returns Int effects [task.spawn] {
+  mut total = 0;
+  mut iteration = 0;
+  while (iteration < 3) {
+    let task = spawn number();
+    total = total + await task;
+    iteration = iteration + 1;
+  }
+  total
+}

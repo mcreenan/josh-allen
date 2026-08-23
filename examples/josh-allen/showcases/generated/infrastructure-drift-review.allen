@@ -1,0 +1,141 @@
+manifest {
+  language: "0.1"
+  entry: main
+  capabilities: [agent.ask]
+}
+
+record ResourceState {
+  resource_id: String
+  attribute: String
+  value: String
+  ambiguous_if_changed: Bool
+}
+
+record DriftFinding {
+  resource_id: String
+  classification: String
+  expected: String
+  observed: String
+}
+
+record AmbiguousDecision {
+  resource_id: String
+  disposition: String
+  rationale: String
+}
+
+record PlanStep {
+  resource_id: String
+  action: String
+  desired: String
+}
+
+record DriftReview {
+  fixture: String
+  expected_resources: Int
+  observed_resources: Int
+  findings: List<DriftFinding>
+  ambiguous_decision: AmbiguousDecision
+  dry_run_steps: List<PlanStep>
+  limitation: String
+}
+
+export async fn main() returns DriftReview effects [agent.ask] {
+  // Codex embedded this bounded, synthetic evidence after inspecting the
+  // repository's non-secret infrastructure-drift showcase. ALLEN does not
+  // inspect IaC or cloud state itself.
+  let expected = [
+    ResourceState { resource_id: "aws_security_group.sg-web", attribute: "ingress", value: "443/tcp:10.0.0.0/8", ambiguous_if_changed: false },
+    ResourceState { resource_id: "aws_s3_bucket.logs", attribute: "encryption", value: "AES256", ambiguous_if_changed: false },
+    ResourceState { resource_id: "aws_instance.worker", attribute: "instance_type", value: "t3.small", ambiguous_if_changed: true },
+    ResourceState { resource_id: "aws_cloudwatch_log_group.app", attribute: "retention_days", value: "30", ambiguous_if_changed: false }
+  ];
+  let observed = [
+    ResourceState { resource_id: "aws_security_group.sg-web", attribute: "ingress", value: "443/tcp:10.0.0.0/8", ambiguous_if_changed: false },
+    ResourceState { resource_id: "aws_s3_bucket.logs", attribute: "encryption", value: "none", ambiguous_if_changed: false },
+    ResourceState { resource_id: "aws_instance.worker", attribute: "instance_type", value: "t3.medium", ambiguous_if_changed: false },
+    ResourceState { resource_id: "aws_iam_role.debug", attribute: "managed", value: "true", ambiguous_if_changed: false }
+  ];
+
+  let web_same = expected[0].resource_id == observed[0].resource_id
+    && expected[0].attribute == observed[0].attribute
+    && expected[0].value == observed[0].value;
+  let bucket_same = expected[1].resource_id == observed[1].resource_id
+    && expected[1].attribute == observed[1].attribute
+    && expected[1].value == observed[1].value;
+  let worker_same = expected[2].resource_id == observed[2].resource_id
+    && expected[2].attribute == observed[2].attribute
+    && expected[2].value == observed[2].value;
+  let log_group_present = expected[3].resource_id == observed[0].resource_id
+    || expected[3].resource_id == observed[1].resource_id
+    || expected[3].resource_id == observed[2].resource_id
+    || expected[3].resource_id == observed[3].resource_id;
+  let debug_role_expected = observed[3].resource_id == expected[0].resource_id
+    || observed[3].resource_id == expected[1].resource_id
+    || observed[3].resource_id == expected[2].resource_id
+    || observed[3].resource_id == expected[3].resource_id;
+
+  let web_class = if (web_same) { "in_sync" } else { "changed" };
+  let bucket_class = if (bucket_same) { "in_sync" } else { "changed" };
+  let worker_class = if (worker_same) {
+    "in_sync"
+  } else if (expected[2].ambiguous_if_changed) {
+    "ambiguous"
+  } else {
+    "changed"
+  };
+  let log_group_class = if (log_group_present) { "present_elsewhere" } else { "missing" };
+  let debug_role_class = if (debug_role_expected) { "expected_elsewhere" } else { "unexpected" };
+
+  let findings = [
+    DriftFinding { resource_id: expected[0].resource_id, classification: web_class, expected: expected[0].value, observed: observed[0].value },
+    DriftFinding { resource_id: expected[1].resource_id, classification: bucket_class, expected: expected[1].value, observed: observed[1].value },
+    DriftFinding { resource_id: expected[2].resource_id, classification: worker_class, expected: expected[2].value, observed: observed[2].value },
+    DriftFinding { resource_id: expected[3].resource_id, classification: log_group_class, expected: expected[3].value, observed: "<absent>" },
+    DriftFinding { resource_id: observed[3].resource_id, classification: debug_role_class, expected: "<unmanaged>", observed: observed[3].value }
+  ];
+
+  // Classification is already deterministic. The agent decides only how the
+  // dry-run should treat the one ambiguous capacity change.
+  let proposed_decision = match await agent.ask<AmbiguousDecision>(prompt {
+    system: "Resolve only aws_instance.worker. Choose restore_expected, accept_observed, or defer. Use defer when the embedded fixture cannot establish whether the capacity change was intentional. Keep resource_id exact."
+    data: { finding: findings[2], allowed_dispositions: ["restore_expected", "accept_observed", "defer"] }
+    output: AmbiguousDecision
+  }) {
+    Ok(value) => value
+    Err(_) => AmbiguousDecision { resource_id: "aws_instance.worker", disposition: "defer", rationale: "agent unavailable" }
+  };
+  let decision_valid = proposed_decision.resource_id == "aws_instance.worker"
+    && (proposed_decision.disposition == "restore_expected"
+      || proposed_decision.disposition == "accept_observed"
+      || proposed_decision.disposition == "defer");
+  let decision = if (decision_valid) {
+    proposed_decision
+  } else {
+    AmbiguousDecision { resource_id: "aws_instance.worker", disposition: "defer", rationale: "invalid agent response; deterministic fallback" }
+  };
+
+  mut steps: List<PlanStep> = [];
+  if (bucket_class == "changed") {
+    steps = list.append(steps, PlanStep { resource_id: "aws_s3_bucket.logs", action: "update", desired: "encryption=AES256" });
+  }
+  if (log_group_class == "missing") {
+    steps = list.append(steps, PlanStep { resource_id: "aws_cloudwatch_log_group.app", action: "create", desired: "retention_days=30" });
+  }
+  if (decision.disposition == "restore_expected") {
+    steps = list.append(steps, PlanStep { resource_id: "aws_instance.worker", action: "update", desired: "instance_type=t3.small" });
+  }
+  if (decision.disposition == "accept_observed") {
+    steps = list.append(steps, PlanStep { resource_id: "aws_instance.worker", action: "update_iac", desired: "instance_type=t3.medium" });
+  }
+
+  DriftReview {
+    fixture: "synthetic representative IaC snapshot derived from the non-secret showcase; 4 expected and 4 observed resources",
+    expected_resources: length(expected),
+    observed_resources: length(observed),
+    findings,
+    ambiguous_decision: decision,
+    dry_run_steps: steps,
+    limitation: "Dry run only: ALLEN used embedded evidence and did not call cloud APIs, read files, use a shell or permissions, reach the network, or apply changes."
+  }
+}

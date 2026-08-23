@@ -1,0 +1,11 @@
+record Failure {
+  code: Int
+  message: String
+}
+
+export fn main() returns Result<Int, Failure> {
+  let failure = Failure { message: "failed", code: 7 };
+  let outcome: Result<Int, Failure> = Err(failure);
+  let value = outcome?;
+  Ok(value + 99)
+}

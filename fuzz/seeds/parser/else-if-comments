@@ -1,0 +1,2 @@
+export fn main() returns Int { if (false) { 1 } else /* nested */ if // line
+(true) { 2 } else { 3 } }

@@ -1,0 +1,40 @@
+record FibonacciPair {
+  current: Int
+  next: Int
+}
+
+fn is_even(value: Int) returns Bool {
+  value % 2 == 0
+}
+
+fn double_pair(index: Int, half: FibonacciPair) returns FibonacciPair {
+  let current = half.current * (2 * half.next - half.current);
+  let next = half.current * half.current + half.next * half.next;
+  if (is_even(index)) {
+    FibonacciPair { current, next }
+  } else {
+    FibonacciPair { current: next, next: current + next }
+  }
+}
+
+fn fibonacci_pair(index: Int) returns FibonacciPair {
+  if (index == 0) {
+    FibonacciPair { current: 0, next: 1 }
+  } else {
+    double_pair(index, fibonacci_pair(index / 2))
+  }
+}
+
+fn fibonacci(index: Int) returns Int {
+  fibonacci_pair(index).current
+}
+
+export fn main() returns (Int, Int, Int, Int, Int) {
+  (
+    fibonacci(0),
+    fibonacci(1),
+    fibonacci(10),
+    fibonacci(20),
+    fibonacci(40),
+  )
+}

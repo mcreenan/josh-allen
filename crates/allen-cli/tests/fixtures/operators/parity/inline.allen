@@ -1,0 +1,30 @@
+manifest {
+  language: "0.1"
+  entry: main
+  capabilities: []
+}
+
+export fn main() returns Int {
+  mut integer = -13;
+  integer %= 5;
+  integer += 10;
+  integer -= 2;
+  integer *= 3;
+  integer /= 2;
+
+  mut decimal: Float = 2.0;
+  decimal += 3.0;
+  decimal -= 1.5;
+  decimal *= 2.0;
+  decimal /= 2.0;
+
+  let skipped_and = false && ((1 % 0) == 0);
+  let skipped_or = true || ((1 % 0) == 0);
+  let evaluated_and = true && (integer % 2 == 1);
+  let evaluated_or = false || (decimal == 3.5);
+  if (skipped_and) { integer += 1000; }
+  if (skipped_or) { integer += 1; }
+  if (evaluated_and) { integer += 10; }
+  if (evaluated_or) { integer += 100; }
+  integer
+}

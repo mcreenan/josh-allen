@@ -1,0 +1,621 @@
+// Learn ALLEN in Y minutes.
+//
+// ALLEN means Agent-Level Language, Embedded Natively.
+// ALLEN is a strict language for agents.
+// ALLEN has explicit effects and typed boundaries.
+// ALLEN does not use implicit coercion.
+// The host supplies the types for the demo.echo tool.
+
+// The manifest identifies the entry function.
+// The manifest requests capabilities, origins, and tools.
+// A request does not give authority.
+// The host can give the requested authority or less authority.
+manifest {
+  language: "0.1"
+  entry: main
+  capabilities: [
+    agent.ask, agent.message, agent.transcript,
+    fs.read(workdir), fs.write(workdir), model.request, net.http_get,
+    permission.request_external_fs, sub_agent.ask, sub_agent.create,
+    sub_agent.message, sub_agent.run, user.ask,
+  ]
+  http_origins: ["https://example.com"]
+  tools: { required: [{ name: "demo.echo", version: ">=1.0.0, <2.0.0" }] }
+}
+
+// A relative import has one or more specified names.
+// The `as` keyword gives an imported name a local alias.
+import { add as imported_add, apply, same } from "./functions-and-effects/support.allen";
+// A package import starts with a locked dependency alias.
+// This example does not use the package import that follows.
+// import { normalize } from "text_utils/src/text.allen";
+
+/* A block comment can contain a block comment. /* This is an example. */ */
+
+// Record types are structural.
+// A record constructor must contain all declared fields.
+// Enum types are nominal.
+// A qualified enum constructor selects a payloadless, tuple, or record variant.
+record Point { x: Int, y: Int }
+record Coordinates { y: Int, x: Int }
+
+enum Reading {
+  Empty
+  Number(Int)
+  Named { label: String, value: Int }
+}
+
+record Decision { approved: Bool, reason: String }
+record Projection {
+  capabilities: List<String>
+  limits: Map<String, Int>
+  tools: List<String>
+}
+
+record Tour {
+  answer: Int
+  message: String
+  point: Point
+  safe_value: Option<Int>
+}
+
+// The `returns` keyword specifies the exact return type.
+// The last expression supplies the return value.
+// A generic parameter specifies its constraints.
+// In this function, T must satisfy `Eq`.
+fn identity<T: Eq>(value: T) returns T {
+  // `identity` returns the input without a change.
+  // The compiler infers T at each call.
+  value
+}
+
+// A function type contains its exact closed effect set.
+fn call_twice(callback: fn(Int) returns Int, value: Int) returns Int {
+  // ALLEN evaluates function calls strictly.
+  // The inner callback returns before the outer callback starts.
+  callback(callback(value))
+}
+
+// `Void` has one value, `()`.
+// `Bool` has the values `true` and `false`.
+// `Int` is a checked, signed 64-bit integer.
+// `Float` is an IEEE 754 binary64 value.
+// `String` contains valid UTF-8 text.
+// `Bytes` can contain all byte values.
+fn values() returns (Void, Bool, Int, Float, String, Bytes) {
+  ((), true, -42, 1.5e2, "UTF-8: λ\n", b"bytes:\x00")
+}
+
+// All items in a `List` have one type.
+// All keys and all values in a `Map` have specified types.
+// Each position in a tuple has a specified type.
+// A map literal sorts its entries in the canonical key order.
+// A duplicate map key causes a terminal trap.
+// `length(Bytes)` returns the number of bytes.
+// `length(List)` and `length(Map)` return the number of items.
+// `length(String)` returns the number of Unicode scalar values.
+// `length` does not change its input.
+fn collections() returns (List<Int>, Map<String, Int>, (String,), Int) {
+  let empty: List<Int> = [];
+  let scores: Map<String, Int> = map { "Ada": 10, "Grace": 9 };
+  // The `[]` operator returns the selected value.
+  // A missing map key causes a terminal trap.
+  // An incorrect `List` or `Bytes` index causes a terminal trap.
+  // A tuple index must be a valid, nonnegative integer literal.
+  // An incorrect tuple index causes a compilation error.
+  let pair = (scores["Ada"], [20, 22][1]);
+  // `list.append` returns a new list.
+  // `list.append` does not change `empty`.
+  // An insufficient allocation budget causes a terminal resource trap.
+  let appended = list.append(empty, pair[0]);
+  // `list.set` returns a new list.
+  // An incorrect index in `list.set` causes a terminal trap.
+  // A `Bytes` index returns an `Int` from 0 through 255.
+  // `length(scores)` returns the number of map entries.
+  (list.set(appended, 0, b"*"[0]), scores, ("one-tuple",), length(scores))
+}
+
+// Two record types are compatible if their structures are the same.
+// A `match` on an enum must include all variants.
+// You must narrow an `unknown` value before concrete use.
+fn data_types(reading: Reading) returns (Coordinates, Int, Option<Point>, Bool) {
+  let point = Point { y: 2, x: 1 };
+  let coordinates: Coordinates = point; // The record structures are the same.
+  // `match` evaluates one arm.
+  // This `match` includes all variants of `Reading`.
+  let value = match reading {
+    Reading.Empty => 0
+    Reading.Number(number) => number
+    Reading.Named { value, label: _ } => value
+  };
+  // A record pattern binds the fields in the selected arm.
+  let sum = match point { Point { x, y } => x + y };
+  // `to_unknown` puts a typed value in an `unknown` value.
+  // `to_unknown` does not remove the contained value.
+  // `narrow<T>` does a recursive check of the runtime structure.
+  // If the structure is T, `narrow<T>` returns `Some(T)`.
+  // If the structure is not T, `narrow<T>` returns `None`.
+  let erased: unknown = to_unknown(point);
+  // The `==` operator compares same-type values recursively.
+  // The `==` operator does not use coercion.
+  (coordinates, value + sum, narrow<Point>(erased), point == coordinates)
+}
+
+// `Result` represents an expected failure.
+// ALLEN has no general `throw`, `try`, or `catch` syntax.
+fn positive(value: Int) returns Result<Int, String> {
+  // `if` evaluates its `Bool` condition one time.
+  // `if` evaluates only one branch.
+  // The branch that does not run does no runtime work.
+  // The static effect set includes the effects of both branches.
+  // `Ok` contains the success value.
+  // `Err` contains the expected error value.
+  if (value > 0) { Ok(value) } else { Err("not positive") }
+}
+
+// The postfix `?` operator has two paths for `Result<T, E>`.
+// If the result is `Ok(value)`, `?` supplies `value`.
+// Execution then continues on the next line.
+// If the result is `Err(error)`, `?` returns the same `Err(error)` immediately.
+// In the `Err` path, the function does not run the remaining statements.
+// The `?` operator does not catch terminal traps.
+// The `?` operator does not convert E to a different error type.
+// An `await` scope completes its cleanup before the `Err` path leaves the scope.
+// The function must return a `Result` with the same error type E.
+fn increment_positive(value: Int) returns Result<Int, String> {
+  let positive_value = positive(value)?;
+  Ok(positive_value + 1)
+}
+
+// `Option` replaces `null`.
+// `None` contains no value.
+// `Some(value)` contains a value of type T.
+// Each `match` selects one arm and binds its payload.
+// Each `match` must include all possible cases.
+// The `_` pattern matches a value and does not make a binding.
+fn patterns(value: Option<Int>, result: Result<Int, String>) returns Int {
+  let left = match value { None => 0, Some(number) => number };
+  let right = match result { Ok(number) => number, Err(_) => 0 };
+  let truth = match left == right { true => 1, false => 0 };
+  left + right + truth
+}
+
+// `if` is an expression.
+// Only the selected branch runs.
+// All value branches must have the same type.
+// An `else if` chain associates to the right.
+fn classify(value: Int) returns String {
+  if (value < 0) { "negative" }
+  else if (value == 0) { "zero" }
+  else { "positive" }
+}
+
+// A bare `return` immediately exits a `Void` function.
+// Without the `return`, execution continues to the `()` tail value.
+fn return_early(done: Bool) returns Void {
+  if (done) { return; }
+  ()
+}
+
+// The `+`, `-`, `*`, `/`, and unary `-` operators check for `Int` overflow.
+// `Int` overflow causes a terminal trap.
+// Division by zero causes a terminal trap.
+// `Int` division truncates toward zero.
+// The `%` operator uses the truncating remainder.
+// A zero divisor with `%` causes a terminal trap.
+// `Int::MIN % -1` returns zero.
+// The `*`, `/`, and `%` operators bind more tightly than `+` and `-`.
+// The ordered comparison operators compare values of the same ordered type.
+// The `==` operator tests same-type equality.
+// The `!=` operator gives the inverse result of `==`.
+// If the left side of `&&` is false, ALLEN does not evaluate the right side.
+// If the left side of `||` is true, ALLEN does not evaluate the right side.
+// The `!` operator changes a `Bool` to its opposite value.
+// The `&&` operator binds more tightly than `||`.
+// A right side that does not run does no runtime work.
+// Its effects stay in the static effect set.
+fn operators(left: Int, right: Int) returns (Int, Int, Bool, Float) {
+  let arithmetic = left + right * 2 - left / 2;
+  let remainder = left % right;
+  let ordered = left >= right && right != 0 || left < 0;
+  // `to_float` converts an `Int` with round-to-nearest and ties-to-even.
+  (arithmetic, remainder, !ordered, to_float(arithmetic))
+}
+
+// Aggregate values are immutable.
+// `mut` permits reassignment of the complete local value.
+// A compound assignment reads the old local one time.
+// A compound assignment evaluates its right side one time.
+// A compound assignment changes the local only after a successful calculation.
+// If overflow or zero division occurs, the old local does not change.
+fn loops(items: List<Int>, bytes: Bytes, table: Map<String, Int>, text: String) returns Int {
+  mut total: Int = 0;
+  let no_items: List<Int> = [];
+
+  // ALLEN evaluates each iterable one time.
+  // A `List` loop uses list order.
+  // A `Bytes` loop uses byte order.
+  // A `Map` loop uses canonical key order.
+  // A `String` loop supplies one Unicode scalar in each `String` value.
+  for item in items { total += item; }
+  for byte in bytes { total += byte; }
+  for (key, value) in table { total += length(key) + value; }
+  for scalar in text { total += length(scalar); }
+  // ALLEN evaluates each range limit one time.
+  // The range starts at the `start` value.
+  // The range does not include the `end` value.
+  // The range is in ascending order.
+  // If `start` is not less than `end`, the range is empty.
+  // `continue` starts the next loop step.
+  for index in 0..3 {
+    if (index == 1) { continue; }
+    total -= index;
+  }
+
+  // `while` checks its condition before each loop step.
+  // `loop` continues until `break`, `return`, `stop`, or a failure occurs.
+  // `break` exits only the innermost loop.
+  // Each loop has type `Void`.
+  while (total < 0) { total += 1; }
+  loop { total %= 100; break; }
+  total /= 1;
+  // The `_` binding does not use the supplied item.
+  // Because `no_items` is empty, the loop body does not run.
+  // The static effect set still includes the effects of the loop body.
+  for _ in no_items { total *= 2; }
+  // A simple assignment evaluates the right side before it changes the local.
+  total = total + 0;
+  total
+}
+
+// `String` operations use Unicode scalar indexes.
+// `string.byte_length` counts UTF-8 bytes.
+// A template accepts only `String` interpolation expressions.
+// Thus, this example uses `to_string` for other scalar types.
+// These operations are pure.
+// An insufficient allocation budget causes a terminal trap.
+fn strings(name: String) returns String {
+  // `string.trim_ascii` removes specified ASCII white space from both ends.
+  // This white space is space, tab, LF, CR, form feed, and vertical tab.
+  let trimmed = string.trim_ascii(name);
+  // `string.join` uses list order and puts the separator between items.
+  // If the list is empty, `string.join` returns `""`.
+  let joined = string.join([trimmed, "ALLEN"], " learns ");
+  // If the separator is empty, `string.split` returns `None`.
+  // Otherwise, `string.split` returns `Some(fields)`.
+  // The result keeps empty fields at all positions.
+  // If there is no match, the result is `Some([value])`.
+  let split = string.split(joined, " learns ");
+  // For a correct index, `string.get` returns the scalar in `Some(String)`.
+  // For an incorrect index, `string.get` returns `None`.
+  let scalar = string.get(joined, 0);
+  // `string.slice` uses the scalar range `[start, end)`.
+  // If the limits are incorrect, `string.slice` returns `None`.
+  let slice = string.slice(joined, 0, 1);
+  // `string.find` returns the first matching scalar index in `Some(Int)`.
+  // If there is no match, `string.find` returns `None`.
+  // An empty search string returns `Some(0)`.
+  let found = string.find(joined, "ALLEN");
+  // `to_bytes` returns the UTF-8 bytes of a `String`.
+  // If all bytes are valid UTF-8, `string.from_utf8` returns `Some(String)`.
+  // Otherwise, `string.from_utf8` returns `None`.
+  let decoded = string.from_utf8(to_bytes(joined));
+  // These three operations do exact, case-sensitive comparisons.
+  let predicates = string.contains(joined, "ALLEN")
+    && string.starts_with(joined, trimmed)
+    && string.ends_with(joined, "ALLEN");
+  // `length` counts Unicode scalar values.
+  // `string.byte_length` counts the encoded UTF-8 bytes.
+  let sizes = length(joined) + string.byte_length(joined);
+  // `string.concat` returns a new `String`.
+  // ALLEN evaluates template expressions from left to right.
+  // Each template expression must have type `String`.
+  // `to_string` returns the canonical text for a scalar value.
+  `${string.concat(joined, "!")} (${to_string(sizes)}, ${to_string(predicates)})`
+}
+
+// These safe collection and integer operations are pure.
+// These operations return `Option` instead of a data trap.
+// An insufficient resource budget still causes a terminal trap.
+fn safe_data(values: List<Int>, raw_bytes: Bytes, table: Map<String, Int>) returns Option<Int> {
+  // For a correct index, `list.get` returns `Some(element)`.
+  // For an incorrect index, `list.get` returns `None`.
+  let first = list.get(values, 0);
+  // For a correct index, `list.try_set` returns `Some(new_list)`.
+  // For an incorrect index, `list.try_set` returns `None`.
+  // `list.try_set` does not change `values`.
+  let changed = list.try_set(values, 0, 42);
+  // For a correct index, `bytes.get` returns an `Int` in `Some`.
+  // The `Int` is from 0 through 255.
+  // For an incorrect index, `bytes.get` returns `None`.
+  let byte = bytes.get(raw_bytes, 0);
+  // For a key in the map, `map.get` returns `Some(value)`.
+  // For a key not in the map, `map.get` returns `None`.
+  let mapped = map.get(table, "answer");
+  // A checked integer operation returns `Some(result)` after success.
+  // A checked integer operation returns `None` after overflow.
+  // `int.checked_div` and `int.checked_rem` return `None` for a zero divisor.
+  // `int.checked_rem(Int::MIN, -1)` returns `Some(0)`.
+  let sum = int.checked_add(40, 2);
+  let difference = int.checked_sub(44, 2);
+  let product = int.checked_mul(6, 7);
+  let quotient = int.checked_div(84, 2);
+  let remainder = int.checked_rem(85, 43);
+  let negated = int.checked_neg(-42);
+  sum
+}
+
+// A call to an `async fn` makes a lazy, affine `Future<T>`.
+// The function body does not start at the call.
+// `await` starts the body in the current task.
+// `spawn` schedules the body in a new task.
+// You cannot copy a `Future` or consume it two times.
+// You can discard an unstarted `Future` if it owns no live task.
+async fn delayed(value: Int) returns Int { value }
+
+// A `Future` return transfers the lazy computation to the caller.
+fn lazy(value: Int) returns Future<Int> { delayed(value) }
+
+// `spawn` consumes a `Future` and returns a live, affine `Task`.
+// A `Task` return transfers the task obligation to the caller.
+// You must await a live `Task` or transfer it again.
+// You cannot copy, discard, or await a live `Task` two times.
+fn start(value: Int) returns Task<Int> effects [task.spawn] { spawn delayed(value) }
+
+// `await Future<T>` starts the future and consumes one `Future` layer.
+// `await` suspends the current task when suspension is necessary.
+// The result of this `await` has type T.
+async fn directly_await() returns Int { await delayed(42) }
+
+async fn concurrent() returns Int effects [debug.inspect, task.spawn] {
+  // An `await` block owns the tasks that start in the block.
+  // Before normal exit, the block joins its unfinished tasks.
+  // After a terminal failure, cleanup cancels and joins these tasks.
+  await {
+    let left = spawn delayed(40);
+    let right = spawn delayed(2);
+    // `task_snapshot` reads diagnostic state and does not consume the task.
+    // `task_snapshot` adds the `debug.inspect` effect.
+    // The `.id` operation reads a known record field.
+    // A task ID is only a diagnostic for the current execution.
+    let snapshot = allen.internal.task_snapshot(left);
+    // `await Task<T>` consumes the task handle.
+    // It waits for task completion and then supplies T.
+    let left_value = await left;
+    let right_value = await right;
+    // `return` exits `concurrent` after the `await` block completes cleanup.
+    return left_value + right_value + snapshot.id - snapshot.id;
+  }
+}
+
+// Prompt fields keep instruction, context, data, and output separate.
+// `Prompt<Decision>` requires an exact `Decision` response.
+// `max_attempts: 2` permits a maximum of two total attempts.
+// The first response is attempt one.
+// Host and manifest limits can decrease the number of attempts.
+fn approval_prompt(topic: String) returns Prompt<Decision> {
+  prompt {
+    system: "Decide whether to approve the typed data."
+    context: "This text remains a separate prompt segment."
+    data: { topic }
+    output: Decision
+    policy: { max_attempts: 2 }
+  }
+}
+
+// `effects [...]` specifies a static maximum effect set.
+// An effect declaration does not give authority.
+// A function call does not necessarily use all declared effects.
+// Provider operations return `Result` for expected errors.
+async fn invoking_agent(topic: String)
+  returns Result<Decision, AgentError>
+  effects [agent.ask, agent.message, agent.transcript] {
+  // `agent.message` returns `Ok(())` after the invoking agent accepts delivery.
+  // `agent.message` does not wait for a content response.
+  // An `Err(AgentError)` follows the `?` error path above.
+  let sent = (await agent.message("Starting review."))?;
+  // `agent.transcript` returns a snapshot with the oldest message first.
+  // Host policy filters the snapshot.
+  // This query returns a maximum of 20 visible messages.
+  // A failure returns `Err(AgentError)`.
+  // The snapshot never contains hidden reasoning.
+  let transcript = (await agent.transcript({ limit: 20 }))?;
+  // Typed `agent.ask` sends the prompt to the same invoking agent.
+  // After exact response validation, it returns `Ok(Decision)`.
+  // A failure returns `Err(AgentError)`.
+  await agent.ask<Decision>(approval_prompt(topic))
+}
+
+async fn ask_agent_text(question: String)
+  returns Result<String, AgentError> effects [agent.ask] {
+  let request: Prompt<String> = prompt {
+    system: question
+    output: String
+  };
+  await agent.ask<String>(request)
+}
+
+// The model provider and user provider are separate from the invoking agent.
+async fn other_responders(topic: String)
+  returns Result<Decision, ModelError> effects [model.request] {
+  // `model.request` validates the response as `Decision`.
+  // After success, it returns `Ok(Decision)`.
+  // A provider, request, or validation failure returns `Err(ModelError)`.
+  await model.request<Decision>(approval_prompt(topic))
+}
+
+async fn ask_user(topic: String)
+  returns Result<Decision, UserError> effects [user.ask] {
+  // `user.ask` uses the user-interaction provider.
+  // After validation, it returns `Ok(Decision)`.
+  // A failure returns `Err(UserError)`.
+  // If the user provider is not available, it returns `Err(UserError)`.
+  await user.ask<Decision>(approval_prompt(topic))
+}
+
+// A sub-agent receives an explicit authority projection and a typed prompt.
+async fn delegate(topic: String, projection: Projection)
+  returns Result<Decision, SubAgentError>
+  effects [sub_agent.ask, sub_agent.create, sub_agent.message, sub_agent.run] {
+  let initial: Prompt<Void> = prompt {
+    system: "Wait for a typed request."
+    output: Void
+  };
+  // `sub_agent.create` requests a new sub-agent.
+  // The projection must be a subset of the parent authority.
+  // After success, the operation returns `Ok(SubAgent)`.
+  // A failure returns `Err(SubAgentError)`.
+  // The `?` operator returns this error from `delegate`.
+  let child = (await sub_agent.create(initial, projection))?;
+  // `sub_agent.message` sends a message to the specified sub-agent.
+  // Success means that the sub-agent accepted delivery.
+  // Success does not include a content response.
+  let sent = (await sub_agent.message(child, "Review follows."))?;
+  // `sub_agent.ask` requests a typed response from the specified sub-agent.
+  // It returns a validated `Ok(Decision)` or `Err(SubAgentError)`.
+  await sub_agent.ask<Decision>(child, approval_prompt(topic))
+}
+
+async fn delegate_once(topic: String, projection: Projection)
+  returns Result<Decision, SubAgentError> effects [sub_agent.run] {
+  // `sub_agent.run` creates a sub-agent and waits for its typed response.
+  // It returns a validated `Ok(Decision)` or `Err(SubAgentError)`.
+  await sub_agent.run<Decision>(approval_prompt(topic), projection)
+}
+
+// A `Workspace` is an opaque capability.
+// File-system failures are typed `Result` values.
+async fn workspace_io() returns Result<String, FileError>
+  effects [fs.read, fs.write] {
+  // `fs.workspace` returns the work-directory capability for this execution.
+  // This operation is pure.
+  // Each file-system operation checks the workspace rights again.
+  let workspace = fs.workspace();
+  // File-system calls are lazy asynchronous operations.
+  // `await` starts each operation.
+  // A successful write returns `Ok(())`.
+  // A successful read returns `Ok(String)` or `Ok(Bytes)`.
+  // For `Err(FileError)`, `?` returns the same error from `workspace_io`.
+  let wrote_text = (await fs.write_text(workspace, "note.txt", "hello"))?;
+  let wrote_bytes = (await fs.write_bytes(workspace, "note.bin", b"hello"))?;
+  let bytes = (await fs.read_bytes(workspace, "note.bin"))?;
+  // `fs.list` returns UTF-8 entry names in ascending byte order.
+  // The path `"."` identifies the workspace root.
+  let entries = (await fs.list(workspace, "."))?;
+  // `fs.read_text` returns `Ok` with valid UTF-8 text.
+  // A failure returns `Err(FileError)`.
+  await fs.read_text(workspace, "note.txt")
+}
+
+// An external path requires a typed permission request.
+// An approved request returns a new `Workspace`.
+async fn request_external_file() returns Result<Workspace, PermissionError>
+  effects [permission.request_external_fs] {
+  // `permission.request_file` requests access to one file.
+  // Policy and approval must permit the request.
+  // After approval, the operation returns `Ok(Workspace)`.
+  // A denial or unavailable approval returns `Err(PermissionError)`.
+  await permission.request_file({
+    access: ExternalFsAccess.Read,
+    path: "/chosen/notes.txt",
+    reason: "Read the user-selected notes."
+  })
+}
+
+async fn request_external_directory() returns Result<Workspace, PermissionError>
+  effects [permission.request_external_fs] {
+  // `ReadWrite` requests read and write rights.
+  // `recursive: true` includes descendants of the directory.
+  // The host can give less authority than the request.
+  // The grant expires when this execution ends.
+  await permission.request_directory({
+    access: ExternalFsAccess.ReadWrite,
+    path: "/chosen/project",
+    reason: "Work in the user-selected project.",
+    recursive: true
+  })
+}
+
+// HTTP access is restricted to declared HTTPS origins.
+// `http.get` returns a typed response.
+async fn fetch() returns Result<HttpResponse, NetworkError>
+  effects [net.http_get] {
+  // `Ok(HttpResponse)` contains the body, status, and headers.
+  // A non-2xx status is also an `Ok(HttpResponse)`.
+  // An expected network, URL-policy, or content-encoding failure returns `Err`.
+  // The error has type `NetworkError`.
+  // An execution limit or host-protocol fault causes a terminal trap.
+  await http.get("https://example.com/data")
+}
+
+// The compiler generates tool types from the frozen tool catalog.
+// The compiler also generates the closed tool `Error` enum.
+async fn echo(text: String)
+  returns Result<tools.demo.echo.Output, tools.demo.echo.Error>
+  effects [tool.demo.echo@1] {
+  // `call` validates the input before tool dispatch.
+  // `call` validates the output after tool dispatch.
+  // After success, `Ok` contains the generated `Output` value.
+  // `Err` identifies a `Declared`, `Unavailable`, or `Schema` error.
+  await tools.demo.echo.call({ text })
+}
+
+// Capability inspection reports the frozen grants for this program.
+// Capability inspection does not give authority.
+// It does not report providers, tools, or dynamic file-system grants.
+// `capability.inspect` is a local effect.
+// It does not need a manifest grant.
+fn has_network() returns Bool effects [capability.inspect] {
+  // `capability.is_granted` checks one canonical requested name.
+  // `capability.granted` returns all granted requested names.
+  // The returned list is sorted and has no duplicate names.
+  // If `is_granted` is false, `&&` does not call `granted`.
+  // Otherwise, ALLEN calls `granted`.
+  // `length(List)` returns the number of granted names.
+  capability.is_granted("net.http_get") && length(capability.granted()) > 0
+}
+
+// `stop` returns `Never`.
+// In this function, `stop` terminates an unsatisfied requirement.
+// The terminal outcome is `Stopped`.
+// Source code cannot catch the `Stopped` outcome.
+fn require(condition: Bool, reason: String) returns Void {
+  // If `condition` is true, the branch does not run.
+  // The function then returns `Void`.
+  // If `condition` is false, `stop` ends this execution after cleanup.
+  // Source code cannot catch or continue the stopped execution.
+  // `stop` does not terminate the host or the invoking agent.
+  if (!condition) { stop(reason) }
+}
+
+// A closure captures an immutable local by value.
+// Omitting the effect clause denotes the exact empty effect set.
+// This entry spells out its empty maximum effect set explicitly.
+export fn main(input: String) returns Tour {
+  let offset = 1;
+  // The closure copies `offset` into its environment.
+  // A closure call evaluates the closure body.
+  // `call_twice` calls the callback two times.
+  // Thus, `call_twice(add_offset, 40)` returns 42.
+  let add_offset = fn(value: Int) returns Int { value + offset };
+  // `imported_add` adds its arguments.
+  // `apply` calls `add_offset` one time.
+  // `same` does an `Eq` equality test.
+  // If `same` returns false, `&&` does not call `identity`.
+  let answer = imported_add(40, 2);
+  let callback_answer = apply(add_offset, 41);
+  let generic_equality = same(answer, callback_answer) && identity(true);
+  // `safe_data` returns `Some(42)` for these arguments.
+  // `data_types` returns a tuple with 4 in its second position.
+  let safe_value = safe_data([answer], b"*", map { "answer": answer });
+  let typed = data_types(Reading.Named { label: classify(answer), value: 1 });
+  // The record constructor specifies all fields.
+  // `safe_value` is shorthand for `safe_value: safe_value`.
+  // The other functions in this file are also part of the language example.
+  Tour {
+    answer: call_twice(add_offset, 40),
+    message: strings(input),
+    point: Point { x: typed[1], y: patterns(Some(1), Ok(2)) },
+    safe_value,
+  }
+}

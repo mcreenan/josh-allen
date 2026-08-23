@@ -1,0 +1,5 @@
+Inspect a bounded sample of repository tests or existing test output. Group the
+failures deterministically into a minimal reproducer plan, using judgment only
+when the supplied evidence cannot distinguish two candidates. Report the
+original evidence count, reduced cases, and why each retained case matters;
+avoid running a broad test suite.

@@ -1,0 +1,18 @@
+[package]
+name = "allen-compiler"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+allen-bytecode = { path = "../allen-bytecode" }
+allen-package = { path = "../allen-package" }
+allen-schema = { path = "../allen-schema" }
+allen-syntax = { path = "../allen-syntax" }
+
+[dev-dependencies]
+allen-vm = { path = "../allen-vm" }
+
+[lints]
+workspace = true

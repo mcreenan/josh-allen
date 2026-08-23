@@ -1,0 +1,11 @@
+fn arithmetic_mean(values: List<Int>) returns Int {
+  mut total: Int = 0;
+  for value in values {
+    total += value;
+  }
+  total / length(values)
+}
+
+export fn main() returns Int {
+  arithmetic_mean([4, 8, 15, 16, 23, 42])
+}

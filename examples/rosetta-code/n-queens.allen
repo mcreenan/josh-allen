@@ -1,0 +1,35 @@
+fn absolute_difference(left: Int, right: Int) returns Int {
+  if (left >= right) { left - right } else { right - left }
+}
+
+fn is_safe(columns: List<Int>, row: Int, column: Int) returns Bool {
+  for previous_row in 0..length(columns) {
+    let previous_column = columns[previous_row];
+    if (previous_column == column
+      || absolute_difference(previous_column, column) == row - previous_row) {
+      return false;
+    }
+  }
+  true
+}
+
+fn count_solutions(size: Int, row: Int, columns: List<Int>) returns Int {
+  if (row == size) {
+    return 1;
+  }
+  mut total: Int = 0;
+  for column in 0..size {
+    if (is_safe(columns, row, column)) {
+      total += count_solutions(size, row + 1, list.append(columns, column));
+    }
+  }
+  total
+}
+
+fn n_queens(size: Int) returns Int {
+  count_solutions(size, 0, [])
+}
+
+export fn main() returns (Int, Int, Int, Int) {
+  (n_queens(1), n_queens(4), n_queens(5), n_queens(8))
+}

@@ -1,0 +1,11 @@
+fn move_count(disks: Int) returns Int {
+  if (disks <= 0) {
+    0
+  } else {
+    2 * move_count(disks - 1) + 1
+  }
+}
+
+export fn main() returns (Int, Int, Int, Int) {
+  (move_count(0), move_count(1), move_count(3), move_count(10))
+}

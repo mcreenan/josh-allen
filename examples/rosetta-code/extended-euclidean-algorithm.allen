@@ -1,0 +1,31 @@
+record ExtendedGcd {
+  gcd: Int
+  x: Int
+  y: Int
+}
+
+fn extended_gcd(left: Int, right: Int) returns ExtendedGcd {
+  mut old_remainder = left;
+  mut remainder = right;
+  mut old_x: Int = 1;
+  mut x: Int = 0;
+  mut old_y: Int = 0;
+  mut y: Int = 1;
+  while (remainder != 0) {
+    let quotient = old_remainder / remainder;
+    let next_remainder = old_remainder % remainder;
+    let next_x = old_x - quotient * x;
+    let next_y = old_y - quotient * y;
+    old_remainder = remainder;
+    remainder = next_remainder;
+    old_x = x;
+    x = next_x;
+    old_y = y;
+    y = next_y;
+  }
+  ExtendedGcd { gcd: old_remainder, x: old_x, y: old_y }
+}
+
+export fn main() returns ExtendedGcd {
+  extended_gcd(240, 46)
+}

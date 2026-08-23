@@ -1,0 +1,6 @@
+export fn main() returns Int {
+  if (true) {
+    let local = 1;
+  }
+  local
+}

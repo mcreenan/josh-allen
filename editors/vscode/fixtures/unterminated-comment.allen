@@ -1,0 +1,3 @@
+export fn unfinished() returns Int {
+  /* This block comment deliberately has no closing delimiter.
+  It must remain comment-scoped through end of file.

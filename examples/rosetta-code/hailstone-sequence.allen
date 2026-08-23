@@ -1,0 +1,30 @@
+record HailstoneStats {
+  length: Int
+  maximum: Int
+}
+
+fn next_hailstone(value: Int) returns Int {
+  if (value % 2 == 0) {
+    value / 2
+  } else {
+    3 * value + 1
+  }
+}
+
+fn hailstone_stats(value: Int) returns HailstoneStats {
+  mut current = value;
+  mut length: Int = 1;
+  mut maximum = value;
+  while (current != 1) {
+    current = next_hailstone(current);
+    length += 1;
+    if (current > maximum) {
+      maximum = current;
+    }
+  }
+  HailstoneStats { length, maximum }
+}
+
+export fn main() returns HailstoneStats {
+  hailstone_stats(13)
+}

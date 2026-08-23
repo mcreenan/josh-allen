@@ -1,0 +1,6 @@
+{
+  "josh_allen": {
+    "command": "bash",
+    "args": ["${CLAUDE_PLUGIN_ROOT}/bin/josh-allen-mcp"]
+  }
+}

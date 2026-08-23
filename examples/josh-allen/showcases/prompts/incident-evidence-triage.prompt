@@ -1,0 +1,4 @@
+Inspect a small, non-sensitive diagnostic fixture, or synthesize one if needed.
+Classify the bounded evidence as confirmed, contradictory, or missing, use
+judgment only for one genuinely ambiguous signal, and return a concise incident
+timeline with the next investigation step. Do not perform remediation.

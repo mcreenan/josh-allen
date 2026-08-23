@@ -1,0 +1,24 @@
+import { classify } from "./support.allen";
+
+export fn main() returns Int {
+  mut total = 0;
+  if (true) {
+    total = classify(0);
+  }
+  if (false) {
+    total = 999;
+  }
+  if (false) {
+    total = 998;
+  } else {
+    total = total;
+  }
+  let extra = if (false) {
+    stop("skipped")
+  } else /* comments remain whitespace */ if (true) {
+    classify(1)
+  } else {
+    999
+  };
+  total + extra
+}

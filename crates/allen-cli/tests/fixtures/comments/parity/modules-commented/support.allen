@@ -1,0 +1,6 @@
+/* outer
+   /* nested */
+*/
+export fn answer() returns Int {
+  8 // end-of-line comment
+}

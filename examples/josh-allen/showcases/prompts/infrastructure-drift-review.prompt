@@ -1,0 +1,4 @@
+Review a small, non-secret infrastructure fixture or representative IaC diff.
+Compare expected and observed resources, classify deterministic drift, use
+judgment only for an ambiguous change, and return the smallest dry-run
+remediation plan. Do not call cloud APIs or apply changes.

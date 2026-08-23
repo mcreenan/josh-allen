@@ -1,0 +1,13 @@
+// A line comment.
+/// This doc-looking comment is still an ordinary comment.
+export fn main() returns Int {
+  /* A block comment. */
+  /** This doc-looking block is still an ordinary comment. */
+  /* Outer block comment.
+     /* Nested block comment. */
+     Back in the outer block. */
+  let line_delimiters = "// is text, not a comment";
+  let block_delimiters = "/* and */ are text, not comments";
+  let byte_delimiters = b"// /* */";
+  42 // trailing line comment
+}

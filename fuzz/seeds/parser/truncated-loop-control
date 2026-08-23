@@ -1,0 +1,3 @@
+export fn main() returns Void {
+  for (key, value in map { "a": 1 } {
+    continue

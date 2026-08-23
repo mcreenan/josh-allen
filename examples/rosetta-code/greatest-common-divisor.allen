@@ -1,0 +1,14 @@
+fn greatest_common_divisor(left: Int, right: Int) returns Int {
+  mut current = left;
+  mut next = right;
+  while (next != 0) {
+    let remainder = current % next;
+    current = next;
+    next = remainder;
+  }
+  current
+}
+
+export fn main() returns Int {
+  greatest_common_divisor(1071, 462)
+}

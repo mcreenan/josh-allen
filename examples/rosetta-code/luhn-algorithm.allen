@@ -1,0 +1,30 @@
+fn luhn_sum(value: Int) returns Int {
+  mut remaining = value;
+  mut double_digit: Bool = false;
+  mut total: Int = 0;
+  while (remaining > 0) {
+    mut digit = remaining % 10;
+    if (double_digit) {
+      digit *= 2;
+      if (digit > 9) {
+        digit -= 9;
+      }
+    }
+    total += digit;
+    double_digit = !double_digit;
+    remaining /= 10;
+  }
+  total
+}
+
+fn is_valid_luhn(value: Int) returns Bool {
+  value > 0 && luhn_sum(value) % 10 == 0
+}
+
+export fn main() returns (Bool, Bool, Bool) {
+  (
+    is_valid_luhn(49927398716),
+    is_valid_luhn(49927398717),
+    is_valid_luhn(79927398713),
+  )
+}

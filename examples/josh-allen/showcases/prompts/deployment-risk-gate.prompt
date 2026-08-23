@@ -1,0 +1,4 @@
+Assess release readiness from a bounded set of changed files, existing test
+results, and release notes. Enforce hard gates first, use judgment only for one
+ambiguous risk, and ask me for final approval only if every hard gate passes.
+Return ALLOW, DENY, or NEEDS_APPROVAL with reasons; do not deploy anything.

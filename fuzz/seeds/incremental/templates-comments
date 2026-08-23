@@ -1,0 +1,4 @@
+fn render(value: Int) returns String {
+  /* nested /* comment */ still comment */
+  `value=${value}`
+}

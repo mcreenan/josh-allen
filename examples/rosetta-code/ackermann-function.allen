@@ -1,0 +1,13 @@
+fn ackermann(m: Int, n: Int) returns Int {
+  if (m == 0) {
+    return n + 1;
+  }
+  if (n == 0) {
+    return ackermann(m - 1, 1);
+  }
+  ackermann(m - 1, ackermann(m, n - 1))
+}
+
+export fn main() returns Int {
+  ackermann(3, 2)
+}

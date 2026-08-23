@@ -1,0 +1,61 @@
+manifest {
+  language: "0.1"
+  entry: main
+  capabilities: [agent.ask, agent.message]
+}
+
+record Change {
+  file: String
+  replacement: String
+  requires_judgment: Bool
+}
+
+record Decision {
+  approve: Bool
+  reason: String
+}
+
+record MigrationReport {
+  approved_changes: Int
+  deterministic_changes: Int
+  status: String
+}
+
+export async fn main() returns MigrationReport effects [agent.ask, agent.message] {
+  let changes = [
+    Change { file: "src/api.ts", replacement: "client.request_v2", requires_judgment: false },
+    Change { file: "src/cache.ts", replacement: "client.request_v2", requires_judgment: false },
+    Change { file: "src/legacy.ts", replacement: "adapter or direct client", requires_judgment: true }
+  ];
+  mut deterministic = 0;
+  for change in changes {
+    if (!change.requires_judgment) { deterministic += 1; }
+  }
+
+  let answer = match await agent.ask<Decision>(prompt {
+    system: "Review only the ambiguous migration. Approve the direct client only when legacy retry behavior is preserved."
+    data: { ambiguous_change: changes[2], deterministic_changes: deterministic }
+    output: Decision
+  }) {
+    Ok(value) => value
+    Err(_) => Decision { approve: false, reason: "agent unavailable" }
+  };
+  let approved = if (answer.approve) { deterministic + 1 } else { deterministic };
+  let delivered = match await agent.message(
+    string.concat("ALLEN validated the migration decision: ", answer.reason)
+  ) {
+    Ok(_) => true
+    Err(_) => false
+  };
+  MigrationReport {
+    approved_changes: approved,
+    deterministic_changes: deterministic,
+    status: if (!delivered) {
+      "decision recorded; agent notification unavailable"
+    } else if (answer.approve) {
+      "reviewed plan ready"
+    } else {
+      "ambiguous change quarantined"
+    }
+  }
+}

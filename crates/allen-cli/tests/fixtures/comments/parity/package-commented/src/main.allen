@@ -1,0 +1,5 @@
+// ALLEN comments are lexical whitespace in package source.
+export fn main() returns Int {
+  let delimiters = ("// /* */", b"// /* */");
+  /* nested /* comment */ */ 8
+}

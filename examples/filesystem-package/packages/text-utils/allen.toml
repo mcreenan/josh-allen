@@ -1,0 +1,4 @@
+[package]
+name = "text-utils"
+version = "1.0.0"
+language = "^0.1"

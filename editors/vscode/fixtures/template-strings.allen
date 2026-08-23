@@ -1,0 +1,10 @@
+export fn main(name: String) returns String effects [capability.inspect] {
+  let nested = `outer // not a comment /* not a comment */ ${if (true) {
+    `nested ${name}`
+  } else {
+    "missing"
+  }}`;
+  let escapes = `tick: \` quote: \" slash: \\ newline: \n carriage: \r tab: \t nul: \0 backspace: \b form-feed: \f opener: \${`;
+  let known = capability.is_granted("fs.read");
+  `${nested} ${escapes} ${to_string(known)}`
+}

@@ -1,0 +1,8 @@
+fn equal<T: Eq>(left: T, right: T) returns Bool {
+  left == right
+}
+
+export fn main() returns Bool {
+  let callback = fn(value: Int) returns Int { value };
+  equal(callback, callback)
+}

@@ -1,0 +1,66 @@
+fn modular_power(base: Int, exponent: Int, modulus: Int) returns Int {
+  mut factor = base % modulus;
+  mut remaining = exponent;
+  mut result: Int = 1;
+  while (remaining > 0) {
+    if (remaining % 2 == 1) {
+      result = result * factor % modulus;
+    }
+    remaining /= 2;
+    if (remaining > 0) {
+      factor = factor * factor % modulus;
+    }
+  }
+  result
+}
+
+fn passes_witness(candidate: Int, odd_part: Int, twos: Int, base: Int) returns Bool {
+  if (base % candidate == 0) {
+    return true;
+  }
+  mut value = modular_power(base, odd_part, candidate);
+  if (value == 1 || value == candidate - 1) {
+    return true;
+  }
+  for _ in 1..twos {
+    value = value * value % candidate;
+    if (value == candidate - 1) {
+      return true;
+    }
+  }
+  false
+}
+
+fn miller_rabin(candidate: Int) returns Bool {
+  if (candidate < 2) {
+    return false;
+  }
+  if (candidate == 2 || candidate == 3 || candidate == 5) {
+    return true;
+  }
+  if (candidate % 2 == 0) {
+    return false;
+  }
+  mut odd_part = candidate - 1;
+  mut twos: Int = 0;
+  while (odd_part % 2 == 0) {
+    odd_part /= 2;
+    twos += 1;
+  }
+  for base in [2, 3, 5] {
+    if (!passes_witness(candidate, odd_part, twos, base)) {
+      return false;
+    }
+  }
+  true
+}
+
+export fn main() returns (Bool, Bool, Bool, Bool, Bool) {
+  (
+    miller_rabin(2),
+    miller_rabin(97),
+    miller_rabin(221),
+    miller_rabin(561),
+    miller_rabin(7919),
+  )
+}

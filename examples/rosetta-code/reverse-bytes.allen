@@ -1,0 +1,12 @@
+fn reverse(values: List<Int>) returns List<Int> {
+  mut result: List<Int> = [];
+  for index in 0..length(values) {
+    result = list.append(result, values[length(values) - index - 1]);
+  }
+  result
+}
+
+export fn main() returns (Int, Int, Int, Int, Int) {
+  let reversed = reverse([65, 108, 108, 101, 110]);
+  (reversed[0], reversed[1], reversed[2], reversed[3], reversed[4])
+}

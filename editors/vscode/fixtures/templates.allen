@@ -1,0 +1,11 @@
+export fn templates(attempt: Int, status: String) returns String {
+  let plain = `plain multiline
+template`;
+  let delimiters = `// text and /* text */`;
+  let escaped = `backtick: \`, slash: \\, newline: \n, interpolation: \${status}`;
+  let nested = `attempt ${to_string(attempt)}: ${
+    /* A comment inside an interpolation. */
+    string.concat(status, ` (${to_string({ value: attempt }.value)})`)
+  }`;
+  nested
+}

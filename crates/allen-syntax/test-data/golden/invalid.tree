@@ -1,0 +1,154 @@
+Source 0..179
+  Error 0..3
+    Error 0..2
+      ErrorToken 0..2 "é"
+    At 2..3 "@"
+  Newline 3..4 "\n"
+  Declaration 4..25
+    RecordDeclaration 4..25
+      KwRecord 4..10 "record"
+      Whitespace 10..11 " "
+      Missing 11..11
+      LBrace 11..12 "{"
+      RecordField 12..23
+        Whitespace 12..13 " "
+        Ident 13..18 "value"
+        Whitespace 18..19 " "
+        Missing 19..19
+        Type 19..23
+          NamedType 19..23
+            Ident 19..23 "List"
+      Whitespace 23..24 " "
+      RBrace 24..25 "}"
+  Newline 25..26 "\n"
+  Declaration 26..74
+    FunctionDeclaration 26..74
+      KwFn 26..28 "fn"
+      Whitespace 28..29 " "
+      Ident 29..35 "broken"
+      LParen 35..36 "("
+      RParen 36..37 ")"
+      Whitespace 37..38 " "
+      KwReturns 38..45 "returns"
+      Type 45..50
+        NamedType 45..50
+          Whitespace 45..46 " "
+          Ident 46..50 "Void"
+      Body 50..74
+        Whitespace 50..51 " "
+        LBrace 51..52 "{"
+        Statement 52..72
+          Whitespace 52..53 " "
+          KwLet 53..56 "let"
+          Whitespace 56..57 " "
+          Ident 57..60 "bad"
+          Whitespace 60..61 " "
+          Eq 61..62 "="
+          Expression 62..71
+            Disjunction 62..71
+              Conjunction 62..71
+                Equality 62..71
+                  Comparison 62..71
+                    Addition 62..71
+                      Multiplication 62..71
+                        Unary 62..71
+                          Postfix 62..71
+                            Primary 62..71
+                              Whitespace 62..63 " "
+                              Error 63..71
+                                ErrorToken 63..71 "\"oops\\q\""
+          Semi 71..72 ";"
+        Whitespace 72..73 " "
+        RBrace 73..74 "}"
+  Newline 74..75 "\n"
+  Declaration 75..128
+    FunctionDeclaration 75..128
+      KwFn 75..77 "fn"
+      Whitespace 77..78 " "
+      Ident 78..87 "recovered"
+      LParen 87..88 "("
+      RParen 88..89 ")"
+      Whitespace 89..90 " "
+      KwReturns 90..97 "returns"
+      Type 97..102
+        NamedType 97..102
+          Whitespace 97..98 " "
+          Ident 98..102 "Void"
+      Body 102..128
+        Whitespace 102..103 " "
+        LBrace 103..104 "{"
+        Statement 104..126
+          Whitespace 104..105 " "
+          KwReturn 105..111 "return"
+          Expression 111..125
+            Disjunction 111..125
+              Conjunction 111..125
+                Equality 111..125
+                  Comparison 111..125
+                    Addition 111..125
+                      Multiplication 111..125
+                        Unary 111..125
+                          Postfix 111..125
+                            Primary 111..125
+                              TemplateLiteral 111..125
+                                Whitespace 111..112 " "
+                                Backtick 112..113 "`"
+                                TemplateSegment 113..116
+                                  TemplateTextOrEscape 113..116
+                                    TemplateTextScalar 113..116 "ok "
+                                TemplateInterpolation 116..124
+                                  TemplateExprStart 116..118 "${"
+                                  Expression 118..123
+                                    Disjunction 118..123
+                                      Conjunction 118..123
+                                        Equality 118..123
+                                          Comparison 118..123
+                                            Addition 118..123
+                                              Multiplication 118..119
+                                                Unary 118..119
+                                                  Postfix 118..119
+                                                    Primary 118..119
+                                                      Literal 118..119
+                                                        IntLiteral 118..119 "1"
+                                              Whitespace 119..120 " "
+                                              Plus 120..121 "+"
+                                              Multiplication 121..123
+                                                Unary 121..123
+                                                  Postfix 121..123
+                                                    Primary 121..123
+                                                      Literal 121..123
+                                                        Whitespace 121..122 " "
+                                                        IntLiteral 122..123 "2"
+                                  RBrace 123..124 "}"
+                                Backtick 124..125 "`"
+          Semi 125..126 ";"
+        Whitespace 126..127 " "
+        RBrace 127..128 "}"
+  Newline 128..129 "\n"
+  Declaration 129..147
+    TypeAliasDeclaration 129..147
+      KwType 129..133 "type"
+      Whitespace 133..134 " "
+      Ident 134..145 "BrokenAlias"
+      Whitespace 145..146 " "
+      Eq 146..147 "="
+      Type 147..147
+        Missing 147..147
+  Newline 147..148 "\n"
+  Declaration 148..178
+    RecordDeclaration 148..178
+      KwRecord 148..154 "record"
+      Whitespace 154..155 " "
+      Ident 155..175 "RecoveredAliasTarget"
+      Whitespace 175..176 " "
+      LBrace 176..177 "{"
+      RBrace 177..178 "}"
+  Newline 178..179 "\n"
+  Eof 179..179 ""
+diagnostics:
+S0001 0..2 "unexpected character"
+S0002 63..71 "malformed literal"
+S0101 3..3 "unexpected top-level syntax"
+S0101 11..11 "expected record name"
+S0101 19..19 "expected `:` after record field name"
+S0101 147..147 "expected type"

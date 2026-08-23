@@ -1,0 +1,88 @@
+manifest {
+  language: "0.1"
+  entry: main
+  capabilities: [agent.ask, agent.message, sub_agent.run, user.ask]
+  tools: {
+    required: [
+      { name: "allen_integration_echo", version: ">=1.0.0, <2.0.0" }
+    ]
+  }
+}
+
+record Projection {
+  capabilities: List<String>
+  limits: Map<String, Int>
+  tools: List<String>
+}
+
+record MvpResult {
+  message_status: String
+  agent_reply: String
+  user_approved: Bool
+  echoed: String
+  subagent_reply: String
+}
+
+fn text_prompt(system: String, data: String) returns Prompt<String> {
+  prompt {
+    system: system
+    data: data
+    output: String
+  }
+}
+
+export async fn main(input: String) returns MvpResult
+  effects [
+    agent.ask,
+    agent.message,
+    sub_agent.run,
+    tool.allen_integration_echo@1,
+    user.ask,
+  ] {
+  let message_status = match await agent.message("ALLEN/JOSH MVP started.") {
+    Ok(_) => "sent"
+    Err(error) => error.code
+  };
+  let agent_reply = match await agent.ask<String>(
+    text_prompt("Return a short acknowledgement of this input.", input)
+  ) {
+    Ok(value) => value
+    Err(error) => error.code
+  };
+  let user_approved = match await user.ask<Bool>(prompt {
+    system: "Approve continuing the ALLEN/JOSH MVP?"
+    context: input
+    output: Bool
+  }) {
+    Ok(value) => value
+    Err(_) => false
+  };
+  let echoed = match await tools.allen_integration_echo.call({ text: input }) {
+    Ok(value) => value.text
+    Err(_) => "echo unavailable"
+  };
+  let projection = Projection {
+    capabilities: []
+    limits: map {}
+    tools: []
+  };
+  let subagent_reply = match await sub_agent.run<String>(prompt {
+    system: "Return one short independent review of the input."
+    context: input
+    data: {
+      model: "gpt-5.6-luna"
+      reasoning_effort: "low"
+    }
+    output: String
+  }, projection) {
+    Ok(value) => value
+    Err(error) => error.code
+  };
+  MvpResult {
+    message_status,
+    agent_reply,
+    user_approved,
+    echoed,
+    subagent_reply,
+  }
+}

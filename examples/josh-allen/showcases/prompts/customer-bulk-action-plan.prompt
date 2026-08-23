@@ -1,0 +1,4 @@
+Create a small synthetic customer-account batch and produce a dry-run action
+plan. Apply hard eligibility rules and a strict maximum batch size, use judgment
+only for genuinely ambiguous accounts, and return approved, rejected, and
+review-required IDs. Do not query or update a real CRM.

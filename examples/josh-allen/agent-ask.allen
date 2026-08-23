@@ -1,0 +1,15 @@
+manifest {
+  language: "0.1"
+  entry: main
+  capabilities: [agent.ask]
+}
+
+export async fn main() returns String effects [agent.ask] {
+  match await agent.ask<String>(prompt {
+    system: "Reply with one short greeting from the invoking Codex task."
+    output: String
+  }) {
+    Ok(answer) => answer
+    Err(error) => error.code
+  }
+}

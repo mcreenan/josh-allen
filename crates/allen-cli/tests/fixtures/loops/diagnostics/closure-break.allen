@@ -1,0 +1,7 @@
+export fn main() returns Void {
+  loop {
+    let callback = fn() returns Void { break; };
+    break;
+  }
+  ()
+}

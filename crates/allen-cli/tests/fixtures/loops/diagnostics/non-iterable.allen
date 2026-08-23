@@ -1,0 +1,4 @@
+export fn main() returns Void {
+  for item in 1 { () }
+  ()
+}

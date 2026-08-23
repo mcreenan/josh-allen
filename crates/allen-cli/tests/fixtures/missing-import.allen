@@ -1,0 +1,5 @@
+import { missing } from "./import-target.allen";
+
+export fn main() returns Int {
+  missing()
+}

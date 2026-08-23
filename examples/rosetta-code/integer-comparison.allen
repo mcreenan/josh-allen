@@ -1,0 +1,13 @@
+fn compare(left: Int, right: Int) returns Int {
+  if (left < right) {
+    -1
+  } else if (left == right) {
+    0
+  } else {
+    1
+  }
+}
+
+export fn main() returns (Int, Int, Int) {
+  (compare(4, 9), compare(9, 9), compare(12, 9))
+}

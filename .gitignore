@@ -1,0 +1,4 @@
+/target/
+*.aglb
+__pycache__/
+*.pyc

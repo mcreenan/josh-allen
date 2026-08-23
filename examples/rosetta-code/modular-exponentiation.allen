@@ -1,0 +1,23 @@
+fn modular_power(base: Int, exponent: Int, modulus: Int) returns Int {
+  mut factor = base % modulus;
+  mut remaining = exponent;
+  mut result: Int = 1;
+  while (remaining > 0) {
+    if (remaining % 2 == 1) {
+      result = result * factor % modulus;
+    }
+    remaining /= 2;
+    if (remaining > 0) {
+      factor = factor * factor % modulus;
+    }
+  }
+  result
+}
+
+export fn main() returns (Int, Int, Int) {
+  (
+    modular_power(4, 13, 497),
+    modular_power(7, 560, 561),
+    modular_power(2, 20, 17),
+  )
+}

@@ -1,0 +1,30 @@
+[package]
+name = "allen-syntax-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+allen-syntax = { path = ".." }
+libfuzzer-sys = "0.4"
+
+# Keep cargo-fuzz's standalone package out of the primary workspace.
+[workspace]
+members = ["."]
+
+[[bin]]
+name = "syntax"
+path = "fuzz_targets/syntax.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "incremental_reparse"
+path = "fuzz_targets/incremental_reparse.rs"
+test = false
+doc = false
+bench = false

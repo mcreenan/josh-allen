@@ -1,0 +1,11 @@
+async fn number() returns Int { 7 }
+
+export async fn main() returns Int effects [task.spawn] {
+  await {
+    loop {
+      let task = spawn number();
+      let value = await task;
+      return value;
+    }
+  }
+}

@@ -1,0 +1,14 @@
+async fn answer() returns Int {
+  42
+}
+
+export async fn main() returns Void effects [debug.inspect, task.spawn] {
+  await {
+    let task = spawn answer();
+    let a = 1;
+    let b = 2;
+    let c = 3;
+    let snapshot = allen.internal.task_snapshot(task);
+    stop(snapshot.state)
+  }
+}

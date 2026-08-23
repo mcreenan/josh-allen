@@ -1,0 +1,4 @@
+export fn main() returns Int {
+  let delimiters = ("// /* */", b"// /* */");
+  8
+}

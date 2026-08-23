@@ -1,0 +1,17 @@
+fn is_prime(candidate: Int) returns Bool {
+  if (candidate < 2) {
+    return false;
+  }
+  mut divisor: Int = 2;
+  while (divisor * divisor <= candidate) {
+    if (candidate % divisor == 0) {
+      return false;
+    }
+    divisor += 1;
+  }
+  true
+}
+
+export fn main() returns (Bool, Bool, Bool, Bool, Bool) {
+  (is_prime(1), is_prime(2), is_prime(17), is_prime(21), is_prime(97))
+}

@@ -1,0 +1,4 @@
+fn nested() returns Int {
+  let values = [1, 2, 3];
+  values[0]
+}

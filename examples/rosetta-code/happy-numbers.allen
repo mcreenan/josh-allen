@@ -1,0 +1,38 @@
+fn sum_square_digits(value: Int) returns Int {
+  mut remaining = value;
+  mut total: Int = 0;
+  while (remaining > 0) {
+    let digit = remaining % 10;
+    total += digit * digit;
+    remaining /= 10;
+  }
+  total
+}
+
+fn is_happy(value: Int) returns Bool {
+  mut slow = value;
+  mut fast = value;
+  mut result: Bool = false;
+  loop {
+    slow = sum_square_digits(slow);
+    fast = sum_square_digits(sum_square_digits(fast));
+    if (fast == 1) {
+      result = true;
+      break;
+    }
+    if (slow == fast) {
+      break;
+    }
+  }
+  result
+}
+
+export fn main() returns (Bool, Bool, Bool, Bool, Bool) {
+  (
+    is_happy(1),
+    is_happy(7),
+    is_happy(19),
+    is_happy(20),
+    is_happy(68),
+  )
+}

@@ -1,0 +1,3 @@
+fn unicode() returns String {
+  "🦀é海"
+}

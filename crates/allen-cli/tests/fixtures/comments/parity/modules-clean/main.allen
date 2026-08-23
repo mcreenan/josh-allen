@@ -1,0 +1,6 @@
+import { answer } from "./support.allen";
+
+export fn main() returns Int {
+  let delimiters = ("// /* */", b"// /* */");
+  answer()
+}

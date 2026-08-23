@@ -1,0 +1,7 @@
+import { Whole, add, apply, same } from "./support.allen";
+
+export fn main() returns (Int, Bool, Int) {
+  let offset: Whole = 2;
+  let add_offset = fn(value: Int) returns Int { value + offset };
+  return (add(40, 2), same(7, 7), apply(add_offset, 5));
+}

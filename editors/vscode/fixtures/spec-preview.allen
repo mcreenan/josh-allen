@@ -1,0 +1,21 @@
+manifest {
+  language: "0.1"
+  entry: review
+  capabilities: [agent.ask, tool.github.create_issue@2]
+}
+
+record Decision {
+  approved: Bool
+  reason: String
+}
+
+export async fn review(input: String) returns Result<Decision, AgentError>
+  effects [agent.ask, tool.github.create_issue@2] {
+  let decision = (await agent.ask<Decision>(prompt {
+    system: "Review the input."
+    data: { input }
+    output: Decision
+  }))?;
+  let _tool_result = await tools.github.create_issue.call({ title: decision.reason });
+  Ok(decision)
+}

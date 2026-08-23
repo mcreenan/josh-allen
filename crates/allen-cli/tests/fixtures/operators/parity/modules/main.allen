@@ -1,0 +1,5 @@
+import { operator_total } from "./support.allen";
+
+export fn main() returns Int {
+  operator_total()
+}

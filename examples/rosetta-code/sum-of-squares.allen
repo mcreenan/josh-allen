@@ -1,0 +1,11 @@
+fn sum_of_squares(value: Int) returns Int {
+  mut total: Int = 0;
+  for current in 1..(value + 1) {
+    total += current * current;
+  }
+  total
+}
+
+export fn main() returns Int {
+  sum_of_squares(10)
+}

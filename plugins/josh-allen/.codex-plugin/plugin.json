@@ -1,0 +1,33 @@
+{
+  "name": "josh-allen",
+  "version": "0.1.0",
+  "description": "Run typed ALLEN programs through the JOSH session host.",
+  "author": {
+    "name": "Matt Creenan",
+    "url": "https://github.com/mcreenan"
+  },
+  "homepage": "https://github.com/mcreenan/allen",
+  "repository": "https://github.com/mcreenan/allen",
+  "license": "MIT OR Apache-2.0",
+  "keywords": ["agents", "allen", "josh", "mcp"],
+  "skills": "./skills/",
+  "mcpServers": {
+    "josh_allen": {
+      "command": "bash",
+      "args": ["${PLUGIN_ROOT}/bin/josh-allen-mcp"]
+    }
+  },
+  "interface": {
+    "displayName": "JOSH/ALLEN",
+    "shortDescription": "Run typed ALLEN programs through JOSH.",
+    "longDescription": "JOSH/ALLEN combines the ALLEN language with the JOSH session host. The plugin adds the shared workflow skill and local MCP bridge.",
+    "developerName": "Matt Creenan",
+    "category": "Developer Tools",
+    "capabilities": ["Interactive"],
+    "websiteURL": "https://github.com/mcreenan/allen",
+    "defaultPrompt": [
+      "Run this bounded task as a JOSH/ALLEN workflow."
+    ],
+    "brandColor": "#111827"
+  }
+}

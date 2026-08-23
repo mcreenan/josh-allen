@@ -1,0 +1,14 @@
+{
+  "name": "josh-allen",
+  "version": "0.1.0",
+  "description": "Run typed ALLEN programs through the JOSH session host.",
+  "author": {
+    "name": "Matt Creenan",
+    "url": "https://github.com/mcreenan"
+  },
+  "homepage": "https://github.com/mcreenan/allen",
+  "repository": "https://github.com/mcreenan/allen",
+  "license": "MIT OR Apache-2.0",
+  "keywords": ["agents", "allen", "josh", "mcp"],
+  "mcpServers": "./.mcp.json"
+}

@@ -1,0 +1,12 @@
+fn is_leap_year(year: Int) returns Bool {
+  year % 400 == 0 || year % 4 == 0 && year % 100 != 0
+}
+
+export fn main() returns (Bool, Bool, Bool, Bool) {
+  (
+    is_leap_year(2000),
+    is_leap_year(1900),
+    is_leap_year(2024),
+    is_leap_year(2023),
+  )
+}

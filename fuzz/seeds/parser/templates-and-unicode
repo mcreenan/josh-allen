@@ -1,0 +1,8 @@
+export fn main() returns String effects [capability.inspect] {
+  let name = "é𝄞";
+  let rendered = `literal // text /* text */ ${if (true) { `nested ${name}` } else { "missing" }}`;
+  match string.from_utf8(b"\xF0\x9D\x84\x9E") {
+    Some(value) => `${rendered}:${value}`,
+    None => "invalid"
+  }
+}
