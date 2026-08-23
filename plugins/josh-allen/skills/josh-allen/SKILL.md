@@ -8,6 +8,21 @@ description: Author and run typed ALLEN programs through JOSH when a bounded wor
 JOSH/ALLEN has two parts. ALLEN is the language and runtime. JOSH is the host
 that runs ALLEN programs and connects them to an agent session.
 
+## Load the language reference
+
+Before authoring or changing ALLEN source, read the relevant sections of the
+packaged [ALLEN language reference](references/allen-language.md):
+
+- sections 1 through 6 for syntax, declarations, types, control flow, and
+  effects;
+- section 7 for futures, tasks, `spawn`, and `await`;
+- section 8 for filesystem, HTTP, callback, and tool operations;
+- section 9 for packages, manifests, entries, and capabilities; and
+- sections 10 and 11 for lifecycle, errors, limits, and unsupported features.
+
+Load only the sections required for the program. The packaged reference is
+kept byte-for-byte in sync with the repository's canonical agent reference.
+
 ## Choose the runner
 
 Choose from the effects used by the program.

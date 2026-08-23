@@ -384,8 +384,16 @@ validate_agent_docs() {
   local links_log="$logs_dir/agent-links.log"
   local fences_log="$logs_dir/agent-fences.log"
   local generated="$docs_dir/fenced-main"
+  local canonical_language_reference="$repo_root/docs/agents/reference/allen-language.md"
+  local packaged_language_reference="$repo_root/plugins/josh-allen/skills/josh-allen/references/allen-language.md"
   mkdir -p "$generated"
   find "$generated" -mindepth 1 -maxdepth 1 -type f -name '*.allen' -delete
+
+  if ! cmp -s "$canonical_language_reference" "$packaged_language_reference"; then
+    printf 'packaged ALLEN language reference is out of sync: %s\n' \
+      "$packaged_language_reference" >&2
+    return 1
+  fi
 
   if ! perl -MFile::Basename=dirname -MFile::Spec -e '
     my $failed = 0;

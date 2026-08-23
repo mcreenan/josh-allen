@@ -15,6 +15,7 @@ Language changes must keep these files in sync:
 
 - `docs/language-spec.md`
 - `docs/agents/reference/allen-language.md`
+- `plugins/josh-allen/skills/josh-allen/references/allen-language.md`
 
 JOSH protocol changes must keep these files in sync:
 

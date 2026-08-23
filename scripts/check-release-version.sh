@@ -23,6 +23,20 @@ for manifest in \
     }
 done
 
+server_version_count="$(grep -Fc "\"version\": \"$version\"" plugins/josh-allen/mcp/server.py)"
+[[ "$server_version_count" -eq 2 ]] || {
+  printf 'plugins/josh-allen/mcp/server.py does not report version %s consistently\n' \
+    "$version" >&2
+  exit 1
+}
+
+cmp -s \
+  docs/agents/reference/allen-language.md \
+  plugins/josh-allen/skills/josh-allen/references/allen-language.md || {
+    printf 'packaged ALLEN language reference is out of sync\n' >&2
+    exit 1
+  }
+
 if [[ -n "${1:-}" && "$1" != "v$version" ]]; then
   printf 'release tag %s does not match workspace version %s\n' "$1" "$version" >&2
   exit 1

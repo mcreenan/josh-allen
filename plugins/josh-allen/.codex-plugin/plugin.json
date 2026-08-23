@@ -1,6 +1,6 @@
 {
   "name": "josh-allen",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Run typed ALLEN programs through the JOSH session host.",
   "author": {
     "name": "Matt Creenan",
@@ -20,7 +20,7 @@
   "interface": {
     "displayName": "JOSH/ALLEN",
     "shortDescription": "Run typed ALLEN programs through JOSH.",
-    "longDescription": "JOSH/ALLEN combines the ALLEN language with the JOSH session host. The plugin adds the shared workflow skill and local MCP bridge.",
+    "longDescription": "JOSH/ALLEN combines the ALLEN language with the JOSH session host. The plugin adds the shared workflow skill, packaged agent language reference, and local MCP bridge.",
     "developerName": "Matt Creenan",
     "category": "Developer Tools",
     "capabilities": ["Interactive"],

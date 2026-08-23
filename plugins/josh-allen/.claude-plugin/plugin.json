@@ -1,6 +1,6 @@
 {
   "name": "josh-allen",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Run typed ALLEN programs through the JOSH session host.",
   "author": {
     "name": "Matt Creenan",

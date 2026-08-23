@@ -337,7 +337,7 @@ run_check error-registry-json jq -e '
   ([.operations[] | select((.operation | type) != "string" or (.codes | type) != "array") ] | length == 0) and
   (([.operations[] | .operation] | length) == ([.operations[] | .operation] | unique | length)) and
   ([.operations[] | .operation] == [
-    "fs.read_text", "fs.read_bytes", "fs.write_text", "fs.write_bytes", "fs.list",
+    "fs.read_text", "fs.read_bytes", "fs.write_text", "fs.write_bytes", "fs.list", "fs.search",
     "http.get", "agent.message", "agent.ask", "agent.transcript", "model.request",
     "user.ask", "sub_agent.create", "sub_agent.run", "sub_agent.message", "sub_agent.ask",
     "permission.request_file", "permission.request_directory", "generated_tool.call"

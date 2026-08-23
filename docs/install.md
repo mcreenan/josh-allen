@@ -17,8 +17,8 @@ The installer downloads the latest `0.1.x` release, verifies its SHA-256
 checksum, and installs `allen` and `josh` in `~/.local/bin`. It then checks for
 the Codex and Claude Code CLIs. For each one it finds, it adds the `josh-allen`
 marketplace and installs the `josh-allen` plugin. The plugin contains the Agent
-Skill and `josh_allen` MCP server. You can read [the installer](../install.sh)
-before running it.
+Skill, its packaged ALLEN agent language reference, and the `josh_allen` MCP
+server. You can read [the installer](../install.sh) before running it.
 
 If neither agent CLI is installed, the binaries still work. Run the same
 command again after installing an agent CLI to add its marketplace and plugin.

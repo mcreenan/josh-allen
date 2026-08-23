@@ -574,7 +574,7 @@ class Bridge:
             if ready.get("kind") != "notification" or ready.get("method") != "runtime/ready":
                 raise BridgeError("JOSH did not announce runtime/ready")
             self._send_request(session, "init-1", "initialize", {
-                "host": {"name": "josh-allen-mcp", "version": "0.1.0"},
+                "host": {"name": "josh-allen-mcp", "version": "0.1.1"},
                 "protocol_versions": ["josh/1.3"],
                 "language_versions": [">=0.1.0, <0.2.0"],
                 "execution_mode": "attached",
@@ -790,7 +790,7 @@ def dispatch(bridge: Bridge, request: dict[str, Any]) -> dict[str, Any] | None:
     if method == "notifications/initialized":
         return None
     if method == "initialize":
-        result = {"protocolVersion": MCP_PROTOCOL_VERSION, "capabilities": {"tools": {}}, "serverInfo": {"name": "josh-allen-mcp", "version": "0.1.0"}, "instructions": "For each next_action, perform the real host operation. Copy next_action.resume_arguments_shape as the complete allen_session_resume arguments and replace only its placeholder. Keep the provider response nested under result. Never fabricate provider results. Pause for real user input for user/ask. Use the host's native agent tools for sub_agent/*; prompt_governed_defaults are hints, not authority."}
+        result = {"protocolVersion": MCP_PROTOCOL_VERSION, "capabilities": {"tools": {}}, "serverInfo": {"name": "josh-allen-mcp", "version": "0.1.1"}, "instructions": "For each next_action, perform the real host operation. Copy next_action.resume_arguments_shape as the complete allen_session_resume arguments and replace only its placeholder. Keep the provider response nested under result. Never fabricate provider results. Pause for real user input for user/ask. Use the host's native agent tools for sub_agent/*; prompt_governed_defaults are hints, not authority."}
     elif method == "tools/list":
         result = {"tools": TOOLS}
     elif method == "tools/call":

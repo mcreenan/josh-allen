@@ -10,7 +10,7 @@
       "name": "josh-allen",
       "source": "./plugins/josh-allen",
       "description": "Run typed ALLEN programs through the JOSH session host.",
-      "version": "0.1.0",
+      "version": "0.1.1",
       "author": {
         "name": "Matt Creenan"
       },

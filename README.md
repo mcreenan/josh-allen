@@ -50,8 +50,8 @@ The installer adds:
 - the latest prebuilt `allen` and `josh` binaries in `~/.local/bin`
 - the JOSH/ALLEN marketplace and plugin for every installed Codex or Claude
   Code CLI
-- the shared `josh-allen` Agent Skill and `josh_allen` MCP server through that
-  plugin
+- the shared `josh-allen` Agent Skill, packaged ALLEN agent language reference,
+  and `josh_allen` MCP server through that plugin
 
 The installer verifies the release checksum before copying either binary. You
 can read [the installer](install.sh) before running it.
