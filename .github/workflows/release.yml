@@ -13,7 +13,7 @@ jobs:
   validate:
     runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Check release version
         env:
           RELEASE_TAG: ${{ github.ref_type == 'tag' && github.ref_name || '' }}
@@ -33,7 +33,7 @@ jobs:
             runner: macos-15
     runs-on: ${{ matrix.runner }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: 1.85.0
@@ -43,7 +43,7 @@ jobs:
         run: sudo apt-get update && sudo apt-get install --yes musl-tools
       - name: Build release archive
         run: scripts/package-release.sh "${{ matrix.platform }}" "${{ matrix.rust-target }}"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: josh-allen-${{ matrix.platform }}
           path: target/release-package/josh-allen-${{ matrix.platform }}.tar.gz
@@ -56,7 +56,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           pattern: josh-allen-*
           path: dist

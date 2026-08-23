@@ -17,7 +17,7 @@ jobs:
       HOST_CONFORMANCE_EVIDENCE_DIR: ${{ runner.temp }}/allen-host-conformance
       HOST_CONFORMANCE_FUZZ_TOOLCHAIN: nightly
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: 1.85.0
@@ -32,7 +32,7 @@ jobs:
         run: scripts/host-conformance.sh
       - name: Upload deterministic evidence
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: host-conformance-evidence
           path: ${{ runner.temp }}/allen-host-conformance
