@@ -51,33 +51,35 @@ data, examples, editor support, and agent reference.
 Do not use JOSH/ALLEN as a production security boundary. The worker applies
 resource limits on macOS and Linux, but it is not an operating-system sandbox.
 
-## Install
+## Install or update
 
-### Recommended installation
+### Recommended install and update
 
 The prebuilt installer supports macOS on Apple silicon and Linux on x86_64.
 It requires Python 3 and `curl`, but not Rust.
 
-Install it with:
+Install or update with:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/mcreenan/josh-allen/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/mcreenan/josh-allen/main/hike.sh | bash
 ```
 
 The installer adds:
 
 - the latest prebuilt `allen` and `josh` binaries in `~/.local/bin`
-- the JOSH/ALLEN marketplace and plugin for each installed Codex or Claude
-  Code CLI
+- the latest JOSH/ALLEN marketplace and plugin for each installed Codex or
+  Claude Code CLI
 - the `josh-allen` Agent Skill, ALLEN language reference, and `josh_allen` MCP
   server inside that plugin
 
 The installer verifies the release checksum before copying either binary. You
-can read [the installer](install.sh) before running it.
+can read [the installer](hike.sh) before running it.
 
-If neither agent CLI is installed, the command still installs both binaries.
-Run it again after installing Codex or Claude Code to add the marketplace and
-plugin. Restart each agent host after installation.
+Run the same command again whenever you want to update everything. It replaces
+both binaries and refreshes the plugin for every installed agent CLI. If
+neither agent CLI is installed, the command still installs both binaries. Run
+it again after installing Codex or Claude Code to add the marketplace and
+plugin. Restart each agent host after installation or update.
 
 ### Install from source
 

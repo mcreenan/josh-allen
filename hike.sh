@@ -90,6 +90,8 @@ if command -v codex >/dev/null 2>&1; then
   say "Configuring the JOSH/ALLEN marketplace and plugin for Codex..."
   if ! codex plugin marketplace list --json </dev/null 2>/dev/null | has_json_value name "$marketplace_name"; then
     codex plugin marketplace add "$marketplace_source" </dev/null
+  else
+    codex plugin marketplace upgrade "$marketplace_name" </dev/null
   fi
   if ! codex plugin list --json </dev/null 2>/dev/null | has_json_value pluginId "$plugin_id"; then
     codex plugin add "$plugin_id" </dev/null
@@ -101,9 +103,13 @@ if command -v claude >/dev/null 2>&1; then
   say "Configuring the JOSH/ALLEN marketplace and plugin for Claude Code..."
   if ! claude plugin marketplace list --json </dev/null 2>/dev/null | has_json_value name "$marketplace_name"; then
     claude plugin marketplace add "$marketplace_source" </dev/null
+  else
+    claude plugin marketplace update "$marketplace_name" </dev/null
   fi
   if ! claude plugin list --json </dev/null 2>/dev/null | has_json_value id "$plugin_id"; then
     claude plugin install "$plugin_id" </dev/null
+  else
+    claude plugin update "$plugin_id" </dev/null
   fi
   configured_hosts=$((configured_hosts + 1))
 fi
@@ -119,9 +125,9 @@ esac
 if [[ "$configured_hosts" -eq 0 ]]; then
   say "No Codex or Claude Code CLI was found. Run this command again after installing one."
 elif [[ "$configured_hosts" -eq 1 ]]; then
-  say "Installed the JOSH/ALLEN marketplace, Agent Skill, and MCP server for one agent host."
+  say "Installed or updated the JOSH/ALLEN marketplace, Agent Skill, and MCP server for one agent host."
   say "Restart that agent host before using JOSH/ALLEN."
 else
-  say "Installed the JOSH/ALLEN marketplace, Agent Skill, and MCP server for Codex and Claude Code."
+  say "Installed or updated the JOSH/ALLEN marketplace, Agent Skill, and MCP server for Codex and Claude Code."
   say "Restart both agent hosts before using JOSH/ALLEN."
 fi

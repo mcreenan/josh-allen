@@ -1,6 +1,6 @@
-# Install JOSH/ALLEN
+# Install or update JOSH/ALLEN
 
-## Recommended installation
+## Recommended install and update
 
 The prebuilt installer supports:
 
@@ -10,20 +10,24 @@ The prebuilt installer supports:
 You need Python 3 and `curl`. Rust is not required. Run one command:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/mcreenan/josh-allen/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/mcreenan/josh-allen/main/hike.sh | bash
 ```
 
 The installer downloads the latest `0.1.x` release, verifies its SHA-256
 checksum, and installs `allen` and `josh` in `~/.local/bin`. It then checks for
-the Codex and Claude Code CLIs. For each one it finds, it adds the `josh-allen`
-marketplace and installs the `josh-allen` plugin. The plugin contains the Agent
-Skill, its packaged ALLEN agent language reference, and the `josh_allen` MCP
-server. You can read [the installer](../install.sh) before running it.
+the Codex and Claude Code CLIs. For each one it finds, it installs or updates
+the `josh-allen` marketplace and plugin. The plugin contains the Agent Skill,
+its packaged ALLEN agent language reference, and the `josh_allen` MCP server.
+You can read [the installer](../hike.sh) before running it.
 
-If neither agent CLI is installed, the binaries still work. Run the same
-command again after installing an agent CLI to add its marketplace and plugin.
+Run the same command again whenever you want to update everything. It replaces
+both binaries and refreshes the plugin for every installed agent CLI.
 
-Restart Codex or Claude Code after installation. Check the binaries with:
+If neither agent CLI is installed, the binaries still work. Run the command
+again after installing an agent CLI to add its marketplace and plugin.
+
+Restart Codex or Claude Code after installation or update. Check the binaries
+with:
 
 ```sh
 allen --help
@@ -72,7 +76,7 @@ The prebuilt installer writes to `~/.local/bin`. To choose another directory,
 set `JOSH_ALLEN_INSTALL_DIR` for the `bash` process:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/mcreenan/josh-allen/main/install.sh | JOSH_ALLEN_INSTALL_DIR=/absolute/bin bash
+curl -fsSL https://raw.githubusercontent.com/mcreenan/josh-allen/main/hike.sh | JOSH_ALLEN_INSTALL_DIR=/absolute/bin bash
 ```
 
 The MCP server looks for `josh` on `PATH`. Set `JOSH_ALLEN_JOSH_BIN` to its

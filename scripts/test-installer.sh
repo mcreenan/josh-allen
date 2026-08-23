@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Exercise install.sh without changing real binaries or agent configuration.
+# Exercise hike.sh without changing real binaries or agent configuration.
 set -euo pipefail
 
 repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -90,6 +90,9 @@ case "$*" in
     touch "$INSTALL_TEST_STATE/codex-marketplace"
     printf 'codex add-marketplace\n' >>"$INSTALL_TEST_LOG"
     ;;
+  "plugin marketplace upgrade josh-allen")
+    printf 'codex update-marketplace\n' >>"$INSTALL_TEST_LOG"
+    ;;
   "plugin list --json")
     if [[ -f "$INSTALL_TEST_STATE/codex-plugin" ]]; then
       printf '{"installed":[{"pluginId":"josh-allen@josh-allen"}]}\n'
@@ -122,6 +125,9 @@ case "$*" in
     touch "$INSTALL_TEST_STATE/claude-marketplace"
     printf 'claude add-marketplace\n' >>"$INSTALL_TEST_LOG"
     ;;
+  "plugin marketplace update josh-allen")
+    printf 'claude update-marketplace\n' >>"$INSTALL_TEST_LOG"
+    ;;
   "plugin list --json")
     if [[ -f "$INSTALL_TEST_STATE/claude-plugin" ]]; then
       printf '[{"id":"josh-allen@josh-allen"}]\n'
@@ -132,6 +138,9 @@ case "$*" in
   "plugin install josh-allen@josh-allen")
     touch "$INSTALL_TEST_STATE/claude-plugin"
     printf 'claude add-plugin\n' >>"$INSTALL_TEST_LOG"
+    ;;
+  "plugin update josh-allen@josh-allen")
+    printf 'claude update-plugin\n' >>"$INSTALL_TEST_LOG"
     ;;
   *)
     printf 'unexpected claude arguments: %s\n' "$*" >&2
@@ -149,7 +158,7 @@ run_installer() {
     INSTALL_TEST_RELEASE_DIR="$release_dir" \
     INSTALL_TEST_LOG="$test_log" \
     INSTALL_TEST_STATE="$test_state" \
-    bash "$repo_root/install.sh"
+    bash "$repo_root/hike.sh"
 }
 
 run_piped_installer() {
@@ -159,7 +168,7 @@ run_piped_installer() {
     INSTALL_TEST_RELEASE_DIR="$release_dir" \
     INSTALL_TEST_LOG="$test_log" \
     INSTALL_TEST_STATE="$test_state" \
-    bash <"$repo_root/install.sh"
+    bash <"$repo_root/hike.sh"
 }
 
 first_output="$(run_piped_installer)"
@@ -172,8 +181,11 @@ grep -Fq "Installed allen and josh in $install_dir" <<<"$second_output"
 [[ "$($install_dir/josh)" == "fake josh" ]]
 
 [[ "$(grep -c '^codex add-marketplace$' "$test_log")" -eq 1 ]]
+[[ "$(grep -c '^codex update-marketplace$' "$test_log")" -eq 1 ]]
 [[ "$(grep -c '^codex add-plugin$' "$test_log")" -eq 1 ]]
 [[ "$(grep -c '^claude add-marketplace$' "$test_log")" -eq 1 ]]
+[[ "$(grep -c '^claude update-marketplace$' "$test_log")" -eq 1 ]]
 [[ "$(grep -c '^claude add-plugin$' "$test_log")" -eq 1 ]]
+[[ "$(grep -c '^claude update-plugin$' "$test_log")" -eq 1 ]]
 
 printf 'installer smoke test passed\n'
