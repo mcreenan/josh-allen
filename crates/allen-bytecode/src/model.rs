@@ -9,7 +9,7 @@ pub type EffectSetId = u32;
 
 pub const CANONICAL_NAN_BITS: u64 = 0x7ff8_0000_0000_0000;
 pub const MAX_VALUE_NESTING: usize = 128;
-pub const TRANSCRIPT_PART_ENUM_NAME: &str = "pkg://allen@0.1.0/src/standard.allen::TranscriptPart";
+pub const TRANSCRIPT_PART_ENUM_NAME: &str = "pkg://allen@0.1.1/src/standard.allen::TranscriptPart";
 
 /// Return whether `bits` encodes any IEEE 754 binary64 NaN.
 #[must_use]
@@ -60,6 +60,82 @@ pub struct EnumType {
     pub variants: Vec<EnumVariant>,
 }
 
+/// One scalar hole in an embedded package template.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TemplateHole {
+    pub name: String,
+    pub value_type: ValueType,
+}
+
+/// One whole `{{name}}` marker in template content.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TemplateMarker {
+    pub start: u32,
+    pub end: u32,
+    pub hole: u32,
+}
+
+/// One verified, package-qualified template resource.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TemplateResource {
+    pub identity: String,
+    pub content: String,
+    pub digest: [u8; 32],
+    pub holes: Vec<TemplateHole>,
+    pub markers: Vec<TemplateMarker>,
+}
+
+/// One bounded, typed expression evaluated only at an entry boundary.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ValidatorExpr {
+    Bool(bool),
+    Field {
+        field: u32,
+        value_type: ValueType,
+    },
+    Not(Box<Self>),
+    BoolBinary {
+        operation: BoolBinaryOp,
+        left: Box<Self>,
+        right: Box<Self>,
+    },
+    Compare {
+        operation: CompareOp,
+        left: Box<Self>,
+        right: Box<Self>,
+    },
+}
+
+/// A source-nominal record contract. Record values themselves remain structural.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RecordInvariantDefinition {
+    pub identity: String,
+    pub fields: Vec<RecordField>,
+    pub predicate: ValidatorExpr,
+}
+
+/// One deterministic traversal step from an entry value to a named record.
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub enum EntryValidatorPathSegment {
+    Field(u32),
+    ListElement,
+    MapKey,
+    MapValue,
+    TupleElement(u32),
+    OptionSome,
+    ResultOk,
+    ResultError,
+    EnumPayload { variant: u32, element: u32 },
+    NewtypeValue,
+}
+
+/// One nominal invariant application site in an entry's directional contract.
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub struct EntryValidatorSite {
+    pub path: Vec<EntryValidatorPathSegment>,
+    pub invariant: u32,
+}
+
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub enum ValueType {
     Int,
@@ -67,6 +143,7 @@ pub enum ValueType {
     Float,
     String,
     Bytes,
+    Range,
     Unit,
     Never,
     List(Box<Self>),
@@ -74,10 +151,15 @@ pub enum ValueType {
     Tuple(Vec<Self>),
     Record(Vec<RecordField>),
     Enum(EnumTypeId),
+    Newtype {
+        name: String,
+        underlying: Box<Self>,
+    },
     Option(Box<Self>),
     Result(Box<Self>, Box<Self>),
     Future(Box<Self>),
     Task(Box<Self>),
+    Sequence(Box<Self>),
     Workspace,
     ExternalFsAccess,
     /// An execution-scoped opaque child-agent handle.
@@ -170,6 +252,55 @@ pub fn model_error_type() -> ValueType {
 #[must_use]
 pub fn permission_error_type() -> ValueType {
     standard_error_type()
+}
+
+/// Return the exact structural error shape used by clockless time operations.
+#[must_use]
+pub fn time_error_type() -> ValueType {
+    standard_error_type()
+}
+
+/// Return the exact structural error shape used by strict integer parsing.
+#[must_use]
+pub fn parse_error_type() -> ValueType {
+    standard_error_type()
+}
+
+/// Return the exact structural error shape used by fixed-decimal formatting.
+#[must_use]
+pub fn format_error_type() -> ValueType {
+    standard_error_type()
+}
+
+/// Return the exact structural error shape used by strict JSON decoding.
+#[must_use]
+pub fn decode_error_type() -> ValueType {
+    standard_error_type()
+}
+
+/// Return the exact structural error shape used by whitelisted subprocess execution.
+#[must_use]
+pub fn exec_error_type() -> ValueType {
+    standard_error_type()
+}
+
+/// Return the exact successful subprocess response shape.
+#[must_use]
+pub fn exec_response_type() -> ValueType {
+    ValueType::Record(vec![
+        RecordField {
+            name: "status".to_owned(),
+            value_type: ValueType::Int,
+        },
+        RecordField {
+            name: "stderr".to_owned(),
+            value_type: ValueType::Bytes,
+        },
+        RecordField {
+            name: "stdout".to_owned(),
+            value_type: ValueType::Bytes,
+        },
+    ])
 }
 
 /// Return the exact structural response type produced by HTTP GET.
@@ -426,7 +557,11 @@ pub fn transcript_part_enum_id(module: &Module) -> Option<EnumTypeId> {
 impl ValueType {
     #[must_use]
     pub const fn is_map_key(&self) -> bool {
-        matches!(self, Self::Bool | Self::Int | Self::String | Self::Bytes)
+        match self {
+            Self::Bool | Self::Int | Self::String | Self::Bytes => true,
+            Self::Newtype { underlying, .. } => underlying.is_map_key(),
+            _ => false,
+        }
     }
 
     #[must_use]
@@ -437,6 +572,7 @@ impl ValueType {
             | Self::Float
             | Self::String
             | Self::Bytes
+            | Self::Range
             | Self::Unit
             | Self::ExternalFsAccess
             | Self::Enum(_)
@@ -447,9 +583,11 @@ impl ValueType {
             Self::Record(fields) => fields.iter().all(|field| field.value_type.is_equatable()),
             Self::Option(value) => value.is_equatable(),
             Self::Result(ok, error) => ok.is_equatable() && error.is_equatable(),
+            Self::Newtype { underlying, .. } => underlying.is_equatable(),
             Self::Function { .. }
             | Self::Future(_)
             | Self::Task(_)
+            | Self::Sequence(_)
             | Self::Workspace
             | Self::SubAgent
             | Self::Unknown => false,
@@ -458,7 +596,11 @@ impl ValueType {
 
     #[must_use]
     pub const fn is_ordered(&self) -> bool {
-        matches!(self, Self::Int | Self::Float | Self::String | Self::Bytes)
+        match self {
+            Self::Int | Self::Float | Self::String | Self::Bytes => true,
+            Self::Newtype { underlying, .. } => underlying.is_ordered(),
+            _ => false,
+        }
     }
 }
 
@@ -470,6 +612,7 @@ impl fmt::Display for ValueType {
             Self::Float => formatter.write_str("Float"),
             Self::String => formatter.write_str("String"),
             Self::Bytes => formatter.write_str("Bytes"),
+            Self::Range => formatter.write_str("Range<Int>"),
             Self::Unit => formatter.write_str("Void"),
             Self::Never => formatter.write_str("Never"),
             Self::List(element) => write!(formatter, "List<{element}>"),
@@ -495,10 +638,12 @@ impl fmt::Display for ValueType {
                 formatter.write_str("}")
             }
             Self::Enum(id) => write!(formatter, "Enum#{id}"),
+            Self::Newtype { name, .. } => formatter.write_str(name),
             Self::Option(value) => write!(formatter, "Option<{value}>"),
             Self::Result(ok, error) => write!(formatter, "Result<{ok}, {error}>"),
             Self::Future(value) => write!(formatter, "Future<{value}>"),
             Self::Task(value) => write!(formatter, "Task<{value}>"),
+            Self::Sequence(value) => write!(formatter, "Sequence<{value}>"),
             Self::Workspace => formatter.write_str("Workspace"),
             Self::ExternalFsAccess => formatter.write_str("ExternalFsAccess"),
             Self::SubAgent => formatter.write_str("SubAgent"),
@@ -611,8 +756,19 @@ pub enum StringOperation {
     Join,
     TrimAscii,
     FromUtf8,
+    Replace,
     /// Compiler-only lowering for a nonempty sequence of template segments.
     TemplateConcat,
+}
+
+/// One pure scalar operation outside the String namespace.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum StandardOperation {
+    ToInt,
+    FloatFormat,
+    TimeFormatUtc,
+    TimeParseUtc,
+    TimeBucket,
 }
 
 /// One synchronous observation of the frozen manifest grant set.
@@ -629,6 +785,33 @@ pub enum SafeCollectionOperation {
     ListTrySet,
     BytesGet,
     MapGet,
+    MapInsert,
+    MapRemove,
+    MapKeys,
+}
+
+/// Pure collection operations which may allocate or trap.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CollectionOperation {
+    Zip,
+    ListMin,
+    ListMax,
+    ListSumInt,
+    ListSumFloat,
+}
+
+/// Eager list operations which call a pure closure once per visited item.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ListCombinator {
+    Map,
+    Filter,
+    FlatMap,
+    FilterMap,
+    Find,
+    Any,
+    All,
+    Partition,
+    Scan,
 }
 
 /// Non-trapping checked integer operations.
@@ -662,6 +845,7 @@ pub enum EffectOperation {
     SubAgentMessage,
     SubAgentAsk,
     Search,
+    ExecRun,
 }
 
 /// Operation type used by the VM and provider ABI.
@@ -686,6 +870,7 @@ impl EffectOperation {
             Self::SubAgentRun => "sub_agent.run",
             Self::SubAgentMessage => "sub_agent.message",
             Self::SubAgentAsk => "sub_agent.ask",
+            Self::ExecRun => "exec.run",
         }
     }
 }
@@ -714,6 +899,7 @@ pub fn effect_result_type(
             file_error_type(),
         ),
         EffectOperation::HttpGet => (http_response_type(), network_error_type()),
+        EffectOperation::ExecRun => (exec_response_type(), exec_error_type()),
         EffectOperation::PermissionRequestFile | EffectOperation::PermissionRequestDirectory => {
             (ValueType::Workspace, permission_error_type())
         }
@@ -824,9 +1010,12 @@ pub fn is_strict_schema_type(value_type: &ValueType) -> bool {
         | ValueType::Workspace
         | ValueType::ExternalFsAccess
         | ValueType::SubAgent
+        | ValueType::Range
+        | ValueType::Sequence(_)
         | ValueType::Unknown
         | ValueType::Never => false,
         ValueType::List(value) | ValueType::Option(value) => is_strict_schema_type(value),
+        ValueType::Newtype { underlying, .. } => is_strict_schema_type(underlying),
         ValueType::Map(key, value) | ValueType::Result(key, value) => {
             is_strict_schema_type(key) && is_strict_schema_type(value)
         }
@@ -849,6 +1038,27 @@ pub struct EnumSwitchArm {
     pub variant: u32,
     pub target: u32,
     pub bindings: Vec<Register>,
+}
+
+/// One source-ordered item in an atomic list literal build.
+///
+/// The compiler evaluates every operand before emitting the build instruction;
+/// the instruction only describes whether that value is appended directly or
+/// expanded as a list.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ListLiteralItem {
+    Element(Register),
+    Spread(Register),
+}
+
+/// One source-ordered item in an atomic map literal build.
+///
+/// Ordinary entries carry separate key and value registers.  A spread carries
+/// one map register and replaces existing keys as it is applied.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum MapLiteralItem {
+    Entry { key: Register, value: Register },
+    Spread(Register),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -907,6 +1117,29 @@ pub enum Instruction {
         destination: Register,
         elements: Vec<Register>,
     },
+    /// Build a list atomically from source-ordered ordinary and spread items.
+    ListLiteralBuild {
+        destination: Register,
+        items: Vec<ListLiteralItem>,
+    },
+    RangeNew {
+        destination: Register,
+        start: Register,
+        end: Register,
+        inclusive: bool,
+    },
+    RangeStart {
+        destination: Register,
+        range: Register,
+    },
+    RangeEnd {
+        destination: Register,
+        range: Register,
+    },
+    RangeInclusive {
+        destination: Register,
+        range: Register,
+    },
     Length {
         destination: Register,
         collection: Register,
@@ -926,6 +1159,11 @@ pub enum Instruction {
         destination: Register,
         entries: Vec<(Register, Register)>,
     },
+    /// Build a map atomically from source-ordered ordinary and spread items.
+    MapLiteralBuild {
+        destination: Register,
+        items: Vec<MapLiteralItem>,
+    },
     TupleNew {
         destination: Register,
         elements: Vec<Register>,
@@ -934,6 +1172,12 @@ pub enum Instruction {
         destination: Register,
         collection: Register,
         index: Register,
+    },
+    SliceGet {
+        destination: Register,
+        collection: Register,
+        start: Register,
+        end: Register,
     },
     /// Read the canonical sorted map entry at `index` as an exact `(K, V)` tuple.
     MapEntryAt {
@@ -960,6 +1204,14 @@ pub enum Instruction {
         record: Register,
         field: u32,
     },
+    NewtypeWrap {
+        destination: Register,
+        source: Register,
+    },
+    NewtypeUnwrap {
+        destination: Register,
+        source: Register,
+    },
     EnumNew {
         destination: Register,
         variant: u32,
@@ -981,11 +1233,20 @@ pub enum Instruction {
         destination: Register,
         source: Register,
     },
+    TryOption {
+        destination: Register,
+        source: Register,
+    },
     ToUnknown {
         destination: Register,
         source: Register,
     },
     Narrow {
+        destination: Register,
+        source: Register,
+        target: ValueType,
+    },
+    Decode {
         destination: Register,
         source: Register,
         target: ValueType,
@@ -1037,6 +1298,11 @@ pub enum Instruction {
         operation: StringOperation,
         arguments: Vec<Register>,
     },
+    StandardCall {
+        destination: Register,
+        operation: StandardOperation,
+        arguments: Vec<Register>,
+    },
     CapabilityInspect {
         destination: Register,
         operation: CapabilityOperation,
@@ -1052,10 +1318,78 @@ pub enum Instruction {
         operation: CheckedIntOperation,
         arguments: Vec<Register>,
     },
+    CollectionCall {
+        destination: Register,
+        operation: CollectionOperation,
+        arguments: Vec<Register>,
+    },
+    ListFold {
+        destination: Register,
+        values: Register,
+        initial: Register,
+        callback: Register,
+    },
+    ListCombinator {
+        destination: Register,
+        operation: ListCombinator,
+        values: Register,
+        initial: Option<Register>,
+        callback: Register,
+        callback_result: Register,
+    },
+    SequenceFromList {
+        destination: Register,
+        values: Register,
+    },
+    SequenceMap {
+        destination: Register,
+        sequence: Register,
+        callback: Register,
+    },
+    SequenceFilter {
+        destination: Register,
+        sequence: Register,
+        callback: Register,
+    },
+    SequenceTake {
+        destination: Register,
+        sequence: Register,
+        count: Register,
+    },
+    SequenceFind {
+        destination: Register,
+        sequence: Register,
+        callback: Register,
+    },
+    SequenceAny {
+        destination: Register,
+        sequence: Register,
+        callback: Register,
+    },
+    SequenceAll {
+        destination: Register,
+        sequence: Register,
+        callback: Register,
+    },
+    SequenceFold {
+        destination: Register,
+        sequence: Register,
+        initial: Register,
+        callback: Register,
+    },
+    SequenceToList {
+        destination: Register,
+        sequence: Register,
+    },
     ToolInvoke {
         destination: Register,
         tool: u32,
         input: Register,
+    },
+    TemplateRender {
+        destination: Register,
+        template: u32,
+        arguments: Vec<Register>,
     },
     TaskScopeEnter {
         scope: u32,
@@ -1064,6 +1398,9 @@ pub enum Instruction {
         scope: u32,
     },
     Stop {
+        reason: Register,
+    },
+    Fail {
         reason: Register,
     },
     Return {
@@ -1075,6 +1412,14 @@ pub enum Instruction {
 pub struct Function {
     pub name: String,
     pub parameters: Vec<Register>,
+    /// Canonical source parameter names; runtime calls remain positional.
+    pub parameter_names: Vec<String>,
+    /// Canonical source-semantics digests for declaration-owned defaults.
+    ///
+    /// The vector is parallel to `parameters`; `None` denotes a required
+    /// parameter.  The VM does not interpret these values, but artifacts carry
+    /// them so imported declarations can validate their source contract.
+    pub parameter_default_digests: Vec<Option<[u8; 32]>>,
     pub captures: Vec<Register>,
     pub registers: Vec<ValueType>,
     pub return_type: ValueType,

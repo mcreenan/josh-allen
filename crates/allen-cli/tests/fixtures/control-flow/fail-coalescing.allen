@@ -1,0 +1,10 @@
+export fn main() returns Int {
+  let present: Option<Int> = Some(7);
+  let selected = present ?? fail("skipped fallback");
+  let missing: Option<Int> = None;
+  if (selected == 7) {
+    missing ?? fail("missing option")
+  } else {
+    0
+  }
+}

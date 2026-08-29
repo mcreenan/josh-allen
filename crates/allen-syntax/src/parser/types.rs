@@ -7,6 +7,8 @@ const UNARY_GENERIC_TYPES: &[(&str, SyntaxKind)] = &[
     ("Future", SyntaxKind::KwFuture),
     ("Task", SyntaxKind::KwTask),
     ("Prompt", SyntaxKind::KwPromptType),
+    ("Range", SyntaxKind::KwRange),
+    ("Sequence", SyntaxKind::KwSequence),
 ];
 
 const BINARY_GENERIC_TYPES: &[(&str, SyntaxKind)] = &[
@@ -28,6 +30,19 @@ impl Parser<'_, '_> {
                 SyntaxKind::RBrace,
                 "expected `}` after record declaration",
             );
+        }
+        if self.at(SyntaxKind::KwWhere) {
+            self.bump_nontrivia();
+            if self.expect_open_delimiter(
+                SyntaxKind::LBrace,
+                "expected `{` after record invariant `where`",
+            ) {
+                self.expression();
+                self.expect_close_delimiter(
+                    SyntaxKind::RBrace,
+                    "expected `}` after record invariant",
+                );
+            }
         }
         self.complete(marker, SyntaxKind::RecordDeclaration);
     }
@@ -77,6 +92,33 @@ impl Parser<'_, '_> {
         self.complete(marker, SyntaxKind::TypeAliasDeclaration);
     }
 
+    pub(super) fn newtype_declaration(&mut self) {
+        let marker = self.start();
+        if self.at(SyntaxKind::KwExport) {
+            self.bump_nontrivia();
+        }
+        self.expect(SyntaxKind::KwNewtype, "expected `newtype`");
+        self.expect(SyntaxKind::Ident, "expected newtype name");
+        self.expect(SyntaxKind::Eq, "expected `=` after newtype name");
+        self.type_syntax();
+        self.complete(marker, SyntaxKind::NewtypeDeclaration);
+    }
+
+    pub(super) fn const_declaration(&mut self) {
+        let marker = self.start();
+        if self.at(SyntaxKind::KwExport) {
+            self.bump_nontrivia();
+        }
+        self.expect(SyntaxKind::KwConst, "expected `const`");
+        self.expect(SyntaxKind::Ident, "expected constant name");
+        self.expect(SyntaxKind::Colon, "expected `:` after constant name");
+        self.type_syntax();
+        self.expect(SyntaxKind::Eq, "expected `=` after constant type");
+        self.expression();
+        self.expect(SyntaxKind::Semi, "expected `;` after constant declaration");
+        self.complete(marker, SyntaxKind::ConstDeclaration);
+    }
+
     pub(super) fn function_declaration(&mut self) {
         let marker = self.start();
         if self.at(SyntaxKind::KwExport) {
@@ -105,6 +147,21 @@ impl Parser<'_, '_> {
             self.missing("expected function body");
         }
         self.complete(marker, SyntaxKind::FunctionDeclaration);
+    }
+
+    pub(super) fn test_declaration(&mut self) {
+        let marker = self.start();
+        self.expect(SyntaxKind::KwTest, "expected `test`");
+        self.expect(SyntaxKind::StringLiteral, "expected test name string");
+        if self.at(SyntaxKind::KwEffects) {
+            self.effect_clause();
+        }
+        if self.at(SyntaxKind::LBrace) {
+            self.body();
+        } else {
+            self.missing("expected test body");
+        }
+        self.complete(marker, SyntaxKind::TestDeclaration);
     }
 
     fn record_fields(&mut self) {
@@ -241,6 +298,10 @@ impl Parser<'_, '_> {
         self.expect(SyntaxKind::Ident, "expected parameter name");
         self.expect(SyntaxKind::Colon, "expected `:` after parameter name");
         self.type_syntax();
+        if self.at(SyntaxKind::Eq) {
+            self.bump_nontrivia();
+            self.expression();
+        }
         self.complete(marker, SyntaxKind::Parameter);
     }
 
@@ -668,5 +729,39 @@ export async fn run<T: Eq, E: Eq,>(input: Box, callback: fn(T) returns Future<T>
         let parsed = parse(&source);
         assert!(parsed.has_errors());
         parsed.assert_round_trip(&source);
+    }
+
+    #[test]
+    fn range_and_sequence_use_ordinary_unary_generic_type_syntax() {
+        let text = "fn consume(values: Sequence<Range<Int>>, window: Range<String>) returns Sequence<Int> { values }";
+        let file = source(text);
+        let parsed = parse(&file);
+        assert!(
+            parsed.diagnostics().is_empty(),
+            "{:?}",
+            parsed.diagnostics()
+        );
+        assert!(!parsed.has_errors());
+        parsed.assert_round_trip(&file);
+        let tokens = parsed
+            .syntax()
+            .descendants_with_tokens()
+            .filter_map(rowan::NodeOrToken::into_token)
+            .map(|token| token.kind())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            tokens
+                .iter()
+                .filter(|kind| **kind == SyntaxKind::KwSequence)
+                .count(),
+            2
+        );
+        assert_eq!(
+            tokens
+                .iter()
+                .filter(|kind| **kind == SyntaxKind::KwRange)
+                .count(),
+            2
+        );
     }
 }

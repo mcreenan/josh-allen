@@ -9,20 +9,23 @@ ManifestField = 'language' ':' language_value:'string-literal'
   | 'tools' ':' '{' 'required' ':' '[' (ToolRequirement (',' ToolRequirement)* ','?)? ']' ','? '}'
 Capability = 'effect-id' ('(' 'identifier' ')')?
 ToolRequirement = '{' 'name' ':' tool_name:'string-literal' ',' 'version' ':' tool_version:'string-literal' ','? '}'
-ImportDeclaration = 'import' '{' ImportName (',' ImportName)* ','? '}' 'from' import_source:'string-literal' ';'
+ImportDeclaration = 'import' extension_keyword:'identifier'? '{' ImportName (',' ImportName)* ','? '}' 'from' import_source:'string-literal' ';'
 ImportName = imported_name:'identifier' ('as' local_name:'identifier')?
-Declaration = RecordDeclaration | EnumDeclaration | TypeAliasDeclaration | FunctionDeclaration
-RecordDeclaration = 'export'? 'record' 'identifier' '{' (RecordField (','? RecordField)* ','?)? '}'
+Declaration = RecordDeclaration | EnumDeclaration | TypeAliasDeclaration | NewtypeDeclaration | ConstDeclaration | FunctionDeclaration | TestDeclaration
+RecordDeclaration = 'export'? 'record' 'identifier' '{' (RecordField (','? RecordField)* ','?)? '}' ('where' '{' predicate:Expression '}')?
 RecordField = 'identifier' ':' Type
 EnumDeclaration = 'export'? 'enum' 'identifier' '{' EnumVariant (','? EnumVariant)* ','? '}'
 EnumVariant = 'identifier'
   | 'identifier' '(' Type (',' Type)* ','? ')'
   | 'identifier' '{' (RecordField (','? RecordField)* ','?)? '}'
 TypeAliasDeclaration = 'export'? 'type' 'identifier' '=' Type
+NewtypeDeclaration = 'export'? 'newtype' 'identifier' '=' Type
+ConstDeclaration = 'export'? 'const' 'identifier' ':' Type '=' Expression ';'
 FunctionDeclaration = 'export'? 'async'? 'fn' 'identifier' GenericParameters? '(' (Parameter (',' Parameter)* ','?)? ')' 'returns' Type EffectClause? Body
+TestDeclaration = 'test' test_name:'string-literal' EffectClause? Body
 GenericParameters = '<' GenericParameter (',' GenericParameter)* ','? '>'
 GenericParameter = 'identifier' ':' 'Eq'
-Parameter = 'identifier' ':' Type
+Parameter = 'identifier' ':' Type ('=' default_value:Expression)?
 EffectClause = 'effects' '[' ('effect-id' (',' 'effect-id')* ','?)? ']'
 Body = '{' Statement* Expression? '}'
 Statement = ('let' | 'mut') binding_name:'identifier' (':' Type)? '=' initializer:Expression ';'
@@ -30,20 +33,26 @@ Statement = ('let' | 'mut') binding_name:'identifier' (':' Type)? '=' initialize
   | 'return' return_value:Expression? ';'
   | ConditionalExpression
   | WhileStatement | LoopStatement | ForStatement
+  | LocalFunction
   | 'break' ';' | 'continue' ';'
+LocalFunction = 'fn' 'identifier' '(' (Parameter (',' Parameter)* ','?)? ')' 'returns' Type EffectClause? Body
 WhileStatement = 'while' '(' Expression ')' Body
 LoopStatement = 'loop' Body
-ForStatement = 'for' LoopBinding 'in' iterable:Expression ('..' range_end:Expression)? Body
+ForStatement = 'for' LoopBinding 'in' iterable:Expression Body
 LoopBinding = 'identifier' | '_' | '(' LoopBindingItem ',' (LoopBindingItem (',' LoopBindingItem)* ','?)? ')'
 LoopBindingItem = 'identifier' | '_'
 Type = NamedType | GenericType | TupleType | RecordType | FunctionType
 NamedType = segments:'identifier' ('.' segments:'identifier')*
-GenericType = ('List' | 'Option' | 'Future' | 'Task' | 'Prompt') '<' type_argument:Type '>'
+GenericType = ('List' | 'Option' | 'Future' | 'Task' | 'Prompt' | 'Range' | 'Sequence') '<' type_argument:Type '>'
   | ('Map' | 'Result') '<' first_type_argument:Type ',' second_type_argument:Type '>'
 TupleType = '(' (Type ',' (Type (',' Type)* ','?)?)? ')'
 RecordType = '{' (RecordField (','? RecordField)* ','?)? '}'
 FunctionType = 'fn' '(' (parameter_types:Type (',' parameter_types:Type)* ','?)? ')' 'returns' return_type:Type EffectClause?
-Expression = Disjunction
+Expression = Range
+Range = Coalescing (('..' | '..=') Coalescing)?
+Coalescing = Pipeline ('??' Coalescing)?
+Pipeline = Composition ('|>' Composition)*
+Composition = Disjunction ('>' '>' Disjunction)*
 Disjunction = Conjunction ('||' Conjunction)*
 Conjunction = Equality ('&&' Equality)*
 Equality = Comparison (('==' | '!=') Comparison)*
@@ -51,36 +60,45 @@ Comparison = Addition (('<' | '<=' | '>' | '>=') Addition)*
 Addition = Multiplication (('+' | '-') Multiplication)*
 Multiplication = Unary (('*' | '/' | '%') Unary)*
 Unary = ('!' | '-' | 'await' | 'spawn') Unary | Postfix
-Postfix = Primary ('[' indices:Expression ']' | '.' field_names:'identifier' | call_type_arguments:TypeArgument? '(' (arguments:Expression (',' arguments:Expression)* ','?)? ')' | '?')*
+Postfix = Primary (Slice | '.' field_names:'identifier' | '?.' optional_field_names:'identifier' | call_type_arguments:TypeArgument? '(' (CallArgument (',' CallArgument)* ','?)? ')' (Closure | ShortClosure)? | '?')*
+Slice = '[' index:Expression ']'
 TypeArgument = '<' Type '>'
+CallArgument = (argument_label:'identifier' ':')? ('_' | value:Expression)
 Primary = Literal | TemplateLiteral | 'identifier' | 'map' | 'Some' | 'Ok' | 'Err'
   | EnumRecordConstructor | QualifiedEnum
   | RecordConstructor | AnonymousRecord | ListLiteral | MapLiteral | TupleOrGroup | MatchExpression
-  | ConditionalExpression | Closure | PromptExpression | AwaitBlock
+  | ConditionalExpression | Closure | ShortClosure | PromptExpression | AwaitBlock
 Literal = 'int-literal' | 'float-literal' | 'string-literal' | 'bytes-literal'
   | 'true' | 'false' | 'None' | '(' ')'
-TemplateLiteral = open_backtick:'`' (TemplateSegment | TemplateInterpolation)* close_backtick:'`'
+TemplateLiteral = (open_backtick:'`' | open_multiline_delimiter:'multiline-string-delimiter') (TemplateSegment | TemplateInterpolation)* (close_backtick:'`' | close_multiline_delimiter:'multiline-string-delimiter')
 TemplateSegment = TemplateTextOrEscape TemplateTextOrEscape*
 TemplateTextOrEscape = 'template-text-scalar' | 'template-escape'
 TemplateInterpolation = '${' Expression '}'
 QualifiedEnum = enum_name:'identifier' '.' variant_name:'identifier'
 EnumRecordConstructor = enum_name:'identifier' '.' variant_name:'identifier' '{' (RecordValueField (','? RecordValueField)* ','?)? '}'
-RecordConstructor = 'identifier' '{' (RecordValueField (','? RecordValueField)* ','?)? '}'
-AnonymousRecord = '{' (RecordValueField (','? RecordValueField)* ','?)? '}'
+RecordConstructor = 'identifier' '{' (RecordUpdateBase ','?)? (RecordValueField (','? RecordValueField)* ','?)? '}'
+AnonymousRecord = '{' (RecordUpdateBase ','?)? (RecordValueField (','? RecordValueField)* ','?)? '}'
+RecordUpdateBase = '..' base:Expression
 RecordValueField = 'identifier' (':' Expression)?
-ListLiteral = '[' (Expression (',' Expression)* ','?)? ']'
-MapLiteral = 'map' '{' (keys:Expression ':' values:Expression (','? keys:Expression ':' values:Expression)* ','?)? '}'
+ListLiteral = '[' (ListItem (',' ListItem)* ','?)? ']'
+ListItem = '..' spread:Expression | value:Expression
+MapLiteral = 'map' '{' (MapItem (','? MapItem)* ','?)? '}'
+MapItem = '..' spread:Expression | key:Expression ':' value:Expression
 TupleOrGroup = '(' Expression (',' (Expression (',' Expression)* ','?)?)? ')'
 MatchExpression = 'match' scrutinee:Expression '{' MatchArm (','? MatchArm)* ','? '}'
 ConditionalExpression = 'if' '(' condition:Expression ')' then_branch:Body ('else' (else_if:ConditionalExpression | else_branch:Body))?
 MatchArm = Pattern '=>' Expression
-Pattern = '_' | 'true' | 'false' | RecordPattern | EnumPattern
-  | 'None' | ('Some' | 'Ok' | 'Err') '(' (binding_name:'identifier' | '_') ')'
+Pattern = PatternOr
+PatternOr = PatternPrimary ('|' PatternPrimary)*
+PatternPrimary = '_' | 'true' | 'false' | binding_name:'identifier' | RecordPattern | EnumPattern
+  | PatternRange | 'None' | ('Some' | 'Ok' | 'Err') '(' Pattern ')'
+PatternRange = '-'? Literal ('..' | '..=') '-'? Literal
 RecordPattern = 'identifier' '{' (PatternField (','? PatternField)* ','?)? '}'
-EnumPattern = enum_name:'identifier' '.' variant_name:'identifier' ( '(' (binding_names:'identifier' | '_') (',' (binding_names:'identifier' | '_'))* ','? ')'
+EnumPattern = enum_name:'identifier' '.' variant_name:'identifier' ( '(' Pattern (',' Pattern)* ','? ')'
   | '{' (PatternField (','? PatternField)* ','?)? '}' )?
-PatternField = field_name:'identifier' (':' (binding_name:'identifier' | '_'))?
+PatternField = field_name:'identifier' (':' Pattern)?
 Closure = 'fn' '(' (Parameter (',' Parameter)* ','?)? ')' 'returns' Type EffectClause? Body
+ShortClosure = 'fn' '(' (parameter_names:'identifier' (',' parameter_names:'identifier')* ','?)? ')' '=>' body:Expression
 PromptExpression = 'prompt' '{' PromptField (','? PromptField)* ','? '}'
 PromptField = 'system' ':' system_value:Expression | 'context' ':' context_value:Expression
   | 'data' ':' data_value:Expression | 'output' ':' output_type:Type

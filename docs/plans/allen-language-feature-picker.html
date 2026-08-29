@@ -1,0 +1,475 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Choose proposed ALLEN language features</title>
+  <style>
+    :root {
+      color-scheme: light dark;
+      --bg: light-dark(#f5f2ea, #111310);
+      --paper: light-dark(#fffdf7, #1a1d18);
+      --ink: light-dark(#20251f, #edf2e9);
+      --muted: light-dark(#697067, #abb4a7);
+      --line: light-dark(#d9d8cc, #343a31);
+      --accent: light-dark(#175c46, #81d7b5);
+      --accent-ink: light-dark(#ffffff, #0d241b);
+      --code: light-dark(#efeee5, #242821);
+      --soft: light-dark(#e8f2ed, #20322a);
+      --shadow: 0 18px 50px light-dark(rgba(31, 43, 36, .10), rgba(0, 0, 0, .32));
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      background:
+        radial-gradient(circle at 15% -10%, light-dark(#dfeee5, #193027) 0, transparent 36rem),
+        var(--bg);
+      color: var(--ink);
+      font-family: "Avenir Next", Avenir, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      line-height: 1.5;
+    }
+
+    main {
+      width: min(1440px, calc(100% - clamp(24px, 5vw, 80px)));
+      margin: 0 auto;
+      padding: 72px 0 140px;
+    }
+
+    header {
+      margin-bottom: 54px;
+    }
+
+    .eyebrow {
+      margin: 0 0 12px;
+      color: var(--accent);
+      font-size: .78rem;
+      font-weight: 700;
+      letter-spacing: .14em;
+      text-transform: uppercase;
+    }
+
+    h1 {
+      margin: 0;
+      font-family: ui-serif, Georgia, Cambria, "Times New Roman", serif;
+      font-size: clamp(2.5rem, 7vw, 5.5rem);
+      font-weight: 500;
+      letter-spacing: -.045em;
+      line-height: .96;
+    }
+
+    .intro {
+      margin: 24px 0 0;
+      color: var(--muted);
+      font-size: clamp(1rem, 2vw, 1.2rem);
+    }
+
+    .meta {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px 20px;
+      margin-top: 28px;
+      color: var(--muted);
+      font-size: .9rem;
+    }
+
+    .meta a { color: var(--accent); }
+
+    section { margin-top: 58px; }
+
+    .section-heading {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      align-items: end;
+      gap: 24px;
+      margin-bottom: 18px;
+      padding-bottom: 12px;
+      border-bottom: 1px solid var(--line);
+    }
+
+    h2 {
+      margin: 0;
+      font-family: ui-serif, Georgia, Cambria, "Times New Roman", serif;
+      font-size: clamp(1.6rem, 4vw, 2.5rem);
+      font-weight: 500;
+      letter-spacing: -.025em;
+    }
+
+    .section-count {
+      color: var(--muted);
+      font-variant-numeric: tabular-nums;
+    }
+
+    .feature-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 14px;
+    }
+
+    .feature {
+      position: relative;
+      display: grid;
+      grid-template-columns: 28px minmax(0, 1fr);
+      gap: 14px;
+      min-height: 100%;
+      padding: 20px;
+      border: 1px solid var(--line);
+      border-radius: 16px;
+      background: color-mix(in srgb, var(--paper) 94%, transparent);
+      transition: border-color 120ms ease, background 120ms ease, transform 120ms ease;
+    }
+
+    .feature:hover { transform: translateY(-1px); }
+    .feature:has(input:checked) {
+      border-color: var(--accent);
+      background: var(--soft);
+    }
+
+    .feature input {
+      width: 20px;
+      height: 20px;
+      margin: 2px 0 0;
+      accent-color: var(--accent);
+      cursor: pointer;
+    }
+
+    .feature label { cursor: pointer; }
+
+    .feature-topline {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: baseline;
+      gap: 7px 10px;
+    }
+
+    .feature-id {
+      color: var(--accent);
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: .76rem;
+      font-weight: 700;
+      letter-spacing: .04em;
+    }
+
+    h3 {
+      margin: 0;
+      font-size: 1rem;
+      font-weight: 700;
+    }
+
+    .kind {
+      margin-left: auto;
+      padding: 2px 8px;
+      border-radius: 999px;
+      background: var(--code);
+      color: var(--muted);
+      font-size: .7rem;
+      white-space: nowrap;
+    }
+
+    .gap-status {
+      display: inline-block;
+      margin-top: 10px;
+      color: var(--accent);
+      font-size: .75rem;
+      font-weight: 700;
+    }
+
+    .description {
+      margin: 8px 0 12px;
+      color: var(--muted);
+      font-size: .88rem;
+    }
+
+    pre {
+      max-width: 100%;
+      margin: 0;
+      padding: 12px 14px;
+      overflow-x: auto;
+      border-radius: 10px;
+      background: var(--code);
+      color: var(--ink);
+      font: .8rem/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      tab-size: 2;
+      white-space: pre;
+      word-break: normal;
+    }
+
+    .feature-link {
+      display: inline-block;
+      margin-top: 11px;
+      color: var(--accent);
+      font-size: .8rem;
+      text-underline-offset: 3px;
+    }
+
+    .copy-dock {
+      position: fixed;
+      right: max(18px, env(safe-area-inset-right));
+      bottom: max(18px, env(safe-area-inset-bottom));
+      z-index: 10;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 10px 10px 10px 16px;
+      border: 1px solid var(--line);
+      border-radius: 16px;
+      background: var(--paper);
+      box-shadow: var(--shadow);
+    }
+
+    #selection-status {
+      color: var(--muted);
+      font-size: .82rem;
+      white-space: nowrap;
+    }
+
+    #copy-selected {
+      min-height: 42px;
+      padding: 0 17px;
+      border: 0;
+      border-radius: 11px;
+      background: var(--accent);
+      color: var(--accent-ink);
+      font: inherit;
+      font-size: .88rem;
+      font-weight: 700;
+      cursor: pointer;
+    }
+
+    #copy-selected:disabled {
+      opacity: .46;
+      cursor: not-allowed;
+    }
+
+    #copy-selected:not(:disabled):hover { filter: brightness(1.08); }
+
+    #announce {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      padding: 0;
+      margin: -1px;
+      overflow: hidden;
+      clip: rect(0, 0, 0, 0);
+      white-space: nowrap;
+      border: 0;
+    }
+
+    @media (max-width: 1180px) {
+      .feature-grid { grid-template-columns: 1fr; }
+    }
+
+    @media (max-width: 760px) {
+      main { width: calc(100% - 22px); padding-top: 42px; }
+      .kind { margin-left: 0; }
+      .copy-dock {
+        left: 11px;
+        right: 11px;
+        justify-content: space-between;
+      }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      .feature { transition: none; }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <p class="eyebrow">ALLEN language design</p>
+      <h1>Choose proposed ALLEN features.</h1>
+      <p class="intro">
+        Review 47 candidates from modern typed and functional languages. Select
+        features to make an implementation list. Each copied item includes its
+        stable design proposal ID.
+      </p>
+      <div class="meta">
+        <span><strong id="total-count">47</strong> candidates</span>
+        <span>Current language baseline: ALLEN 0.1</span>
+        <a href="allen-language-features-proposal.md">Open design proposal</a>
+        <a href="../research/functional-language-features.md">Open source research</a>
+      </div>
+    </header>
+
+    <div id="catalog"></div>
+  </main>
+
+  <div class="copy-dock">
+    <span id="selection-status">0 selected</span>
+    <button id="copy-selected" type="button" disabled>Copy selected</button>
+    <span id="announce" aria-live="polite"></span>
+  </div>
+
+  <script>
+    const groups = [
+      "Function values and call syntax",
+      "Collections and immutable data",
+      "Pattern syntax",
+      "Option, result, callback, and task flow",
+      "Type-level abstractions",
+      "Literal and lexical sugar"
+    ];
+
+    const features = [
+      { id: "FUN-PIPE", group: groups[0], name: "Forward pipe", kind: "HIR sugar", description: "Feed a value through readable, left-to-right transformations without hiding evaluation or effects.", example: "users\n  |> list.filter(is_active)\n  |> list.map(to_name)" },
+      { id: "FUN-COMPOSE", group: groups[0], name: "Function composition", kind: "HIR sugar", description: "Build one typed function from adjacent functions with an exact intermediate type.", example: "let normalize =\n  string.trim_ascii\n  >> string.to_lower;" },
+      { id: "FUN-PARTIAL", group: groups[0], name: "Placeholder partial application", kind: "HIR sugar", description: "Turn a direct call with holes into a closure whose parameters follow source order.", example: "let warn = log.write(\n  level: \"warn\",\n  message: _\n);" },
+      { id: "FUN-LAMBDA-SHORT", group: groups[0], name: "Concise inferred lambda", kind: "HIR sugar", description: "Infer callback types from one exact expected function type while keeping public boundaries explicit.", example: "list.map(values, fn(x) => x + 1)" },
+      { id: "FUN-TRAILING-CALLBACK", group: groups[0], name: "Trailing callback block", kind: "Parser sugar", description: "Move a final callback outside the call parentheses for fold, map, resource, and builder APIs.", example: "list.fold(values, 0) fn(total, item) {\n  total + item\n}" },
+      { id: "FUN-LABELED-ARGS", group: groups[0], name: "Labeled arguments", kind: "Call contract", description: "Name call arguments without constructing a runtime record or changing source evaluation order.", example: "string.replace(\n  value: text,\n  needle: old,\n  replacement: next\n)" },
+      { id: "FUN-DEFAULT-ARGS", group: groups[0], name: "Default arguments", kind: "Call contract", description: "Let declarations supply pure defaults while artifacts record exported defaults exactly.", example: "fn retry(\n  count: Int = 3,\n  delay: Int = 1\n) returns Int" },
+      { id: "FUN-EXPR-BODY", group: groups[0], name: "Expression-bodied function", kind: "Parser sugar", description: "Use an arrow for a one-expression body without weakening declaration annotations.", example: "fn double(x: Int) returns Int => x * 2;" },
+      { id: "FUN-LOCAL", group: groups[0], name: "Local named functions", kind: "Compiler semantics", description: "Give a body a named helper with lexical scope and a stable nested compiler identity.", example: "fn walk(node: Node) returns Int {\n  fn visit(node: Node) returns Int {\n    1\n  }\n\n  visit(node)\n}" },
+      { id: "FUN-EXTENSION-CALL", group: groups[0], name: "Uniform extension-call sugar", kind: "Name resolution", description: "Call an imported namespace function through its first argument without adding method dispatch.", example: "values.map(fn(x) => x + 1)" },
+
+      { id: "COL-COMBINATORS", group: groups[1], name: "Eager list transform and predicate combinators", kind: "Standard library", description: "Add the missing eager map, filter, flat_map, filter_map, find, any, all, partition, and scan operations. Current list.fold stays unchanged.", example: "values\n  |> list.filter(valid)\n  |> list.map(render)" },
+      { id: "COL-LAZY-SEQUENCE", group: groups[1], name: "Lazy sequences or iterators", kind: "Runtime and types", description: "Fuse transformations and stop early through affine, single-pass sequence values.", example: "values\n  |> seq.from_list\n  |> seq.map(expensive)\n  |> seq.take(10)\n  |> seq.to_list" },
+      { id: "COL-COMPREHENSION", group: groups[1], name: "List comprehension", kind: "HIR sugar", description: "Express nested list generation and filtering with deterministic left-to-right clauses.", example: "let names = [\n  for user in users\n  if user.active\n  yield user.name\n];" },
+      { id: "COL-RECORD-UPDATE", group: groups[1], name: "Immutable record update", kind: "HIR sugar", description: "Copy one record and replace named fields after evaluating the base exactly once.", example: "let enabled = User {\n  ..user,\n  active: true\n};" },
+      { id: "COL-LITERAL-SPREAD", group: groups[1], name: "List and map spread", kind: "HIR sugar", description: "Assemble immutable collections from existing collections and new values in source order.", example: "let all = [..prefix, item, ..suffix];" },
+      { id: "COL-RANGE-VALUES", group: groups[1], name: "First-class ranges", kind: "Core value", description: "Reuse half-open and inclusive integer ranges outside a for clause.", example: "let indexes = 0..length(values);\nlet bounded = 1..=10;" },
+      { id: "COL-SLICES", group: groups[1], name: "Bracket slicing for lists, bytes, and strings", kind: "Parser and library", description: "Add a bracket slice expression for lists and bytes and an alternate spelling for existing string.slice, without borrowed views.", example: "let middle = values[2..5];" },
+
+      { id: "PAT-DESTRUCTURE-LET", group: groups[2], name: "Irrefutable destructuring bindings", kind: "Pattern checker", description: "Bind tuple or record parts only when the pattern must match the scrutinee type.", example: "let (name, score) = entry;\nlet Point { x, y } = point;" },
+      { id: "PAT-DESTRUCTURE-PARAM", group: groups[2], name: "Destructured parameters", kind: "Pattern checker", description: "Destructure one aggregate parameter while preserving a single typed call argument.", example: "fn sum(\n  (left, right): (Int, Int)\n) returns Int {\n  left + right\n}" },
+      { id: "PAT-LITERAL", group: groups[2], name: "Non-Boolean scalar literal patterns", kind: "Pattern checker", description: "Extend the existing true and false patterns with deterministic Int, String, and Bytes constants.", example: "match status {\n  200 => \"ok\",\n  _ => \"other\",\n}" },
+      { id: "PAT-RANGE", group: groups[2], name: "Range patterns", kind: "Pattern checker", description: "Match compile-time ordered ranges and diagnose overlaps or unreachable arms.", example: "match code {\n  200..=299 => \"ok\",\n  _ => \"other\",\n}" },
+      { id: "PAT-NESTED", group: groups[2], name: "Recursive nested patterns", kind: "Pattern checker", description: "Match structure inside enum, Option, Result, tuple, and record payloads.", example: "Some(User {\n  name,\n  role: Role.Admin\n}) => name" },
+      { id: "PAT-GUARD", group: groups[2], name: "Match guards", kind: "Control flow", description: "Run a Boolean condition after structural matching with arm bindings in scope.", example: "User { age, name } if age >= 18 => name" },
+      { id: "PAT-OR", group: groups[2], name: "OR patterns", kind: "Pattern checker", description: "Share one arm across alternatives that bind the same names and types.", example: "Reading.Empty | Reading.Skipped => 0" },
+      { id: "PAT-AS", group: groups[2], name: "As patterns", kind: "Pattern checker", description: "Bind a complete matched value and named parts under explicit ownership rules.", example: "whole @ User { id, .. } =>\n  audit(whole, id)" },
+      { id: "PAT-COLLECTION", group: groups[2], name: "List and map patterns with rest", kind: "Pattern and allocation", description: "Match collection prefixes or required keys and capture the unmatched remainder.", example: "match values {\n  [head, ..tail] => Some(head),\n  [] => None,\n}" },
+      { id: "PAT-IF-LET", group: groups[2], name: "Conditional pattern binding", kind: "HIR sugar", description: "Match once and scope bindings to the successful branch of an expression-valued conditional.", example: "if let Some(user) = lookup(id) {\n  user.name\n} else {\n  \"unknown\"\n}" },
+      { id: "PAT-LET-ELSE", group: groups[2], name: "Guarding pattern binding", kind: "HIR sugar", description: "Keep successful bindings in scope. The failed branch must diverge.", example: "let Some(user) = lookup(id) else {\n  return None;\n};" },
+      { id: "PAT-IS", group: groups[2], name: "Boolean pattern test", kind: "HIR sugar", description: "Test a pattern without binding names or writing a two-arm match.", example: "if (matches(value, Some(_))) { ... }" },
+      { id: "PAT-ACTIVE", group: groups[2], name: "User-defined active patterns", kind: "Type and resolution", description: "Expose a pure typed view as a reusable pattern without granting it hidden effects.", example: "match text {\n  ParseInt(value) => value,\n  _ => 0,\n}" },
+
+      { id: "FLOW-OPTION-QUESTION", group: groups[3], name: "Postfix question operator for Option", kind: "HIR sugar", description: "Propagate None from an Option-returning function just as Result propagation returns Err.", example: "let user = map.get(users, id)?;" },
+      { id: "FLOW-OPTION-CHAIN", group: groups[3], name: "Optional member and call chaining", kind: "HIR sugar", description: "Stop a member or call chain at the first None and return a flattened Option.", example: "let city = user?.address?.city;" },
+      { id: "FLOW-BIND", group: groups[3], name: "Typed callback bind sugar", kind: "HIR sugar", description: "Invert a callback-taking call into linear source without defining a universal monad.", example: "use user <- result.try(load_user(id));\nrender(user)" },
+      { id: "FLOW-PARALLEL-BIND", group: groups[3], name: "Independent applicative binds", kind: "Concurrency semantics", description: "Start independent computations together with explicit join, cancellation, and error rules.", example: "let! a = fetch_a();\nand! b = fetch_b();" },
+      { id: "FLOW-ASYNC-CLOSURE", group: groups[3], name: "Async closures and callback types", kind: "Compiler and runtime", description: "Make a closure call produce a lazy Future while keeping capture and effect sets explicit.", example: "let fetch = async fn(\n  url: String\n) returns Result<String, NetworkError>\n  effects [net.http_get] {\n  ...\n};" },
+      { id: "FLOW-TAP", group: groups[3], name: "Value-preserving observation combinator", kind: "Standard library", description: "Run one callback for observation and return the original value to the pipeline.", example: "plan\n  |> tap(inspect_plan)\n  |> execute" },
+      { id: "FLOW-BUILDER-BLOCK", group: groups[3], name: "Typed builder or computation block", kind: "Compiler protocol", description: "Expand a domain block through a narrow typed builder contract without general macros.", example: "report {\n  section(\"Summary\")\n  table(rows)\n}" },
+
+      { id: "TYPE-CONSTRAINT", group: groups[4], name: "User-defined traits or constraints", kind: "Type system", description: "Define reusable required operations with coherent, explicit implementation resolution.", example: "constraint Render<T> {\n  fn render(value: T) returns String\n}" },
+      { id: "TYPE-DERIVE", group: groups[4], name: "Compiler-derived constraint implementations", kind: "Type system", description: "Derive future compiler-owned constraints without duplicating today's intrinsic Eq or canonical encoding and decoding.", example: "record User derives [Ord, Hash] {\n  id: String\n}" },
+      { id: "TYPE-EFFECT-POLY", group: groups[4], name: "Effect-polymorphic callbacks", kind: "Type and effect system", description: "Propagate a callback's exact closed effect set through generic higher-order functions.", example: "fn map<A, B, effects E>(\n  f: fn(A) returns B effects E,\n  values: List<A>\n) returns List<B> effects E" },
+      { id: "TYPE-HKT", group: groups[4], name: "Higher-kinded type parameters", kind: "Kind system", description: "Abstract over generic type constructors for reusable traverse and applicative APIs.", example: "fn traverse<F<_>, A, B>(\n  ...\n) returns F<List<B>>" },
+      { id: "TYPE-UNION", group: groups[4], name: "Anonymous union types", kind: "Type and value model", description: "Combine types with explicit tagging, narrowing, exhaustive matching, and canonical encoding.", example: "fn parse(\n  value: String\n) returns Int | ParseError" },
+      { id: "TYPE-OPEN-VARIANT", group: groups[4], name: "Open or polymorphic variants", kind: "Type and value model", description: "Accept an extensible set of named constructors without one closed enum owner.", example: "fn label<\n  T: [\n    Reading.Empty\n    | Reading.Number(Int)\n    | ..\n  ]\n>(value: T) returns String" },
+      { id: "TYPE-RECURSIVE-ADT", group: groups[4], name: "Recursive enums and records", kind: "Runtime and types", description: "Represent immutable recursive data with bounded layout, encoding, equality, and decoding.", example: "enum Tree<T> {\n  Leaf(T)\n  Branch(List<Tree<T>>)\n}" },
+      { id: "TYPE-EFFECT-HANDLER", group: groups[4], name: "User-defined typed effects and handlers", kind: "Runtime model", description: "Handle local computational effects while keeping host authority effects unforgeable.", example: "handle state_program()\n  with map_state(initial)" },
+
+      { id: "LIT-MULTILINE", group: groups[5], name: "Indentation-trimmed multiline strings", kind: "Lexer sugar", description: "Write prompts and templates across lines with deterministic indentation trimming.", example: "let prompt = \"\"\"\n  Summarize ${topic}.\n  Return JSON.\n  \"\"\";" },
+      { id: "LIT-RAW-STRING", group: groups[5], name: "Raw string literals", kind: "Lexer sugar", description: "Preserve quotes, backslashes, and interpolation markers as literal text through a hash-counted delimiter.", example: "let pattern = r#\"${name}\\\\d+\"#;" }
+    ];
+
+    const escapeHtml = (value) => value
+      .replaceAll("&", "&amp;")
+      .replaceAll("<", "&lt;")
+      .replaceAll(">", "&gt;")
+      .replaceAll('"', "&quot;");
+
+    const slug = (feature) => `${feature.id.toLowerCase()}-${feature.name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/(^-|-$)/g, "")}`;
+    const catalog = document.getElementById("catalog");
+
+    groups.forEach((group, groupIndex) => {
+      const groupFeatures = features.filter((feature) => feature.group === group);
+      const section = document.createElement("section");
+      section.setAttribute("aria-labelledby", `group-${groupIndex}`);
+      section.innerHTML = `
+        <div class="section-heading">
+          <h2 id="group-${groupIndex}">${escapeHtml(group)}</h2>
+          <span class="section-count">${groupFeatures.length} features</span>
+        </div>
+        <div class="feature-grid">
+          ${groupFeatures.map((feature) => `
+            <article class="feature" data-feature-id="${feature.id}">
+              <input type="checkbox" id="select-${feature.id}" value="${feature.id}" aria-label="Select ${escapeHtml(feature.name)}">
+              <div>
+                <div class="feature-topline">
+                  <span class="feature-id">${feature.id}</span>
+                  <h3><label for="select-${feature.id}">${escapeHtml(feature.name)}</label></h3>
+                  <span class="kind">${escapeHtml(feature.kind)}</span>
+                </div>
+                <span class="gap-status">Not in current ALLEN 0.1</span>
+                <p class="description">${escapeHtml(feature.description)}</p>
+                <pre><code>${escapeHtml(feature.example)}</code></pre>
+                <a class="feature-link" href="allen-language-features-proposal.md#${slug(feature)}">Read design notes</a>
+              </div>
+            </article>
+          `).join("")}
+        </div>`;
+      catalog.appendChild(section);
+    });
+
+    const checkboxes = Array.from(document.querySelectorAll('input[type="checkbox"]'));
+    const copyButton = document.getElementById("copy-selected");
+    const selectionStatus = document.getElementById("selection-status");
+    const announce = document.getElementById("announce");
+    document.getElementById("total-count").textContent = String(features.length);
+
+    const selectedFeatures = () => {
+      const ids = new Set(checkboxes.filter((checkbox) => checkbox.checked).map((checkbox) => checkbox.value));
+      return features.filter((feature) => ids.has(feature.id));
+    };
+
+    const updateSelection = () => {
+      const count = selectedFeatures().length;
+      selectionStatus.textContent = `${count} selected`;
+      copyButton.textContent = count === 0 ? "Copy selected" : `Copy ${count} selected`;
+      copyButton.disabled = count === 0;
+    };
+
+    const fallbackCopy = (text) => {
+      const textarea = document.createElement("textarea");
+      textarea.value = text;
+      textarea.setAttribute("readonly", "");
+      textarea.style.position = "fixed";
+      textarea.style.opacity = "0";
+      document.body.appendChild(textarea);
+      textarea.select();
+      const copied = document.execCommand("copy");
+      textarea.remove();
+      if (!copied) throw new Error("Clipboard copy was rejected");
+    };
+
+    const writeClipboard = async (text) => {
+      if (navigator.clipboard && window.isSecureContext) {
+        await navigator.clipboard.writeText(text);
+        return;
+      }
+      fallbackCopy(text);
+    };
+
+    checkboxes.forEach((checkbox) => checkbox.addEventListener("change", updateSelection));
+
+    copyButton.addEventListener("click", async () => {
+      const selected = selectedFeatures();
+      const lines = [
+        "ALLEN implementation shortlist",
+        "",
+        ...selected.map((feature) => `- [ ] ${feature.id} - ${feature.name}`),
+        "",
+        "Design reference: docs/plans/allen-language-features-proposal.md"
+      ];
+
+      try {
+        await writeClipboard(lines.join("\n"));
+        announce.textContent = `Copied ${selected.length} selected features to the clipboard.`;
+        copyButton.textContent = "Copied";
+        window.setTimeout(updateSelection, 1400);
+      } catch (error) {
+        announce.textContent = "Clipboard copy failed. Check browser clipboard permissions.";
+        copyButton.textContent = "Copy failed";
+        window.setTimeout(updateSelection, 1800);
+      }
+    });
+
+    updateSelection();
+  </script>
+</body>
+</html>

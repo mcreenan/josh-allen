@@ -1,0 +1,15 @@
+[package]
+name = "template-example"
+version = "0.1.0"
+language = "^0.1"
+
+[[entry]]
+name = "main"
+function = "src/main.allen::main"
+input = "Void"
+output = "String"
+
+[[templates]]
+name = "notice"
+path = "templates/notice.txt"
+holes = { count = "Int", enabled = "Bool", name = "String" }

@@ -12,20 +12,20 @@ use std::fs;
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 
-const EXAMPLE_SOURCE_COUNT: usize = 79;
+const EXAMPLE_SOURCE_COUNT: usize = 91;
 const CLI_FIXTURE_SOURCE_COUNT: usize = 101;
 const SYNTAX_GOLDEN_SOURCE_COUNT: usize = 2;
 const PARSER_SEED_COUNT: usize = 15;
 const EXAMPLE_CORPUS_DIGEST: &str =
-    "c088a0f775b55395e45b8e43a20be00609ed5b59d5dc18fce1b727bdb2517cc1";
+    "ff01328fbc687405dcb28604c295aeb37aa2768890aba15210b83dacfa3895d5";
 const CLI_FIXTURE_CORPUS_DIGEST: &str =
     "cf577e3187ce1cf79812053186315dc5fb8a06d195ad9e4df8dd897ba8e4587e";
 const SYNTAX_GOLDEN_CORPUS_DIGEST: &str =
-    "57a411cd0f210f99bd3bd3700a5945275c4b2f91d7147a658ac5a8665d7cc28e";
+    "1915516a5d951385ae11a7409b21d4ca0e6db1a3f3453180d5a767c7d466d2c6";
 const PARSER_SEED_CORPUS_DIGEST: &str =
     "38b8986f56ada7d3c75af46f4328beec0312c79c0f60b6b2c87380e913976e94";
 const COMPLETE_CORPUS_DIGEST: &str =
-    "639c11bdd11b77e2421ea35de5a16e14014fb11f1d069eb1ff0e4151d64c5cf2";
+    "4b16731dd07fe50e76cdb910947e3428d569f6c327a0bb250bd39ab5c3bdf834";
 
 fn repository_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -210,7 +210,7 @@ fn compile_prepared_catalog_route(source: &str, support: &str) -> PreparedCatalo
 }
 
 #[test]
-fn closed_197_input_inventory_is_complete_disjoint_and_unchanged() {
+fn closed_209_input_inventory_is_complete_disjoint_and_unchanged() {
     let (examples, fixtures, goldens, seeds) = corpus_classes();
     assert_eq!(examples.len(), EXAMPLE_SOURCE_COUNT);
     assert_eq!(fixtures.len(), CLI_FIXTURE_SOURCE_COUNT);
@@ -228,7 +228,7 @@ fn closed_197_input_inventory_is_complete_disjoint_and_unchanged() {
         .chain(&seeds)
         .cloned()
         .collect::<Vec<_>>();
-    assert_eq!(complete.len(), 197);
+    assert_eq!(complete.len(), 209);
     assert_eq!(
         complete
             .iter()
@@ -284,7 +284,7 @@ fn every_utf8_corpus_input_has_a_deterministic_lossless_canonical_outcome() {
             );
         }
     }
-    assert_eq!((utf8, invalid_utf8), (196, 1));
+    assert_eq!((utf8, invalid_utf8), (208, 1));
 }
 
 #[test]

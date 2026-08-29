@@ -1,7 +1,9 @@
 //! Stable compiler entry, package, manifest, and compilation result contracts.
 
 use super::{HirBundle, MirBundle};
-use allen_bytecode::{DebugInfo, FunctionId, Module, ValueType};
+use allen_bytecode::{
+    DebugInfo, EntryValidatorSite, FunctionId, Module, RecordInvariantDefinition, ValueType,
+};
 use allen_schema::ToolRequirement;
 use std::collections::BTreeMap;
 
@@ -13,6 +15,7 @@ pub struct Compilation {
     pub mir: MirBundle,
     pub effect_report: Vec<EffectReportEntry>,
     pub exported_functions: Vec<ExportedFunction>,
+    pub record_invariants: Vec<RecordInvariantDefinition>,
 }
 
 /// One source-level exported function boundary after exact type resolution.
@@ -27,6 +30,8 @@ pub struct ExportedFunction {
     pub parameter_spellings: Vec<String>,
     pub return_spelling: String,
     pub effects: Vec<String>,
+    pub input_validators: Vec<EntryValidatorSite>,
+    pub output_validators: Vec<EntryValidatorSite>,
 }
 
 /// One manifest-selected package entry source boundary.
@@ -34,6 +39,15 @@ pub struct ExportedFunction {
 pub struct PackageEntryPoint {
     pub module: String,
     pub function: String,
+}
+
+/// One package-local template signature bound to its artifact table index.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CompilerTemplateBinding {
+    pub package: String,
+    pub name: String,
+    pub template: u32,
+    pub holes: Vec<(String, ValueType)>,
 }
 
 /// Canonical package-module inputs for the compiler.

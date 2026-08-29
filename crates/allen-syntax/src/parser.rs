@@ -260,8 +260,11 @@ impl<'a, 'd> Parser<'a, 'd> {
                 SyntaxKind::KwRecord
                 | SyntaxKind::KwEnum
                 | SyntaxKind::KwType
+                | SyntaxKind::KwNewtype
+                | SyntaxKind::KwConst
                 | SyntaxKind::KwFn
                 | SyntaxKind::KwAsync
+                | SyntaxKind::KwTest
                 | SyntaxKind::KwExport => {
                     manifest_allowed = false;
                     imports_allowed = false;
@@ -283,6 +286,9 @@ impl<'a, 'd> Parser<'a, 'd> {
     fn import_declaration(&mut self) {
         let marker = self.start();
         self.bump_nontrivia();
+        if self.nth_text(0) == Some("extension") {
+            self.bump_nontrivia();
+        }
         if !self.expect_open_delimiter(SyntaxKind::LBrace, "expected `{` after `import`") {
             self.complete(marker, SyntaxKind::ImportDeclaration);
             return;
@@ -325,7 +331,10 @@ impl<'a, 'd> Parser<'a, 'd> {
             SyntaxKind::KwRecord => self.record_declaration(),
             SyntaxKind::KwEnum => self.enum_declaration(),
             SyntaxKind::KwType => self.type_alias_declaration(),
+            SyntaxKind::KwNewtype => self.newtype_declaration(),
+            SyntaxKind::KwConst => self.const_declaration(),
             SyntaxKind::KwAsync | SyntaxKind::KwFn => self.function_declaration(),
+            SyntaxKind::KwTest => self.test_declaration(),
             _ => self.error_until_top_level(),
         }
         self.complete(marker, SyntaxKind::Declaration);
@@ -358,8 +367,11 @@ impl<'a, 'd> Parser<'a, 'd> {
             SyntaxKind::KwRecord
                 | SyntaxKind::KwEnum
                 | SyntaxKind::KwType
+                | SyntaxKind::KwNewtype
+                | SyntaxKind::KwConst
                 | SyntaxKind::KwFn
                 | SyntaxKind::KwAsync
+                | SyntaxKind::KwTest
         )
     }
 
@@ -372,8 +384,11 @@ impl<'a, 'd> Parser<'a, 'd> {
                 | SyntaxKind::KwRecord
                 | SyntaxKind::KwEnum
                 | SyntaxKind::KwType
+                | SyntaxKind::KwNewtype
+                | SyntaxKind::KwConst
                 | SyntaxKind::KwAsync
                 | SyntaxKind::KwFn
+                | SyntaxKind::KwTest
         )
     }
 

@@ -1,0 +1,9 @@
+newtype Count = Int
+
+export fn render_notice() returns String {
+  templates.notice.render({
+    count: Count(7)
+    enabled: true
+    name: "Ada"
+  })
+}

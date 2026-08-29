@@ -1,4 +1,4 @@
-//! Coordinated bytecode-v13 lowering after resolution and checking.
+//! Coordinated bytecode-v19 lowering after resolution and checking.
 //!
 //! HIR and MIR are emitted from the same typed expression walk so bytecode,
 //! debug spans, ownership transitions, and both IRs cannot observe different
@@ -10,26 +10,410 @@ use super::checking::{
     contains_workspace, effect_id, expected_type_diagnostic_code, is_affine, literal_map_key,
 };
 use super::resolution::{
-    CollectionBuiltin, FunctionInfo, ResolvedBundle, StandardBuiltin, capability_builtin_callee,
-    collection_builtin_callee, direct_capability_inspection_body_span, effect_operation_signature,
-    is_task_snapshot_callee, required_body_effects, resolve_function_name, resolve_named_type,
-    semantic_type, standard_builtin_callee, string_builtin_callee, sub_agent_projection_type,
-    tool_callee,
+    CollectionBuiltin, FunctionInfo, ResolvedBundle, SequenceBuiltin, StandardBuiltin,
+    capability_builtin_callee, collection_builtin_callee, default_helper_name,
+    direct_capability_inspection_body_span, effect_operation_signature, is_task_snapshot_callee,
+    required_body_effects, resolve_extension_functions, resolve_function_name, resolve_named_type,
+    semantic_type, standard_builtin_callee, standard_operation_callee, string_builtin_callee,
+    sub_agent_projection_type, template_binding, template_callee, tool_callee,
 };
 use super::{
-    BTreeMap, BTreeSet, Binary, CapabilityOperation, CheckedIntOperation, CompareOp, Constant,
-    Conversion, DebugLocation, Diagnostic, EffectOperation, EffectSetId, EnumPayloadType,
-    ExternalFsAccess, Function, FunctionId, HirExpr, HirExprKind, HirForSource, HirFunction,
-    HirLoopBinding, HirLoopBindingElement, HirTemplatePart, Instruction, LocalBinding, LoweredBody,
-    LoweredElse, LoweredEnumValuePayload, LoweredExpr, LoweredExprKind, LoweredForSource,
-    LoweredFunction, LoweredLoopBinding, LoweredPattern, LoweredStatement, LoweredTemplatePart,
-    LoweredType, MirBlock, MirCleanupKind, MirFunction, MirOperation, MirOwnership,
+    BTreeMap, BTreeSet, Binary, CapabilityOperation, CheckedIntOperation, CollectionOperation,
+    CompareOp, Constant, Conversion, DebugLocation, Diagnostic, EffectOperation, EffectSetId,
+    EnumPayloadType, ExternalFsAccess, Function, FunctionId, HirExpr, HirExprKind, HirForSource,
+    HirFunction, HirListItem, HirLoopBinding, HirLoopBindingElement, HirMapItem, HirTemplatePart,
+    Instruction, ListCombinator, LocalBinding, LoweredBody, LoweredCallArgument, LoweredElse,
+    LoweredEnumValuePayload, LoweredExpr, LoweredExprKind, LoweredForSource, LoweredFunction,
+    LoweredLoopBinding, LoweredPattern, LoweredStatement, LoweredTemplatePart, LoweredType,
+    MirBlock, MirCleanupKind, MirFunction, MirListItem, MirMapItem, MirOperation, MirOwnership,
     MirOwnershipState, MirSuspension, MirTaskScope, MirTerminator, NumericBinaryOp, RecordField,
-    Register, SafeCollectionOperation, SourceSpan, Span, SpanId, StringOperation, SymbolId, TypeId,
-    Unary, ValueType, agent_error_type, is_strict_schema_type, model_error_type,
-    prompt_output_type, prompt_type, sub_agent_error_type, task_snapshot_type,
-    template_interpolations, user_error_type,
+    Register, SafeCollectionOperation, SourceSpan, Span, SpanId, StandardOperation,
+    StringOperation, SymbolId, TypeId, Unary, ValueType, agent_error_type, format_error_type,
+    is_strict_schema_type, model_error_type, parse_error_type, prompt_output_type, prompt_type,
+    sub_agent_error_type, task_snapshot_type, template_interpolations, time_error_type,
+    user_error_type,
 };
+use allen_bytecode::{ListLiteralItem, MapLiteralItem, decode_error_type};
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum PatternLiteralValue {
+    Int(i64),
+    String(String),
+    Bytes(Vec<u8>),
+}
+
+impl PatternLiteralValue {
+    fn compare(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        match (self, other) {
+            (Self::Int(left), Self::Int(right)) => Some(left.cmp(right)),
+            (Self::String(left), Self::String(right)) => Some(left.chars().cmp(right.chars())),
+            (Self::Bytes(left), Self::Bytes(right)) => Some(left.cmp(right)),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+struct PatternInterval {
+    start: PatternLiteralValue,
+    end: PatternLiteralValue,
+    inclusive: bool,
+}
+
+fn parameter_default_digest(source_text: &str) -> [u8; 32] {
+    let source = allen_syntax::SourceFile::new(allen_syntax::SourceFileId::new(0), source_text)
+        .expect("lowered default source fits the syntax range model");
+    let lexed = allen_syntax::lex(&source);
+    debug_assert!(
+        lexed.diagnostics().is_empty(),
+        "a lowered default was already parsed successfully"
+    );
+    let mut canonical = b"allen-default-token-stream-v1\0".to_vec();
+    for token in lexed.tokens() {
+        let kind = token.kind();
+        if matches!(
+            kind,
+            allen_syntax::SyntaxKind::Eof
+                | allen_syntax::SyntaxKind::Whitespace
+                | allen_syntax::SyntaxKind::Newline
+                | allen_syntax::SyntaxKind::LineComment
+                | allen_syntax::SyntaxKind::BlockComment
+        ) {
+            continue;
+        }
+        let text = token.text(&source).as_bytes();
+        canonical.extend_from_slice(&(kind as u16).to_le_bytes());
+        canonical.extend_from_slice(
+            &u64::try_from(text.len())
+                .expect("token length fits the canonical digest encoding")
+                .to_le_bytes(),
+        );
+        canonical.extend_from_slice(text);
+    }
+    let digest = allen_schema::digest_bytes(&canonical);
+    let hex = digest
+        .strip_prefix("sha256:")
+        .expect("schema digests use the sha256 prefix");
+    let mut bytes = [0_u8; 32];
+    for (index, byte) in bytes.iter_mut().enumerate() {
+        let offset = index * 2;
+        *byte = u8::from_str_radix(&hex[offset..offset + 2], 16)
+            .expect("schema digests use lowercase hexadecimal");
+    }
+    bytes
+}
+
+fn template_scalar_type(value_type: &ValueType) -> &ValueType {
+    match value_type {
+        ValueType::Newtype { underlying, .. } => template_scalar_type(underlying),
+        _ => value_type,
+    }
+}
+
+fn effect_operation_argument_labels(operation: EffectOperation) -> &'static [&'static str] {
+    match operation {
+        EffectOperation::ReadText | EffectOperation::ReadBytes | EffectOperation::List => {
+            &["workspace", "path"]
+        }
+        EffectOperation::WriteText | EffectOperation::WriteBytes => &["workspace", "path", "value"],
+        EffectOperation::Search => &["workspace", "path", "query"],
+        EffectOperation::HttpGet => &["url"],
+        EffectOperation::ExecRun => &["argv", "stdin"],
+        EffectOperation::PermissionRequestFile
+        | EffectOperation::PermissionRequestDirectory
+        | EffectOperation::AgentAsk
+        | EffectOperation::ModelRequest
+        | EffectOperation::UserAsk => &["request"],
+        EffectOperation::AgentMessage => &["message"],
+        EffectOperation::AgentTranscript => &["query"],
+        EffectOperation::SubAgentCreate => &["initial", "projection"],
+        EffectOperation::SubAgentRun => &["request", "projection"],
+        EffectOperation::SubAgentMessage => &["target", "message"],
+        EffectOperation::SubAgentAsk => &["target", "request"],
+    }
+}
+
+fn builtin_argument_labels(callee: &LoweredExpr) -> Option<&'static [&'static str]> {
+    if let LoweredExprKind::Variable(name) = &callee.kind {
+        if let Some(labels) = match name.as_str() {
+            "narrow" | "to_int" => Some(&["value"] as &[_]),
+            "stop" | "fail" => Some(&["reason"] as &[_]),
+            _ => None,
+        } {
+            return Some(labels);
+        }
+    }
+    if is_task_snapshot_callee(callee) {
+        return Some(&["task"]);
+    }
+    if template_callee(callee).is_some() || tool_callee(callee).is_some() {
+        return Some(&["input"]);
+    }
+    if let Some(builtin) = standard_builtin_callee(callee) {
+        return Some(match builtin {
+            StandardBuiltin::Workspace => &[],
+            StandardBuiltin::Operation(operation) => effect_operation_argument_labels(operation),
+        });
+    }
+    if let Some(operation) = capability_builtin_callee(callee) {
+        return Some(match operation {
+            CapabilityOperation::IsGranted => &["name"],
+            CapabilityOperation::Granted => &[],
+        });
+    }
+    if let Some(builtin) = collection_builtin_callee(callee) {
+        return Some(match builtin {
+            CollectionBuiltin::Length
+            | CollectionBuiltin::CheckedInt(CheckedIntOperation::Negate) => &["value"],
+            CollectionBuiltin::ListAppend => &["values", "value"],
+            CollectionBuiltin::ListSet => &["values", "index", "value"],
+            CollectionBuiltin::Operation(CollectionOperation::Zip) => &[],
+            CollectionBuiltin::Operation(_)
+            | CollectionBuiltin::Safe(SafeCollectionOperation::MapKeys) => &["values"],
+            CollectionBuiltin::ListFold => &["values", "initial", "callback"],
+            CollectionBuiltin::ListCombinator(ListCombinator::Scan) => {
+                &["values", "initial", "callback"]
+            }
+            CollectionBuiltin::ListCombinator(_) => &["values", "callback"],
+            CollectionBuiltin::Safe(
+                SafeCollectionOperation::ListGet | SafeCollectionOperation::BytesGet,
+            ) => &["values", "index"],
+            CollectionBuiltin::Safe(SafeCollectionOperation::ListTrySet) => {
+                &["values", "index", "value"]
+            }
+            CollectionBuiltin::Safe(
+                SafeCollectionOperation::MapGet | SafeCollectionOperation::MapRemove,
+            ) => &["values", "key"],
+            CollectionBuiltin::Safe(SafeCollectionOperation::MapInsert) => {
+                &["values", "key", "value"]
+            }
+            CollectionBuiltin::CheckedInt(_) => &["left", "right"],
+            CollectionBuiltin::Sequence(operation) => match operation {
+                SequenceBuiltin::FromList | SequenceBuiltin::ToList => &["values"],
+                SequenceBuiltin::Map
+                | SequenceBuiltin::Filter
+                | SequenceBuiltin::Find
+                | SequenceBuiltin::Any
+                | SequenceBuiltin::All => &["values", "callback"],
+                SequenceBuiltin::Take => &["values", "count"],
+                SequenceBuiltin::Fold => &["values", "initial", "callback"],
+            },
+        });
+    }
+    if let Some(operation) = string_builtin_callee(callee) {
+        return Some(match operation {
+            StringOperation::ByteLength
+            | StringOperation::TrimAscii
+            | StringOperation::FromUtf8 => &["value"],
+            StringOperation::Concat => &["left", "right"],
+            StringOperation::Get => &["value", "index"],
+            StringOperation::Slice => &["value", "start", "end"],
+            StringOperation::Find
+            | StringOperation::Contains
+            | StringOperation::StartsWith
+            | StringOperation::EndsWith
+            | StringOperation::Split => &["value", "needle"],
+            StringOperation::Join => &["values", "separator"],
+            StringOperation::Replace => &["value", "needle", "replacement"],
+            StringOperation::TemplateConcat => return None,
+        });
+    }
+    if let Some(operation) = standard_operation_callee(callee) {
+        return Some(match operation {
+            StandardOperation::FloatFormat => &["value", "precision"],
+            StandardOperation::TimeBucket => &["value", "bucket"],
+            StandardOperation::TimeFormatUtc
+            | StandardOperation::TimeParseUtc
+            | StandardOperation::ToInt => &["value"],
+        });
+    }
+    None
+}
+
+#[derive(Clone)]
+struct DirectPartialContract {
+    parameters: Vec<ValueType>,
+    result: ValueType,
+    effects: Vec<String>,
+}
+
+fn string_operation_signature(
+    operation: StringOperation,
+) -> (&'static str, Vec<ValueType>, ValueType) {
+    match operation {
+        StringOperation::ByteLength => (
+            "string.byte_length",
+            vec![ValueType::String],
+            ValueType::Int,
+        ),
+        StringOperation::Concat => (
+            "string.concat",
+            vec![ValueType::String, ValueType::String],
+            ValueType::String,
+        ),
+        StringOperation::Get => (
+            "string.get",
+            vec![ValueType::String, ValueType::Int],
+            ValueType::Option(Box::new(ValueType::String)),
+        ),
+        StringOperation::Slice => (
+            "string.slice",
+            vec![ValueType::String, ValueType::Int, ValueType::Int],
+            ValueType::Option(Box::new(ValueType::String)),
+        ),
+        StringOperation::Find => (
+            "string.find",
+            vec![ValueType::String, ValueType::String],
+            ValueType::Option(Box::new(ValueType::Int)),
+        ),
+        StringOperation::Contains => (
+            "string.contains",
+            vec![ValueType::String, ValueType::String],
+            ValueType::Bool,
+        ),
+        StringOperation::StartsWith => (
+            "string.starts_with",
+            vec![ValueType::String, ValueType::String],
+            ValueType::Bool,
+        ),
+        StringOperation::EndsWith => (
+            "string.ends_with",
+            vec![ValueType::String, ValueType::String],
+            ValueType::Bool,
+        ),
+        StringOperation::Split => (
+            "string.split",
+            vec![ValueType::String, ValueType::String],
+            ValueType::Option(Box::new(ValueType::List(Box::new(ValueType::String)))),
+        ),
+        StringOperation::Join => (
+            "string.join",
+            vec![
+                ValueType::List(Box::new(ValueType::String)),
+                ValueType::String,
+            ],
+            ValueType::String,
+        ),
+        StringOperation::TrimAscii => (
+            "string.trim_ascii",
+            vec![ValueType::String],
+            ValueType::String,
+        ),
+        StringOperation::FromUtf8 => (
+            "string.from_utf8",
+            vec![ValueType::Bytes],
+            ValueType::Option(Box::new(ValueType::String)),
+        ),
+        StringOperation::Replace => (
+            "string.replace",
+            vec![ValueType::String, ValueType::String, ValueType::String],
+            ValueType::String,
+        ),
+        StringOperation::TemplateConcat => {
+            unreachable!("template concatenation is not a source builtin")
+        }
+    }
+}
+
+fn standard_operation_signature(
+    operation: StandardOperation,
+) -> (&'static str, Vec<ValueType>, ValueType) {
+    match operation {
+        StandardOperation::ToInt => (
+            "to_int",
+            vec![ValueType::String],
+            ValueType::Result(Box::new(ValueType::Int), Box::new(parse_error_type())),
+        ),
+        StandardOperation::FloatFormat => (
+            "float.format",
+            vec![ValueType::Float, ValueType::Int],
+            ValueType::Result(Box::new(ValueType::String), Box::new(format_error_type())),
+        ),
+        StandardOperation::TimeFormatUtc => (
+            "time.format_utc",
+            vec![ValueType::Int],
+            ValueType::Result(Box::new(ValueType::String), Box::new(time_error_type())),
+        ),
+        StandardOperation::TimeParseUtc => (
+            "time.parse_utc",
+            vec![ValueType::String],
+            ValueType::Result(Box::new(ValueType::Int), Box::new(time_error_type())),
+        ),
+        StandardOperation::TimeBucket => (
+            "time.bucket",
+            vec![ValueType::Int, ValueType::Int],
+            ValueType::Result(Box::new(ValueType::Int), Box::new(time_error_type())),
+        ),
+    }
+}
+
+fn capability_operation_signature(
+    operation: CapabilityOperation,
+) -> (&'static str, Vec<ValueType>, ValueType) {
+    match operation {
+        CapabilityOperation::IsGranted => (
+            "capability.is_granted",
+            vec![ValueType::String],
+            ValueType::Bool,
+        ),
+        CapabilityOperation::Granted => (
+            "capability.granted",
+            Vec::new(),
+            ValueType::List(Box::new(ValueType::String)),
+        ),
+    }
+}
+
+fn reorder_labeled_builtin_arguments(
+    arguments: &[LoweredCallArgument],
+    labels: &[&str],
+    span: Span,
+) -> Result<Option<Vec<usize>>, Diagnostic> {
+    if !arguments.iter().any(|argument| argument.label.is_some()) {
+        return Ok(None);
+    }
+    if arguments.iter().any(|argument| argument.label.is_none()) {
+        return Err(Diagnostic::new(
+            "E3010",
+            "direct builtin calls cannot mix labeled and positional arguments",
+            arguments
+                .iter()
+                .find(|argument| argument.label.is_none())
+                .map_or(span, |argument| argument.span),
+        ));
+    }
+    let mut reordered = (0..labels.len()).map(|_| None).collect::<Vec<_>>();
+    for (source_index, argument) in arguments.iter().enumerate() {
+        let (label, label_span) = argument.label.as_ref().expect("all arguments are labeled");
+        let Some(index) = labels.iter().position(|candidate| *candidate == label) else {
+            return Err(Diagnostic::new(
+                "E3010",
+                format!("direct builtin has no parameter labeled '{label}'"),
+                *label_span,
+            ));
+        };
+        if reordered[index].replace(source_index).is_some() {
+            return Err(Diagnostic::new(
+                "E3010",
+                format!("direct builtin received duplicate label '{label}'"),
+                *label_span,
+            ));
+        }
+    }
+    if reordered.iter().any(Option::is_none) {
+        return Err(Diagnostic::new(
+            "E3010",
+            "direct builtin is missing a labeled argument",
+            span,
+        ));
+    }
+    Ok(Some(
+        reordered
+            .into_iter()
+            .map(|argument| argument.expect("all labels are supplied"))
+            .collect(),
+    ))
+}
 
 pub(super) struct GlobalLowering<'a> {
     pub(super) bundle: &'a ResolvedBundle,
@@ -45,6 +429,8 @@ pub(super) struct GlobalLowering<'a> {
     pub(super) debug_locations: Vec<DebugLocation>,
     pub(super) next_symbol: SymbolId,
     pub(super) async_functions: BTreeSet<FunctionId>,
+    pub(super) constant_values: BTreeMap<SymbolId, allen_vm::Value>,
+    pub(super) constant_evaluation: bool,
 }
 
 impl GlobalLowering<'_> {
@@ -116,6 +502,9 @@ pub(super) struct FunctionLowering<'a, 'b> {
     parameters: Vec<Register>,
     captures: Vec<Register>,
     bindings: BTreeMap<String, LocalBinding>,
+    local_functions: BTreeMap<String, FunctionInfo>,
+    unavailable_local_functions: BTreeSet<String>,
+    local_function_ordinal: usize,
     code: Vec<Instruction>,
     instruction_spans: BTreeMap<usize, Span>,
     mir: Vec<MirOperation>,
@@ -169,6 +558,36 @@ pub(super) struct LoopEntryStates<'a> {
     exit: &'a LoopEdgeState,
 }
 
+fn constant_enum_payload(
+    value: &allen_vm::EnumValue,
+    payload_types: &[ValueType],
+    lowering: &mut FunctionLowering<'_, '_>,
+    symbol: SymbolId,
+    span: Span,
+) -> Result<Vec<Register>, Diagnostic> {
+    let values: Vec<&allen_vm::Value> = match &value.payload {
+        allen_vm::EnumPayload::Unit => Vec::new(),
+        allen_vm::EnumPayload::Tuple(values) => values.iter().collect(),
+        allen_vm::EnumPayload::Record(values) => values.iter().map(|(_, value)| value).collect(),
+    };
+    if values.len() != payload_types.len() {
+        return Err(Diagnostic::new(
+            "E3007",
+            "constant enum payload mismatch",
+            span,
+        ));
+    }
+    values
+        .into_iter()
+        .zip(payload_types)
+        .map(|(value, value_type)| {
+            lowering
+                .materialize_constant(value, value_type, symbol, span)
+                .map(|value| value.register)
+        })
+        .collect()
+}
+
 #[derive(Clone)]
 pub(super) struct LoopContext {
     scope_depth: usize,
@@ -189,6 +608,321 @@ pub(super) struct CompiledLoop {
 }
 
 impl FunctionLowering<'_, '_> {
+    #[allow(clippy::too_many_lines)]
+    fn materialize_constant(
+        &mut self,
+        value: &allen_vm::Value,
+        value_type: &ValueType,
+        symbol: SymbolId,
+        span: Span,
+    ) -> Result<CompiledExpr, Diagnostic> {
+        let (register, mir) = match (value, value_type) {
+            (allen_vm::Value::Int(value), ValueType::Int) => {
+                let register = self.allocate(ValueType::Int)?;
+                let constant = self.global.constant(Constant::Int(*value))?;
+                self.code.push(Instruction::Const {
+                    destination: register,
+                    constant,
+                });
+                (
+                    register,
+                    MirOperation::Constant {
+                        destination: u32::from(register),
+                    },
+                )
+            }
+            (allen_vm::Value::Bool(value), ValueType::Bool) => {
+                let register = self.allocate(ValueType::Bool)?;
+                let constant = self.global.constant(Constant::Bool(*value))?;
+                self.code.push(Instruction::Const {
+                    destination: register,
+                    constant,
+                });
+                (
+                    register,
+                    MirOperation::Constant {
+                        destination: u32::from(register),
+                    },
+                )
+            }
+            (allen_vm::Value::Float(value), ValueType::Float) => {
+                let register = self.allocate(ValueType::Float)?;
+                let constant = self.global.constant(Constant::float_bits(value.bits()))?;
+                self.code.push(Instruction::Const {
+                    destination: register,
+                    constant,
+                });
+                (
+                    register,
+                    MirOperation::Constant {
+                        destination: u32::from(register),
+                    },
+                )
+            }
+            (allen_vm::Value::String(value), ValueType::String) => {
+                let register = self.allocate(ValueType::String)?;
+                let constant = self.global.constant(Constant::String(value.to_string()))?;
+                self.code.push(Instruction::Const {
+                    destination: register,
+                    constant,
+                });
+                (
+                    register,
+                    MirOperation::Constant {
+                        destination: u32::from(register),
+                    },
+                )
+            }
+            (allen_vm::Value::Bytes(value), ValueType::Bytes) => {
+                let register = self.allocate(ValueType::Bytes)?;
+                let constant = self.global.constant(Constant::Bytes(value.to_vec()))?;
+                self.code.push(Instruction::Const {
+                    destination: register,
+                    constant,
+                });
+                (
+                    register,
+                    MirOperation::Constant {
+                        destination: u32::from(register),
+                    },
+                )
+            }
+            (allen_vm::Value::Unit, ValueType::Unit) => {
+                let register = self.allocate(ValueType::Unit)?;
+                let constant = self.global.constant(Constant::Unit)?;
+                self.code.push(Instruction::Const {
+                    destination: register,
+                    constant,
+                });
+                (
+                    register,
+                    MirOperation::Constant {
+                        destination: u32::from(register),
+                    },
+                )
+            }
+            (allen_vm::Value::List(values), ValueType::List(element_type)) => {
+                let elements = values
+                    .iter()
+                    .map(|value| self.materialize_constant(value, element_type, symbol, span))
+                    .collect::<Result<Vec<_>, _>>()?;
+                let register = self.allocate(value_type.clone())?;
+                self.code.push(Instruction::ListNew {
+                    destination: register,
+                    elements: elements.iter().map(|value| value.register).collect(),
+                });
+                (
+                    register,
+                    MirOperation::List {
+                        destination: u32::from(register),
+                        items: Vec::new(),
+                    },
+                )
+            }
+            (allen_vm::Value::Map(entries), ValueType::Map(key_type, item_type)) => {
+                let entries = entries
+                    .iter()
+                    .map(|(key, value)| {
+                        Ok((
+                            self.materialize_constant(key, key_type, symbol, span)?,
+                            self.materialize_constant(value, item_type, symbol, span)?,
+                        ))
+                    })
+                    .collect::<Result<Vec<_>, Diagnostic>>()?;
+                let register = self.allocate(value_type.clone())?;
+                self.code.push(Instruction::MapNew {
+                    destination: register,
+                    entries: entries
+                        .iter()
+                        .map(|(key, value)| (key.register, value.register))
+                        .collect(),
+                });
+                (
+                    register,
+                    MirOperation::Map {
+                        destination: u32::from(register),
+                        items: Vec::new(),
+                    },
+                )
+            }
+            (allen_vm::Value::Tuple(values), ValueType::Tuple(element_types))
+                if values.len() == element_types.len() =>
+            {
+                let elements = values
+                    .iter()
+                    .zip(element_types)
+                    .map(|(value, value_type)| {
+                        self.materialize_constant(value, value_type, symbol, span)
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                let register = self.allocate(value_type.clone())?;
+                self.code.push(Instruction::TupleNew {
+                    destination: register,
+                    elements: elements.iter().map(|value| value.register).collect(),
+                });
+                (
+                    register,
+                    MirOperation::Tuple {
+                        destination: u32::from(register),
+                    },
+                )
+            }
+            (allen_vm::Value::Record(values), ValueType::Record(fields))
+                if values.len() == fields.len() =>
+            {
+                let mut compiled = Vec::with_capacity(fields.len());
+                for (index, field) in fields.iter().enumerate() {
+                    let (_, value) = values
+                        .iter()
+                        .find(|(name, _)| name.as_ref() == field.name)
+                        .ok_or_else(|| {
+                            Diagnostic::new("E3007", "constant record shape mismatch", span)
+                        })?;
+                    compiled.push((
+                        u32::try_from(index).expect("field index"),
+                        self.materialize_constant(value, &field.value_type, symbol, span)?,
+                    ));
+                }
+                let register = self.allocate(value_type.clone())?;
+                self.code.push(Instruction::RecordNew {
+                    destination: register,
+                    fields: compiled
+                        .iter()
+                        .map(|(index, value)| (*index, value.register))
+                        .collect(),
+                });
+                (
+                    register,
+                    MirOperation::Record {
+                        destination: u32::from(register),
+                    },
+                )
+            }
+            (allen_vm::Value::Newtype(value), ValueType::Newtype { name, underlying })
+                if value.identity() == name =>
+            {
+                let inner = self.materialize_constant(value.value(), underlying, symbol, span)?;
+                let register = self.allocate(value_type.clone())?;
+                self.code.push(Instruction::NewtypeWrap {
+                    destination: register,
+                    source: inner.register,
+                });
+                (
+                    register,
+                    MirOperation::NewtypeWrap {
+                        destination: u32::from(register),
+                        source: u32::from(inner.register),
+                    },
+                )
+            }
+            (allen_vm::Value::Enum(value), ValueType::Option(element_type)) => {
+                let payload_types = if value.variant == 0 {
+                    Vec::new()
+                } else if value.variant == 1 {
+                    vec![element_type.as_ref().clone()]
+                } else {
+                    return Err(Diagnostic::new(
+                        "E3007",
+                        "constant Option variant mismatch",
+                        span,
+                    ));
+                };
+                let payload = constant_enum_payload(value, &payload_types, self, symbol, span)?;
+                let register = self.allocate(value_type.clone())?;
+                self.code.push(Instruction::EnumNew {
+                    destination: register,
+                    variant: value.variant,
+                    payload,
+                });
+                (
+                    register,
+                    MirOperation::Enum {
+                        destination: u32::from(register),
+                    },
+                )
+            }
+            (allen_vm::Value::Enum(value), ValueType::Result(ok_type, error_type)) => {
+                let payload_types = match value.variant {
+                    0 => vec![ok_type.as_ref().clone()],
+                    1 => vec![error_type.as_ref().clone()],
+                    _ => {
+                        return Err(Diagnostic::new(
+                            "E3007",
+                            "constant Result variant mismatch",
+                            span,
+                        ));
+                    }
+                };
+                let payload = constant_enum_payload(value, &payload_types, self, symbol, span)?;
+                let register = self.allocate(value_type.clone())?;
+                self.code.push(Instruction::EnumNew {
+                    destination: register,
+                    variant: value.variant,
+                    payload,
+                });
+                (
+                    register,
+                    MirOperation::Enum {
+                        destination: u32::from(register),
+                    },
+                )
+            }
+            (allen_vm::Value::Enum(value), ValueType::Enum(type_id)) => {
+                let variant = self
+                    .global
+                    .bundle
+                    .enum_types
+                    .get(*type_id as usize)
+                    .and_then(|enum_type| enum_type.variants.get(value.variant as usize))
+                    .ok_or_else(|| {
+                        Diagnostic::new("E3007", "constant enum variant mismatch", span)
+                    })?;
+                let payload_types = match &variant.payload {
+                    EnumPayloadType::Unit => Vec::new(),
+                    EnumPayloadType::Tuple(values) => values.clone(),
+                    EnumPayloadType::Record(fields) => fields
+                        .iter()
+                        .map(|field| field.value_type.clone())
+                        .collect(),
+                };
+                let payload = constant_enum_payload(value, &payload_types, self, symbol, span)?;
+                let register = self.allocate(value_type.clone())?;
+                self.code.push(Instruction::EnumNew {
+                    destination: register,
+                    variant: value.variant,
+                    payload,
+                });
+                (
+                    register,
+                    MirOperation::Enum {
+                        destination: u32::from(register),
+                    },
+                )
+            }
+            _ => {
+                return Err(Diagnostic::new(
+                    "E3007",
+                    "compile-time constant value does not match its declared type",
+                    span,
+                ));
+            }
+        };
+        self.mir.push(mir);
+        let effects = self.empty_effects();
+        Ok(CompiledExpr {
+            register,
+            value_type: value_type.clone(),
+            effects,
+            hir: self.hir(
+                HirExprKind::Variable,
+                Some(symbol),
+                value_type,
+                effects,
+                span,
+            ),
+        })
+    }
+
     pub(super) fn runtime_falls_through(&self, value: &CompiledExpr) -> bool {
         value.value_type != ValueType::Never
             && !self.runtime_terminal_values.contains(&value.register)
@@ -443,6 +1177,8 @@ impl FunctionLowering<'_, '_> {
         let mir_ownership_len = self.mir_ownership.len();
         let entry_len = self.mir_entries.len();
         let bindings = self.bindings.clone();
+        let local_functions = self.local_functions.clone();
+        let local_function_ordinal = self.local_function_ordinal;
         let ownership_states = self.ownership_states.clone();
         let loops = self.loops.clone();
         let active_scopes = self.active_scopes.clone();
@@ -475,6 +1211,8 @@ impl FunctionLowering<'_, '_> {
         self.mir_ownership.truncate(mir_ownership_len);
         self.mir_entries.truncate(entry_len);
         self.bindings = bindings;
+        self.local_functions = local_functions;
+        self.local_function_ordinal = local_function_ordinal;
         self.ownership_states = ownership_states;
         self.loops = loops;
         self.active_scopes = active_scopes;
@@ -919,7 +1657,7 @@ impl FunctionLowering<'_, '_> {
                 value
             };
             let symbol = if let Some(name) = &element.name {
-                if self.bindings.contains_key(name) {
+                if self.bindings.contains_key(name) || self.local_name_conflicts(name) {
                     return Err(Diagnostic::new(
                         "E3005",
                         format!("duplicate local binding '{name}'"),
@@ -1345,89 +2083,9 @@ impl FunctionLowering<'_, '_> {
             yielded_type,
             length,
             cursor,
-            step,
+            range_inclusive,
             string_iterable,
         ) = match source {
-            LoweredForSource::Range { start, end } => {
-                let start_value = self.compile_expected(start, &ValueType::Int, "range start")?;
-                if start_value.value_type == ValueType::Never {
-                    let end_value = self.compile_without_runtime(|lowering| {
-                        lowering.compile_expected(end, &ValueType::Int, "range end")
-                    })?;
-                    let effects = self.union_effects([start_value.effects, end_value.effects]);
-                    return self.finish_terminal_for(
-                        register,
-                        binding,
-                        HirForSource::Range {
-                            start: Box::new(start_value.hir),
-                            end: Box::new(end_value.hir),
-                        },
-                        effects,
-                        &ValueType::Int,
-                        body,
-                        span,
-                    );
-                }
-                let start_snapshot = self.allocate(ValueType::Int)?;
-                self.code.push(Instruction::Move {
-                    destination: start_snapshot,
-                    source: start_value.register,
-                });
-                self.mark_last_instruction(start.span);
-                self.mir.push(MirOperation::Move {
-                    destination: u32::from(start_snapshot),
-                    source: u32::from(start_value.register),
-                });
-                let end_value = self.compile_expected(end, &ValueType::Int, "range end")?;
-                if end_value.value_type == ValueType::Never {
-                    let effects = self.union_effects([start_value.effects, end_value.effects]);
-                    return self.finish_terminal_for(
-                        register,
-                        binding,
-                        HirForSource::Range {
-                            start: Box::new(start_value.hir),
-                            end: Box::new(end_value.hir),
-                        },
-                        effects,
-                        &ValueType::Int,
-                        body,
-                        span,
-                    );
-                }
-                let end_snapshot = self.allocate(ValueType::Int)?;
-                self.code.push(Instruction::Move {
-                    destination: end_snapshot,
-                    source: end_value.register,
-                });
-                self.mark_last_instruction(end.span);
-                self.mir.push(MirOperation::Move {
-                    destination: u32::from(end_snapshot),
-                    source: u32::from(end_value.register),
-                });
-                let cursor = self.allocate(ValueType::Int)?;
-                self.code.push(Instruction::Move {
-                    destination: cursor,
-                    source: start_snapshot,
-                });
-                self.mark_last_instruction(start.span);
-                self.mir.push(MirOperation::Move {
-                    destination: u32::from(cursor),
-                    source: u32::from(start_snapshot),
-                });
-                (
-                    HirForSource::Range {
-                        start: Box::new(start_value.hir),
-                        end: Box::new(end_value.hir),
-                    },
-                    self.union_effects([start_value.effects, end_value.effects]),
-                    cursor,
-                    ValueType::Int,
-                    end_snapshot,
-                    cursor,
-                    true,
-                    false,
-                )
-            }
             LoweredForSource::Iterable(value) => {
                 let value_span = value.span;
                 let value = self.compile_expression(value)?;
@@ -1447,84 +2105,175 @@ impl FunctionLowering<'_, '_> {
                         span,
                     );
                 }
-                let yielded_type = match &value.value_type {
-                    ValueType::List(element) => element.as_ref().clone(),
-                    ValueType::Bytes => ValueType::Int,
-                    ValueType::String => ValueType::String,
-                    ValueType::Map(key, value) => {
-                        ValueType::Tuple(vec![key.as_ref().clone(), value.as_ref().clone()])
-                    }
-                    found => {
-                        return Err(Diagnostic::new(
-                            "E3007",
-                            format!(
-                                "for iterable must be String, List<T>, Bytes, or Map<K, V>, found {found}"
-                            ),
-                            value_span,
-                        ));
-                    }
-                };
-                let iterable_type = value.value_type.clone();
-                let iterable = self.allocate(iterable_type.clone())?;
-                self.code.push(Instruction::Move {
-                    destination: iterable,
-                    source: value.register,
-                });
-                self.mark_last_instruction(span);
-                self.mir.push(MirOperation::Move {
-                    destination: u32::from(iterable),
-                    source: u32::from(value.register),
-                });
-                let length = self.allocate(ValueType::Int)?;
-                self.code.push(Instruction::Length {
-                    destination: length,
-                    collection: iterable,
-                });
-                self.mark_last_instruction(span);
-                self.mir.push(MirOperation::Length {
-                    destination: u32::from(length),
-                    collection: u32::from(iterable),
-                });
-                let zero = self.compile_expression(&LoweredExpr {
-                    kind: LoweredExprKind::Int(0),
-                    span,
-                })?;
-                let cursor = self.allocate(ValueType::Int)?;
-                self.code.push(Instruction::Move {
-                    destination: cursor,
-                    source: zero.register,
-                });
-                self.mark_last_instruction(span);
-                self.mir.push(MirOperation::Move {
-                    destination: u32::from(cursor),
-                    source: u32::from(zero.register),
-                });
-                (
-                    HirForSource::Iterable(Box::new(value.hir)),
-                    value.effects,
-                    iterable,
-                    yielded_type,
-                    length,
-                    cursor,
-                    false,
-                    matches!(iterable_type, ValueType::String),
-                )
+                if value.value_type == ValueType::Range {
+                    let start = self.allocate(ValueType::Int)?;
+                    self.code.push(Instruction::RangeStart {
+                        destination: start,
+                        range: value.register,
+                    });
+                    self.mark_last_instruction(value_span);
+                    self.mir.push(MirOperation::FieldGet {
+                        destination: u32::from(start),
+                        record: u32::from(value.register),
+                    });
+                    let end = self.allocate(ValueType::Int)?;
+                    self.code.push(Instruction::RangeEnd {
+                        destination: end,
+                        range: value.register,
+                    });
+                    self.mark_last_instruction(value_span);
+                    self.mir.push(MirOperation::FieldGet {
+                        destination: u32::from(end),
+                        record: u32::from(value.register),
+                    });
+                    let inclusive = self.allocate(ValueType::Bool)?;
+                    self.code.push(Instruction::RangeInclusive {
+                        destination: inclusive,
+                        range: value.register,
+                    });
+                    self.mark_last_instruction(value_span);
+                    self.mir.push(MirOperation::FieldGet {
+                        destination: u32::from(inclusive),
+                        record: u32::from(value.register),
+                    });
+                    let cursor = self.allocate(ValueType::Int)?;
+                    self.code.push(Instruction::Move {
+                        destination: cursor,
+                        source: start,
+                    });
+                    self.mark_last_instruction(value_span);
+                    self.mir.push(MirOperation::Move {
+                        destination: u32::from(cursor),
+                        source: u32::from(start),
+                    });
+                    (
+                        HirForSource::Iterable(Box::new(value.hir)),
+                        value.effects,
+                        cursor,
+                        ValueType::Int,
+                        end,
+                        cursor,
+                        Some(inclusive),
+                        false,
+                    )
+                } else {
+                    let yielded_type = match &value.value_type {
+                        ValueType::List(element) => element.as_ref().clone(),
+                        ValueType::Bytes => ValueType::Int,
+                        ValueType::String => ValueType::String,
+                        ValueType::Map(key, value) => {
+                            ValueType::Tuple(vec![key.as_ref().clone(), value.as_ref().clone()])
+                        }
+                        found => {
+                            return Err(Diagnostic::new(
+                                "E3007",
+                                format!(
+                                    "for iterable must be String, List<T>, Bytes, or Map<K, V>, found {found}"
+                                ),
+                                value_span,
+                            ));
+                        }
+                    };
+                    let iterable_type = value.value_type.clone();
+                    let iterable = self.allocate(iterable_type.clone())?;
+                    self.code.push(Instruction::Move {
+                        destination: iterable,
+                        source: value.register,
+                    });
+                    self.mark_last_instruction(span);
+                    self.mir.push(MirOperation::Move {
+                        destination: u32::from(iterable),
+                        source: u32::from(value.register),
+                    });
+                    let length = self.allocate(ValueType::Int)?;
+                    self.code.push(Instruction::Length {
+                        destination: length,
+                        collection: iterable,
+                    });
+                    self.mark_last_instruction(span);
+                    self.mir.push(MirOperation::Length {
+                        destination: u32::from(length),
+                        collection: u32::from(iterable),
+                    });
+                    let zero = self.compile_expression(&LoweredExpr {
+                        kind: LoweredExprKind::Int(0),
+                        span,
+                    })?;
+                    let cursor = self.allocate(ValueType::Int)?;
+                    self.code.push(Instruction::Move {
+                        destination: cursor,
+                        source: zero.register,
+                    });
+                    self.mark_last_instruction(span);
+                    self.mir.push(MirOperation::Move {
+                        destination: u32::from(cursor),
+                        source: u32::from(zero.register),
+                    });
+                    (
+                        HirForSource::Iterable(Box::new(value.hir)),
+                        value.effects,
+                        iterable,
+                        yielded_type,
+                        length,
+                        cursor,
+                        None,
+                        matches!(iterable_type, ValueType::String),
+                    )
+                }
             }
         };
         let entry = self.push_loop();
         let header = u32::try_from(self.code.len()).expect("instruction index fits");
         let condition_operations_start = self.mir.len();
-        let condition = self.allocate(ValueType::Bool)?;
+        let less = self.allocate(ValueType::Bool)?;
         self.code.push(Instruction::Compare {
-            destination: condition,
+            destination: less,
             left: cursor,
             right: length,
             operation: CompareOp::Less,
         });
         self.mark_last_instruction(span);
         self.mir.push(MirOperation::Binary {
-            destination: u32::from(condition),
+            destination: u32::from(less),
         });
+        let condition = if let Some(inclusive) = range_inclusive {
+            let equal = self.allocate(ValueType::Bool)?;
+            self.code.push(Instruction::Compare {
+                destination: equal,
+                left: cursor,
+                right: length,
+                operation: CompareOp::Equal,
+            });
+            self.mark_last_instruction(span);
+            self.mir.push(MirOperation::Binary {
+                destination: u32::from(equal),
+            });
+            let inclusive_equal = self.allocate(ValueType::Bool)?;
+            self.code.push(Instruction::BoolBinary {
+                destination: inclusive_equal,
+                left: inclusive,
+                right: equal,
+                operation: allen_bytecode::BoolBinaryOp::And,
+            });
+            self.mark_last_instruction(span);
+            self.mir.push(MirOperation::Binary {
+                destination: u32::from(inclusive_equal),
+            });
+            let condition = self.allocate(ValueType::Bool)?;
+            self.code.push(Instruction::BoolBinary {
+                destination: condition,
+                left: less,
+                right: inclusive_equal,
+                operation: allen_bytecode::BoolBinaryOp::Or,
+            });
+            self.mark_last_instruction(span);
+            self.mir.push(MirOperation::Binary {
+                destination: u32::from(condition),
+            });
+            condition
+        } else {
+            less
+        };
         let condition_operations = self.mir.split_off(condition_operations_start);
         let branch = self.code.len();
         self.code.push(Instruction::Jump { target: 0 });
@@ -1581,35 +2330,30 @@ impl FunctionLowering<'_, '_> {
         }));
         let yielded = if let Some(string_value) = string_value {
             string_value
-        } else if step {
+        } else if range_inclusive.is_some() {
             yielded
         } else {
             let value = self.allocate(yielded_type.clone())?;
-            match &source_hir {
-                HirForSource::Iterable(_) => {
-                    if matches!(self.registers[yielded as usize], ValueType::Map(_, _)) {
-                        self.code.push(Instruction::MapEntryAt {
-                            destination: value,
-                            map: yielded,
-                            index: cursor,
-                        });
-                        self.mir.push(MirOperation::MapEntryAt {
-                            destination: u32::from(value),
-                            map: u32::from(yielded),
-                            index: u32::from(cursor),
-                        });
-                    } else {
-                        self.code.push(Instruction::IndexGet {
-                            destination: value,
-                            collection: yielded,
-                            index: cursor,
-                        });
-                        self.mir.push(MirOperation::Binary {
-                            destination: u32::from(value),
-                        });
-                    }
-                }
-                HirForSource::Range { .. } => unreachable!("range yields its cursor"),
+            if matches!(self.registers[yielded as usize], ValueType::Map(_, _)) {
+                self.code.push(Instruction::MapEntryAt {
+                    destination: value,
+                    map: yielded,
+                    index: cursor,
+                });
+                self.mir.push(MirOperation::MapEntryAt {
+                    destination: u32::from(value),
+                    map: u32::from(yielded),
+                    index: u32::from(cursor),
+                });
+            } else {
+                self.code.push(Instruction::IndexGet {
+                    destination: value,
+                    collection: yielded,
+                    index: cursor,
+                });
+                self.mir.push(MirOperation::Binary {
+                    destination: u32::from(value),
+                });
             }
             self.mark_last_instruction(binding.span);
             value
@@ -1628,7 +2372,25 @@ impl FunctionLowering<'_, '_> {
             .is_some_and(|loop_| !loop_.continue_jumps.is_empty());
         let backedge_reachable = loop_reachable && (body_runtime_falls_through || has_continue);
         let step_operations_start = self.mir.len();
+        let mut range_endpoint_branch = None;
         if backedge_reachable {
+            if range_inclusive.is_some() {
+                let at_end = self.allocate(ValueType::Bool)?;
+                self.code.push(Instruction::Compare {
+                    destination: at_end,
+                    left: cursor,
+                    right: length,
+                    operation: CompareOp::Equal,
+                });
+                self.mark_last_instruction(span);
+                self.mir.push(MirOperation::Binary {
+                    destination: u32::from(at_end),
+                });
+                let branch = self.code.len();
+                self.code.push(Instruction::Jump { target: 0 });
+                let increment = u32::try_from(self.code.len()).expect("instruction index fits");
+                range_endpoint_branch = Some((branch, at_end, increment));
+            }
             let one = self.compile_expression(&LoweredExpr {
                 kind: LoweredExprKind::Int(1),
                 span,
@@ -1656,6 +2418,14 @@ impl FunctionLowering<'_, '_> {
             });
         }
         let exit = u32::try_from(self.code.len()).expect("instruction index fits");
+        if let Some((branch, at_end, increment)) = range_endpoint_branch {
+            self.code[branch] = Instruction::BranchBool {
+                condition: at_end,
+                false_target: increment,
+                true_target: exit,
+            };
+            self.mark_instruction(branch, span);
+        }
         if let Some(jump) = string_none_jump {
             self.code[jump] = Instruction::Jump { target: exit };
         }
@@ -1746,21 +2516,20 @@ impl FunctionLowering<'_, '_> {
         &self,
         annotation: &LoweredType,
     ) -> Result<ValueType, Diagnostic> {
-        let SemanticType::Value(value_type) = semantic_type(
+        let semantic = semantic_type(
             annotation,
             &BTreeSet::new(),
             &self.info.module,
             &self.global.bundle.modules,
             &self.global.bundle.types,
-        )?
-        else {
-            return Err(Diagnostic::new(
+        )?;
+        concrete_type(&semantic, &BTreeMap::new(), &self.global.effect_sets).map_err(|_| {
+            Diagnostic::new(
                 "E3007",
                 "local binding type must be concrete",
                 annotation.span(),
-            ));
-        };
-        Ok(value_type)
+            )
+        })
     }
 
     pub(super) fn compile_list(
@@ -1805,6 +2574,10 @@ impl FunctionLowering<'_, '_> {
         });
         self.mir.push(MirOperation::List {
             destination: u32::from(register),
+            items: values
+                .iter()
+                .map(|value| MirListItem::Element(u32::from(value.register)))
+                .collect(),
         });
         let effects = self.union_effects(values.iter().map(|value| value.effects));
         Ok(CompiledExpr {
@@ -1891,6 +2664,13 @@ impl FunctionLowering<'_, '_> {
         });
         self.mir.push(MirOperation::Map {
             destination: u32::from(register),
+            items: values
+                .iter()
+                .map(|(key, value)| MirMapItem::Entry {
+                    key: u32::from(key.register),
+                    value: u32::from(value.register),
+                })
+                .collect(),
         });
         let effects = self.union_effects(
             values
@@ -1916,6 +2696,305 @@ impl FunctionLowering<'_, '_> {
         })
     }
 
+    #[allow(clippy::too_many_lines)]
+    pub(super) fn compile_list_with_spread(
+        &mut self,
+        expression: &LoweredExpr,
+        items: &[super::LoweredListItem],
+        expected: Option<&ValueType>,
+    ) -> Result<CompiledExpr, Diagnostic> {
+        let mut element_type = match expected {
+            Some(ValueType::List(element)) => Some(element.as_ref().clone()),
+            Some(_) => {
+                return Err(Diagnostic::new(
+                    "E3010",
+                    "list literal requires a List expected type",
+                    expression.span,
+                ));
+            }
+            None => None,
+        };
+        let mut values = Vec::with_capacity(items.len());
+        let mut backend_items = Vec::with_capacity(items.len());
+        for item in items {
+            let value = if item.spread {
+                let expected_spread = element_type
+                    .as_ref()
+                    .map(|element| ValueType::List(Box::new(element.clone())));
+                let value = match expected_spread.as_ref() {
+                    Some(expected) => {
+                        self.compile_expected(&item.value, expected, "list spread")?
+                    }
+                    None => self.compile_expression(&item.value)?,
+                };
+                let ValueType::List(spread_element) = &value.value_type else {
+                    return Err(Diagnostic::new(
+                        "E3010",
+                        "list spread requires a List value",
+                        item.span,
+                    ));
+                };
+                if let Some(element) = &element_type {
+                    if element != spread_element.as_ref() {
+                        return Err(Diagnostic::new(
+                            "E3010",
+                            format!(
+                                "list spread expects List<{element}>, found {}",
+                                value.value_type
+                            ),
+                            item.span,
+                        ));
+                    }
+                } else {
+                    element_type = Some(spread_element.as_ref().clone());
+                }
+                backend_items.push(ListLiteralItem::Spread(value.register));
+                value
+            } else {
+                let value = match element_type.as_ref() {
+                    Some(element) => self.compile_expected(&item.value, element, "list element")?,
+                    None => self.compile_expression(&item.value)?,
+                };
+                if let Some(element) = &element_type {
+                    if &value.value_type != element {
+                        return Err(Diagnostic::new(
+                            "E3010",
+                            format!("list element expects {element}, found {}", value.value_type),
+                            item.span,
+                        ));
+                    }
+                } else {
+                    element_type = Some(value.value_type.clone());
+                }
+                backend_items.push(ListLiteralItem::Element(value.register));
+                value
+            };
+            values.push(value);
+        }
+        let element_type = element_type.ok_or_else(|| {
+            Diagnostic::new(
+                "E3010",
+                "empty List requires an expected List type",
+                expression.span,
+            )
+        })?;
+        Self::collection_value_is_valid(&element_type, "List", expression.span)?;
+        let value_type = ValueType::List(Box::new(element_type));
+        let register = self.allocate(value_type.clone())?;
+        self.code.push(Instruction::ListLiteralBuild {
+            destination: register,
+            items: backend_items.clone(),
+        });
+        self.mir.push(MirOperation::List {
+            destination: u32::from(register),
+            items: backend_items
+                .iter()
+                .map(|item| match item {
+                    ListLiteralItem::Element(register) => {
+                        MirListItem::Element(u32::from(*register))
+                    }
+                    ListLiteralItem::Spread(register) => MirListItem::Spread(u32::from(*register)),
+                })
+                .collect(),
+        });
+        let effects = self.union_effects(values.iter().map(|value| value.effects));
+        Ok(CompiledExpr {
+            register,
+            value_type: value_type.clone(),
+            effects,
+            hir: self.hir(
+                HirExprKind::ListWithSpread(
+                    items
+                        .iter()
+                        .zip(values)
+                        .map(|(item, value)| {
+                            if item.spread {
+                                HirListItem::Spread(value.hir)
+                            } else {
+                                HirListItem::Element(value.hir)
+                            }
+                        })
+                        .collect(),
+                ),
+                None,
+                &value_type,
+                effects,
+                expression.span,
+            ),
+        })
+    }
+
+    #[allow(clippy::too_many_lines)]
+    pub(super) fn compile_map_with_spread(
+        &mut self,
+        expression: &LoweredExpr,
+        items: &[super::LoweredMapItem],
+        expected: Option<&ValueType>,
+    ) -> Result<CompiledExpr, Diagnostic> {
+        let (mut key_type, mut value_type) = match expected {
+            Some(ValueType::Map(key, value)) => {
+                (Some(key.as_ref().clone()), Some(value.as_ref().clone()))
+            }
+            Some(_) => {
+                return Err(Diagnostic::new(
+                    "E3010",
+                    "map literal requires a Map expected type",
+                    expression.span,
+                ));
+            }
+            None => (None, None),
+        };
+        let mut values: Vec<(CompiledExpr, Option<CompiledExpr>)> = Vec::with_capacity(items.len());
+        let mut backend_items = Vec::with_capacity(items.len());
+        let mut seen = BTreeSet::new();
+        for item in items {
+            match item {
+                super::LoweredMapItem::Entry { key, value, span } => {
+                    let compiled_key = match key_type.as_ref() {
+                        Some(expected) => self.compile_expected(key, expected, "map key")?,
+                        None => self.compile_expression(key)?,
+                    };
+                    let compiled_value = match value_type.as_ref() {
+                        Some(expected) => self.compile_expected(value, expected, "map value")?,
+                        None => self.compile_expression(value)?,
+                    };
+                    if key_type.is_none() {
+                        key_type = Some(compiled_key.value_type.clone());
+                    }
+                    if value_type.is_none() {
+                        value_type = Some(compiled_value.value_type.clone());
+                    }
+                    if let Some(key) = literal_map_key(key) {
+                        if !seen.insert(key) {
+                            return Err(Diagnostic::new("E3011", "duplicate Map key", *span));
+                        }
+                    }
+                    backend_items.push(MapLiteralItem::Entry {
+                        key: compiled_key.register,
+                        value: compiled_value.register,
+                    });
+                    values.push((compiled_key, Some(compiled_value)));
+                }
+                super::LoweredMapItem::Spread { value, span } => {
+                    let expected_spread = match (key_type.as_ref(), value_type.as_ref()) {
+                        (Some(key), Some(value)) => Some(ValueType::Map(
+                            Box::new(key.clone()),
+                            Box::new(value.clone()),
+                        )),
+                        _ => None,
+                    };
+                    let compiled = match expected_spread.as_ref() {
+                        Some(expected) => self.compile_expected(value, expected, "map spread")?,
+                        None => self.compile_expression(value)?,
+                    };
+                    let ValueType::Map(spread_key, spread_value) = &compiled.value_type else {
+                        return Err(Diagnostic::new(
+                            "E3010",
+                            "map spread requires a Map value",
+                            *span,
+                        ));
+                    };
+                    if let Some(key) = &key_type {
+                        if key != spread_key.as_ref() {
+                            return Err(Diagnostic::new(
+                                "E3010",
+                                "map spread key type mismatch",
+                                *span,
+                            ));
+                        }
+                    } else {
+                        key_type = Some(spread_key.as_ref().clone());
+                    }
+                    if let Some(value_type) = &value_type {
+                        if value_type != spread_value.as_ref() {
+                            return Err(Diagnostic::new(
+                                "E3010",
+                                "map spread value type mismatch",
+                                *span,
+                            ));
+                        }
+                    } else {
+                        value_type = Some(spread_value.as_ref().clone());
+                    }
+                    backend_items.push(MapLiteralItem::Spread(compiled.register));
+                    values.push((compiled, None));
+                }
+            }
+        }
+        let key_type = key_type.ok_or_else(|| {
+            Diagnostic::new(
+                "E3010",
+                "empty Map requires an expected Map type",
+                expression.span,
+            )
+        })?;
+        let value_type = value_type.ok_or_else(|| {
+            Diagnostic::new(
+                "E3010",
+                "empty Map requires an expected Map type",
+                expression.span,
+            )
+        })?;
+        if !key_type.is_map_key() {
+            return Err(Diagnostic::new(
+                "E3011",
+                format!("Map key type {key_type} is not allowed"),
+                expression.span,
+            ));
+        }
+        Self::collection_value_is_valid(&key_type, "Map", expression.span)?;
+        Self::collection_value_is_valid(&value_type, "Map", expression.span)?;
+        let result_type = ValueType::Map(Box::new(key_type), Box::new(value_type));
+        let register = self.allocate(result_type.clone())?;
+        self.code.push(Instruction::MapLiteralBuild {
+            destination: register,
+            items: backend_items.clone(),
+        });
+        self.mir.push(MirOperation::Map {
+            destination: u32::from(register),
+            items: backend_items
+                .iter()
+                .map(|item| match item {
+                    MapLiteralItem::Entry { key, value } => MirMapItem::Entry {
+                        key: u32::from(*key),
+                        value: u32::from(*value),
+                    },
+                    MapLiteralItem::Spread(register) => MirMapItem::Spread(u32::from(*register)),
+                })
+                .collect(),
+        });
+        let effects = self.union_effects(values.iter().flat_map(|(key, value)| {
+            value.as_ref().map_or_else(
+                || [key.effects, self.empty_effects()],
+                |value| [key.effects, value.effects],
+            )
+        }));
+        let hir_values = items
+            .iter()
+            .zip(values)
+            .map(|(item, (key, value))| match item {
+                super::LoweredMapItem::Entry { .. } => HirMapItem::Entry {
+                    key: key.hir,
+                    value: value.expect("map entry has a value").hir,
+                },
+                super::LoweredMapItem::Spread { .. } => HirMapItem::Spread(key.hir),
+            })
+            .collect();
+        Ok(CompiledExpr {
+            register,
+            value_type: result_type.clone(),
+            effects,
+            hir: self.hir(
+                HirExprKind::MapWithSpread(hir_values),
+                None,
+                &result_type,
+                effects,
+                expression.span,
+            ),
+        })
+    }
+
+    #[allow(clippy::too_many_lines)]
     pub(super) fn compile_collection_builtin(
         &mut self,
         builtin: CollectionBuiltin,
@@ -1926,14 +3005,73 @@ impl FunctionLowering<'_, '_> {
             CollectionBuiltin::Length => ("length", 1),
             CollectionBuiltin::ListAppend => ("list.append", 2),
             CollectionBuiltin::ListSet => ("list.set", 3),
+            CollectionBuiltin::Operation(CollectionOperation::Zip) => ("list.zip", 0),
+            CollectionBuiltin::Operation(CollectionOperation::ListMin) => ("list.min", 1),
+            CollectionBuiltin::Operation(CollectionOperation::ListMax) => ("list.max", 1),
+            CollectionBuiltin::Operation(
+                CollectionOperation::ListSumInt | CollectionOperation::ListSumFloat,
+            ) => ("list.sum", 1),
+            CollectionBuiltin::ListFold => ("list.fold", 3),
+            CollectionBuiltin::ListCombinator(operation) => (
+                match operation {
+                    ListCombinator::Map => "list.map",
+                    ListCombinator::Filter => "list.filter",
+                    ListCombinator::FlatMap => "list.flat_map",
+                    ListCombinator::FilterMap => "list.filter_map",
+                    ListCombinator::Find => "list.find",
+                    ListCombinator::Any => "list.any",
+                    ListCombinator::All => "list.all",
+                    ListCombinator::Partition => "list.partition",
+                    ListCombinator::Scan => "list.scan",
+                },
+                if operation == ListCombinator::Scan {
+                    3
+                } else {
+                    2
+                },
+            ),
             CollectionBuiltin::Safe(SafeCollectionOperation::ListGet) => ("list.get", 2),
             CollectionBuiltin::Safe(SafeCollectionOperation::ListTrySet) => ("list.try_set", 3),
             CollectionBuiltin::Safe(SafeCollectionOperation::BytesGet) => ("bytes.get", 2),
             CollectionBuiltin::Safe(SafeCollectionOperation::MapGet) => ("map.get", 2),
+            CollectionBuiltin::Safe(SafeCollectionOperation::MapInsert) => ("map.insert", 3),
+            CollectionBuiltin::Safe(SafeCollectionOperation::MapRemove) => ("map.remove", 2),
+            CollectionBuiltin::Safe(SafeCollectionOperation::MapKeys) => ("map.keys", 1),
             CollectionBuiltin::CheckedInt(CheckedIntOperation::Negate) => ("int.checked_neg", 1),
             CollectionBuiltin::CheckedInt(_) => ("checked integer operation", 2),
+            CollectionBuiltin::Sequence(operation) => (
+                match operation {
+                    SequenceBuiltin::FromList => "seq.from_list",
+                    SequenceBuiltin::Map => "seq.map",
+                    SequenceBuiltin::Filter => "seq.filter",
+                    SequenceBuiltin::Take => "seq.take",
+                    SequenceBuiltin::Find => "seq.find",
+                    SequenceBuiltin::Any => "seq.any",
+                    SequenceBuiltin::All => "seq.all",
+                    SequenceBuiltin::Fold => "seq.fold",
+                    SequenceBuiltin::ToList => "seq.to_list",
+                },
+                match operation {
+                    SequenceBuiltin::FromList | SequenceBuiltin::ToList => 1,
+                    SequenceBuiltin::Map
+                    | SequenceBuiltin::Filter
+                    | SequenceBuiltin::Take
+                    | SequenceBuiltin::Find
+                    | SequenceBuiltin::Any
+                    | SequenceBuiltin::All => 2,
+                    SequenceBuiltin::Fold => 3,
+                },
+            ),
         };
-        if arguments.len() != arity {
+        if builtin == CollectionBuiltin::Operation(CollectionOperation::Zip) {
+            if !(2..=8).contains(&arguments.len()) {
+                return Err(Diagnostic::new(
+                    "E3011",
+                    "list.zip requires from 2 to 8 arguments",
+                    span,
+                ));
+            }
+        } else if arguments.len() != arity {
             return Err(Diagnostic::new(
                 "E3011",
                 format!(
@@ -1952,15 +3090,26 @@ impl FunctionLowering<'_, '_> {
                 let values = self.compile_expression(&arguments[0])?;
                 self.compile_list_builtin(builtin, values, arguments, span, name)
             }
+            CollectionBuiltin::Operation(operation) => {
+                self.compile_collection_operation(operation, arguments, span, name)
+            }
+            CollectionBuiltin::ListFold => self.compile_list_fold(arguments, span),
+            CollectionBuiltin::ListCombinator(operation) => {
+                self.compile_list_combinator(operation, arguments, span)
+            }
             CollectionBuiltin::Safe(operation) => {
                 self.compile_safe_collection_builtin(operation, arguments, span, name)
             }
             CollectionBuiltin::CheckedInt(operation) => {
                 self.compile_checked_int_builtin(operation, arguments, span, name)
             }
+            CollectionBuiltin::Sequence(operation) => {
+                self.compile_sequence_builtin(operation, arguments, span)
+            }
         }
     }
 
+    #[allow(clippy::too_many_lines)]
     pub(super) fn compile_safe_collection_builtin(
         &mut self,
         operation: SafeCollectionOperation,
@@ -2017,6 +3166,70 @@ impl FunctionLowering<'_, '_> {
                     ));
                 }
                 ValueType::Option(value.clone())
+            }
+            (SafeCollectionOperation::MapInsert, [map, key, replacement]) => {
+                let ValueType::Map(expected_key, value) = &map.value_type else {
+                    return Err(Diagnostic::new(
+                        "E3011",
+                        "map.insert requires Map<K, V>",
+                        span,
+                    ));
+                };
+                if expected_key.as_ref() != &key.value_type
+                    || value.as_ref() != &replacement.value_type
+                {
+                    return Err(Diagnostic::new(
+                        "E3011",
+                        "map.insert key and value must match the map types",
+                        span,
+                    ));
+                }
+                ValueType::Record(vec![
+                    RecordField {
+                        name: "previous".to_owned(),
+                        value_type: ValueType::Option(value.clone()),
+                    },
+                    RecordField {
+                        name: "values".to_owned(),
+                        value_type: map.value_type.clone(),
+                    },
+                ])
+            }
+            (SafeCollectionOperation::MapRemove, [map, key]) => {
+                let ValueType::Map(expected_key, value) = &map.value_type else {
+                    return Err(Diagnostic::new(
+                        "E3011",
+                        "map.remove requires Map<K, V>",
+                        span,
+                    ));
+                };
+                if expected_key.as_ref() != &key.value_type {
+                    return Err(Diagnostic::new(
+                        "E3011",
+                        "map.remove key must match the map key type",
+                        span,
+                    ));
+                }
+                ValueType::Record(vec![
+                    RecordField {
+                        name: "removed".to_owned(),
+                        value_type: ValueType::Option(value.clone()),
+                    },
+                    RecordField {
+                        name: "values".to_owned(),
+                        value_type: map.value_type.clone(),
+                    },
+                ])
+            }
+            (SafeCollectionOperation::MapKeys, [map]) => {
+                let ValueType::Map(key, _) = &map.value_type else {
+                    return Err(Diagnostic::new(
+                        "E3011",
+                        "map.keys requires Map<K, V>",
+                        span,
+                    ));
+                };
+                ValueType::List(key.clone())
             }
             _ => {
                 return Err(Diagnostic::new(
@@ -2106,6 +3319,826 @@ impl FunctionLowering<'_, '_> {
         })
     }
 
+    fn compile_collection_operation(
+        &mut self,
+        operation: CollectionOperation,
+        arguments: &[LoweredExpr],
+        span: Span,
+        name: &str,
+    ) -> Result<CompiledExpr, Diagnostic> {
+        let values = arguments
+            .iter()
+            .map(|argument| self.compile_expression(argument))
+            .collect::<Result<Vec<_>, _>>()?;
+        let (operation, result) = match operation {
+            CollectionOperation::Zip => {
+                let mut elements = Vec::with_capacity(values.len());
+                for value in &values {
+                    let ValueType::List(element) = &value.value_type else {
+                        return Err(Diagnostic::new(
+                            "E3011",
+                            "list.zip requires List<T> arguments",
+                            span,
+                        ));
+                    };
+                    elements.push(element.as_ref().clone());
+                }
+                (
+                    CollectionOperation::Zip,
+                    ValueType::List(Box::new(ValueType::Tuple(elements))),
+                )
+            }
+            CollectionOperation::ListMin
+            | CollectionOperation::ListMax
+            | CollectionOperation::ListSumInt
+            | CollectionOperation::ListSumFloat => {
+                let [value] = values.as_slice() else {
+                    unreachable!("collection arity was checked")
+                };
+                let ValueType::List(element) = &value.value_type else {
+                    return Err(Diagnostic::new(
+                        "E3011",
+                        format!("{name} requires List<Int> or List<Float>"),
+                        span,
+                    ));
+                };
+                match (operation, element.as_ref()) {
+                    (
+                        CollectionOperation::ListMin | CollectionOperation::ListMax,
+                        ValueType::Int | ValueType::Float,
+                    ) => (operation, ValueType::Option(element.clone())),
+                    (CollectionOperation::ListSumInt, ValueType::Int) => (
+                        CollectionOperation::ListSumInt,
+                        ValueType::Option(Box::new(ValueType::Int)),
+                    ),
+                    (CollectionOperation::ListSumInt, ValueType::Float) => {
+                        (CollectionOperation::ListSumFloat, ValueType::Float)
+                    }
+                    _ => {
+                        return Err(Diagnostic::new(
+                            "E3011",
+                            format!("{name} requires List<Int> or List<Float>"),
+                            span,
+                        ));
+                    }
+                }
+            }
+        };
+        let effects = self.union_effects(values.iter().map(|value| value.effects));
+        let register = self.allocate(result.clone())?;
+        let arguments = values
+            .iter()
+            .map(|value| value.register)
+            .collect::<Vec<_>>();
+        self.code.push(Instruction::CollectionCall {
+            destination: register,
+            operation,
+            arguments: arguments.clone(),
+        });
+        self.mark_last_instruction(span);
+        self.mir.push(MirOperation::CollectionOperation {
+            destination: u32::from(register),
+            operation,
+            arguments: arguments.iter().copied().map(u32::from).collect(),
+        });
+        Ok(CompiledExpr {
+            register,
+            value_type: result.clone(),
+            effects,
+            hir: self.hir(
+                HirExprKind::CollectionOperation {
+                    operation,
+                    arguments: values.into_iter().map(|value| value.hir).collect(),
+                },
+                None,
+                &result,
+                effects,
+                span,
+            ),
+        })
+    }
+
+    fn compile_list_fold(
+        &mut self,
+        arguments: &[LoweredExpr],
+        span: Span,
+    ) -> Result<CompiledExpr, Diagnostic> {
+        let values = self.compile_expression(&arguments[0])?;
+        let ValueType::List(item) = &values.value_type else {
+            return Err(Diagnostic::new(
+                "E3011",
+                "list.fold requires List<T> as its first argument",
+                arguments[0].span,
+            ));
+        };
+        let initial = self.compile_expression(&arguments[1])?;
+        let callback = self.compile_expression(&arguments[2])?;
+        let ValueType::Function {
+            parameters,
+            return_type,
+            effects: callback_effects,
+        } = &callback.value_type
+        else {
+            return Err(Diagnostic::new(
+                "E3011",
+                "list.fold requires a callback",
+                arguments[2].span,
+            ));
+        };
+        if parameters.as_slice() != [initial.value_type.clone(), item.as_ref().clone()]
+            || return_type.as_ref() != &initial.value_type
+        {
+            return Err(Diagnostic::new(
+                "E3011",
+                "list.fold callback must be (accumulator, item) -> accumulator",
+                arguments[2].span,
+            ));
+        }
+        if !self.global.effect_sets[*callback_effects as usize].is_empty() {
+            return Err(Diagnostic::new(
+                "E2403",
+                "list.fold callback must be pure",
+                arguments[2].span,
+            ));
+        }
+        let effects = self.union_effects([values.effects, initial.effects, callback.effects]);
+        let register = self.allocate(initial.value_type.clone())?;
+        self.code.push(Instruction::ListFold {
+            destination: register,
+            values: values.register,
+            initial: initial.register,
+            callback: callback.register,
+        });
+        self.mark_last_instruction(span);
+        self.mir.push(MirOperation::ListFold {
+            destination: u32::from(register),
+            values: u32::from(values.register),
+            initial: u32::from(initial.register),
+            callback: u32::from(callback.register),
+        });
+        Ok(CompiledExpr {
+            register,
+            value_type: initial.value_type.clone(),
+            effects,
+            hir: self.hir(
+                HirExprKind::ListFold {
+                    values: Box::new(values.hir),
+                    initial: Box::new(initial.hir),
+                    callback: Box::new(callback.hir),
+                },
+                None,
+                &initial.value_type,
+                effects,
+                span,
+            ),
+        })
+    }
+
+    #[allow(clippy::too_many_lines)]
+    fn compile_list_combinator(
+        &mut self,
+        operation: ListCombinator,
+        arguments: &[LoweredExpr],
+        span: Span,
+    ) -> Result<CompiledExpr, Diagnostic> {
+        let values = self.compile_expression(&arguments[0])?;
+        let ValueType::List(item) = &values.value_type else {
+            return Err(Diagnostic::new(
+                "E3011",
+                "list combinator requires List<T> as its first argument",
+                arguments[0].span,
+            ));
+        };
+        let item = item.as_ref().clone();
+        let initial = (operation == ListCombinator::Scan)
+            .then(|| self.compile_expression(&arguments[1]))
+            .transpose()?;
+        let callback_index = usize::from(initial.is_some()) + 1;
+        let pure_effects = effect_id(&self.global.effect_sets, &[]);
+        let expected_callback = match operation {
+            ListCombinator::Filter
+            | ListCombinator::Find
+            | ListCombinator::Any
+            | ListCombinator::All
+            | ListCombinator::Partition => Some(ValueType::Function {
+                parameters: vec![item.clone()],
+                return_type: Box::new(ValueType::Bool),
+                effects: pure_effects,
+            }),
+            ListCombinator::Scan => {
+                let initial = initial.as_ref().expect("scan has initial");
+                Some(ValueType::Function {
+                    parameters: vec![initial.value_type.clone(), item.clone()],
+                    return_type: Box::new(initial.value_type.clone()),
+                    effects: pure_effects,
+                })
+            }
+            ListCombinator::Map | ListCombinator::FlatMap | ListCombinator::FilterMap => None,
+        };
+        let callback = if let Some(expected_callback) = &expected_callback {
+            self.compile_expected(
+                &arguments[callback_index],
+                expected_callback,
+                "list combinator callback",
+            )?
+        } else {
+            self.compile_expression(&arguments[callback_index])?
+        };
+        let ValueType::Function {
+            parameters,
+            return_type,
+            effects: callback_effects,
+        } = &callback.value_type
+        else {
+            return Err(Diagnostic::new(
+                "E3011",
+                "list combinator requires a callback",
+                arguments[callback_index].span,
+            ));
+        };
+        if !self.global.effect_sets[*callback_effects as usize].is_empty() {
+            return Err(Diagnostic::new(
+                "E2403",
+                "list combinator callback must be pure",
+                arguments[callback_index].span,
+            ));
+        }
+        let callback_result = return_type.as_ref().clone();
+        let (expected_parameters, result) = match operation {
+            ListCombinator::Map => {
+                Self::collection_value_is_valid(&callback_result, "List", span)?;
+                (
+                    vec![item.clone()],
+                    ValueType::List(Box::new(callback_result.clone())),
+                )
+            }
+            ListCombinator::Filter => (vec![item.clone()], values.value_type.clone()),
+            ListCombinator::FlatMap => {
+                let ValueType::List(output) = &callback_result else {
+                    return Err(Diagnostic::new(
+                        "E3011",
+                        "list.flat_map callback must return List<U>",
+                        arguments[callback_index].span,
+                    ));
+                };
+                Self::collection_value_is_valid(output, "List", span)?;
+                (
+                    vec![item.clone()],
+                    ValueType::List(Box::new(output.as_ref().clone())),
+                )
+            }
+            ListCombinator::FilterMap => {
+                let ValueType::Option(output) = &callback_result else {
+                    return Err(Diagnostic::new(
+                        "E3011",
+                        "list.filter_map callback must return Option<U>",
+                        arguments[callback_index].span,
+                    ));
+                };
+                Self::collection_value_is_valid(output, "List", span)?;
+                (
+                    vec![item.clone()],
+                    ValueType::List(Box::new(output.as_ref().clone())),
+                )
+            }
+            ListCombinator::Find => (
+                vec![item.clone()],
+                ValueType::Option(Box::new(item.clone())),
+            ),
+            ListCombinator::Any | ListCombinator::All => (vec![item.clone()], ValueType::Bool),
+            ListCombinator::Partition => (
+                vec![item.clone()],
+                ValueType::Record(vec![
+                    RecordField {
+                        name: "matched".to_owned(),
+                        value_type: values.value_type.clone(),
+                    },
+                    RecordField {
+                        name: "rest".to_owned(),
+                        value_type: values.value_type.clone(),
+                    },
+                ]),
+            ),
+            ListCombinator::Scan => {
+                let initial = initial.as_ref().expect("scan has initial");
+                Self::collection_value_is_valid(&initial.value_type, "List", span)?;
+                (
+                    vec![initial.value_type.clone(), item.clone()],
+                    ValueType::List(Box::new(initial.value_type.clone())),
+                )
+            }
+        };
+        let bool_callback = matches!(
+            operation,
+            ListCombinator::Filter
+                | ListCombinator::Find
+                | ListCombinator::Any
+                | ListCombinator::All
+                | ListCombinator::Partition
+        );
+        let scan_callback = operation == ListCombinator::Scan
+            && callback_result != initial.as_ref().expect("scan has initial").value_type;
+        if parameters.as_slice() != expected_parameters.as_slice()
+            || (bool_callback && callback_result != ValueType::Bool)
+            || scan_callback
+        {
+            return Err(Diagnostic::new(
+                "E3011",
+                "list combinator callback has the wrong function type",
+                arguments[callback_index].span,
+            ));
+        }
+        let callback_result_register = self.allocate(callback_result)?;
+        let register = self.allocate(result.clone())?;
+        self.code.push(Instruction::ListCombinator {
+            destination: register,
+            operation,
+            values: values.register,
+            initial: initial.as_ref().map(|value| value.register),
+            callback: callback.register,
+            callback_result: callback_result_register,
+        });
+        self.mark_last_instruction(span);
+        self.mir.push(MirOperation::ListCombinator {
+            destination: u32::from(register),
+            operation,
+            values: u32::from(values.register),
+            initial: initial.as_ref().map(|value| u32::from(value.register)),
+            callback: u32::from(callback.register),
+            callback_result: u32::from(callback_result_register),
+        });
+        let effects = self.union_effects(
+            std::iter::once(values.effects)
+                .chain(initial.iter().map(|value| value.effects))
+                .chain(std::iter::once(callback.effects)),
+        );
+        Ok(CompiledExpr {
+            register,
+            value_type: result.clone(),
+            effects,
+            hir: self.hir(
+                HirExprKind::ListCombinator {
+                    operation,
+                    values: Box::new(values.hir),
+                    initial: initial.map(|value| Box::new(value.hir)),
+                    callback: Box::new(callback.hir),
+                },
+                None,
+                &result,
+                effects,
+                span,
+            ),
+        })
+    }
+
+    #[allow(clippy::too_many_lines)]
+    fn compile_sequence_builtin(
+        &mut self,
+        operation: SequenceBuiltin,
+        arguments: &[LoweredExpr],
+        span: Span,
+    ) -> Result<CompiledExpr, Diagnostic> {
+        if operation == SequenceBuiltin::FromList {
+            let values = self.compile_expression(&arguments[0])?;
+            let ValueType::List(item) = &values.value_type else {
+                return Err(Diagnostic::new(
+                    "E3011",
+                    "seq.from_list requires List<T>",
+                    arguments[0].span,
+                ));
+            };
+            let result = ValueType::Sequence(item.clone());
+            let register = self.allocate(result.clone())?;
+            self.code.push(Instruction::SequenceFromList {
+                destination: register,
+                values: values.register,
+            });
+            self.mark_last_instruction(span);
+            self.mir.push(MirOperation::SequenceFromList {
+                destination: u32::from(register),
+                values: u32::from(values.register),
+            });
+            self.record_ownership(
+                register,
+                self.current_scope(),
+                MirOwnershipState::Live,
+                false,
+            );
+            let effects = values.effects;
+            return Ok(CompiledExpr {
+                register,
+                value_type: result.clone(),
+                effects,
+                hir: self.hir(
+                    HirExprKind::SequenceFromList(Box::new(values.hir)),
+                    None,
+                    &result,
+                    effects,
+                    span,
+                ),
+            });
+        }
+
+        let sequence = self.compile_expression(&arguments[0])?;
+        let ValueType::Sequence(item) = &sequence.value_type else {
+            return Err(Diagnostic::new(
+                "E3011",
+                "sequence operation requires Sequence<T>",
+                arguments[0].span,
+            ));
+        };
+        let item = item.as_ref().clone();
+        let pure_effects = self.empty_effects();
+        let mut operand_effects = vec![sequence.effects];
+        let mut fold_initial = None;
+
+        let (result, instruction, mir, hir) = match operation {
+            SequenceBuiltin::FromList => unreachable!("handled above"),
+            SequenceBuiltin::Take => {
+                let count =
+                    self.compile_expected(&arguments[1], &ValueType::Int, "seq.take count")?;
+                operand_effects.push(count.effects);
+                (
+                    sequence.value_type.clone(),
+                    Instruction::SequenceTake {
+                        destination: 0,
+                        sequence: sequence.register,
+                        count: count.register,
+                    },
+                    MirOperation::SequenceTake {
+                        destination: 0,
+                        sequence: u32::from(sequence.register),
+                        count: u32::from(count.register),
+                    },
+                    HirExprKind::SequenceTake {
+                        sequence: Box::new(sequence.hir.clone()),
+                        count: Box::new(count.hir),
+                    },
+                )
+            }
+            SequenceBuiltin::ToList => (
+                ValueType::List(Box::new(item.clone())),
+                Instruction::SequenceToList {
+                    destination: 0,
+                    sequence: sequence.register,
+                },
+                MirOperation::SequenceToList {
+                    destination: 0,
+                    sequence: u32::from(sequence.register),
+                },
+                HirExprKind::SequenceToList(Box::new(sequence.hir.clone())),
+            ),
+            SequenceBuiltin::Fold => {
+                let initial = self.compile_expression(&arguments[1])?;
+                if initial.register == sequence.register && is_affine(&initial.value_type) {
+                    return Err(Diagnostic::new(
+                        "E3011",
+                        "sequence fold cannot use one affine value as both source and accumulator",
+                        arguments[1].span,
+                    ));
+                }
+                fold_initial = Some(initial.register);
+                let expected = ValueType::Function {
+                    parameters: vec![initial.value_type.clone(), item.clone()],
+                    return_type: Box::new(initial.value_type.clone()),
+                    effects: pure_effects,
+                };
+                let callback =
+                    self.compile_expected(&arguments[2], &expected, "seq.fold callback")?;
+                operand_effects.extend([initial.effects, callback.effects]);
+                (
+                    initial.value_type.clone(),
+                    Instruction::SequenceFold {
+                        destination: 0,
+                        sequence: sequence.register,
+                        initial: initial.register,
+                        callback: callback.register,
+                    },
+                    MirOperation::SequenceFold {
+                        destination: 0,
+                        sequence: u32::from(sequence.register),
+                        initial: u32::from(initial.register),
+                        callback: u32::from(callback.register),
+                    },
+                    HirExprKind::SequenceFold {
+                        sequence: Box::new(sequence.hir.clone()),
+                        initial: Box::new(initial.hir),
+                        callback: Box::new(callback.hir),
+                    },
+                )
+            }
+            SequenceBuiltin::Map
+            | SequenceBuiltin::Filter
+            | SequenceBuiltin::Find
+            | SequenceBuiltin::Any
+            | SequenceBuiltin::All => {
+                let expected =
+                    (!matches!(operation, SequenceBuiltin::Map)).then(|| ValueType::Function {
+                        parameters: vec![item.clone()],
+                        return_type: Box::new(ValueType::Bool),
+                        effects: pure_effects,
+                    });
+                let callback = if let Some(expected) = &expected {
+                    self.compile_expected(&arguments[1], expected, "sequence callback")?
+                } else {
+                    self.compile_expression(&arguments[1])?
+                };
+                let ValueType::Function {
+                    parameters,
+                    return_type,
+                    effects: callback_effects,
+                } = &callback.value_type
+                else {
+                    return Err(Diagnostic::new(
+                        "E3011",
+                        "sequence operation requires a callback",
+                        arguments[1].span,
+                    ));
+                };
+                if parameters.as_slice() != [item.clone()] {
+                    return Err(Diagnostic::new(
+                        "E3011",
+                        "sequence callback has the wrong parameter type",
+                        arguments[1].span,
+                    ));
+                }
+                if !self.global.effect_sets[*callback_effects as usize].is_empty() {
+                    return Err(Diagnostic::new(
+                        "E2403",
+                        "sequence callbacks must be pure",
+                        arguments[1].span,
+                    ));
+                }
+                let callback_result = return_type.as_ref().clone();
+                if !matches!(operation, SequenceBuiltin::Map) && callback_result != ValueType::Bool
+                {
+                    return Err(Diagnostic::new(
+                        "E3011",
+                        "seq.filter/find/any/all callbacks must return Bool",
+                        arguments[1].span,
+                    ));
+                }
+                if operation == SequenceBuiltin::Map {
+                    Self::collection_value_is_valid(&callback_result, "Sequence", span)?;
+                }
+                operand_effects.push(callback.effects);
+                let result = match operation {
+                    SequenceBuiltin::Map => ValueType::Sequence(Box::new(callback_result.clone())),
+                    SequenceBuiltin::Filter => sequence.value_type.clone(),
+                    SequenceBuiltin::Find => ValueType::Option(Box::new(item.clone())),
+                    SequenceBuiltin::Any | SequenceBuiltin::All => ValueType::Bool,
+                    _ => unreachable!(),
+                };
+                let (instruction, mir, hir) = match operation {
+                    SequenceBuiltin::Map => (
+                        Instruction::SequenceMap {
+                            destination: 0,
+                            sequence: sequence.register,
+                            callback: callback.register,
+                        },
+                        MirOperation::SequenceMap {
+                            destination: 0,
+                            sequence: u32::from(sequence.register),
+                            callback: u32::from(callback.register),
+                        },
+                        HirExprKind::SequenceMap {
+                            sequence: Box::new(sequence.hir.clone()),
+                            callback: Box::new(callback.hir),
+                        },
+                    ),
+                    SequenceBuiltin::Filter => (
+                        Instruction::SequenceFilter {
+                            destination: 0,
+                            sequence: sequence.register,
+                            callback: callback.register,
+                        },
+                        MirOperation::SequenceFilter {
+                            destination: 0,
+                            sequence: u32::from(sequence.register),
+                            callback: u32::from(callback.register),
+                        },
+                        HirExprKind::SequenceFilter {
+                            sequence: Box::new(sequence.hir.clone()),
+                            callback: Box::new(callback.hir),
+                        },
+                    ),
+                    SequenceBuiltin::Find => (
+                        Instruction::SequenceFind {
+                            destination: 0,
+                            sequence: sequence.register,
+                            callback: callback.register,
+                        },
+                        MirOperation::SequenceFind {
+                            destination: 0,
+                            sequence: u32::from(sequence.register),
+                            callback: u32::from(callback.register),
+                        },
+                        HirExprKind::SequenceFind {
+                            sequence: Box::new(sequence.hir.clone()),
+                            callback: Box::new(callback.hir),
+                        },
+                    ),
+                    SequenceBuiltin::Any => (
+                        Instruction::SequenceAny {
+                            destination: 0,
+                            sequence: sequence.register,
+                            callback: callback.register,
+                        },
+                        MirOperation::SequenceAny {
+                            destination: 0,
+                            sequence: u32::from(sequence.register),
+                            callback: u32::from(callback.register),
+                        },
+                        HirExprKind::SequenceAny {
+                            sequence: Box::new(sequence.hir.clone()),
+                            callback: Box::new(callback.hir),
+                        },
+                    ),
+                    SequenceBuiltin::All => (
+                        Instruction::SequenceAll {
+                            destination: 0,
+                            sequence: sequence.register,
+                            callback: callback.register,
+                        },
+                        MirOperation::SequenceAll {
+                            destination: 0,
+                            sequence: u32::from(sequence.register),
+                            callback: u32::from(callback.register),
+                        },
+                        HirExprKind::SequenceAll {
+                            sequence: Box::new(sequence.hir.clone()),
+                            callback: Box::new(callback.hir),
+                        },
+                    ),
+                    _ => unreachable!(),
+                };
+                (result, instruction, mir, hir)
+            }
+        };
+
+        let register = self.allocate(result.clone())?;
+        let instruction = match instruction {
+            Instruction::SequenceMap {
+                sequence, callback, ..
+            } => Instruction::SequenceMap {
+                destination: register,
+                sequence,
+                callback,
+            },
+            Instruction::SequenceFilter {
+                sequence, callback, ..
+            } => Instruction::SequenceFilter {
+                destination: register,
+                sequence,
+                callback,
+            },
+            Instruction::SequenceTake {
+                sequence, count, ..
+            } => Instruction::SequenceTake {
+                destination: register,
+                sequence,
+                count,
+            },
+            Instruction::SequenceFind {
+                sequence, callback, ..
+            } => Instruction::SequenceFind {
+                destination: register,
+                sequence,
+                callback,
+            },
+            Instruction::SequenceAny {
+                sequence, callback, ..
+            } => Instruction::SequenceAny {
+                destination: register,
+                sequence,
+                callback,
+            },
+            Instruction::SequenceAll {
+                sequence, callback, ..
+            } => Instruction::SequenceAll {
+                destination: register,
+                sequence,
+                callback,
+            },
+            Instruction::SequenceFold {
+                sequence,
+                initial,
+                callback,
+                ..
+            } => Instruction::SequenceFold {
+                destination: register,
+                sequence,
+                initial,
+                callback,
+            },
+            Instruction::SequenceToList { sequence, .. } => Instruction::SequenceToList {
+                destination: register,
+                sequence,
+            },
+            _ => unreachable!("sequence instruction"),
+        };
+        let mir = match mir {
+            MirOperation::SequenceMap {
+                sequence, callback, ..
+            } => MirOperation::SequenceMap {
+                destination: u32::from(register),
+                sequence,
+                callback,
+            },
+            MirOperation::SequenceFilter {
+                sequence, callback, ..
+            } => MirOperation::SequenceFilter {
+                destination: u32::from(register),
+                sequence,
+                callback,
+            },
+            MirOperation::SequenceTake {
+                sequence, count, ..
+            } => MirOperation::SequenceTake {
+                destination: u32::from(register),
+                sequence,
+                count,
+            },
+            MirOperation::SequenceFind {
+                sequence, callback, ..
+            } => MirOperation::SequenceFind {
+                destination: u32::from(register),
+                sequence,
+                callback,
+            },
+            MirOperation::SequenceAny {
+                sequence, callback, ..
+            } => MirOperation::SequenceAny {
+                destination: u32::from(register),
+                sequence,
+                callback,
+            },
+            MirOperation::SequenceAll {
+                sequence, callback, ..
+            } => MirOperation::SequenceAll {
+                destination: u32::from(register),
+                sequence,
+                callback,
+            },
+            MirOperation::SequenceFold {
+                sequence,
+                initial,
+                callback,
+                ..
+            } => MirOperation::SequenceFold {
+                destination: u32::from(register),
+                sequence,
+                initial,
+                callback,
+            },
+            MirOperation::SequenceToList { sequence, .. } => MirOperation::SequenceToList {
+                destination: u32::from(register),
+                sequence,
+            },
+            _ => unreachable!("sequence MIR operation"),
+        };
+        self.code.push(instruction);
+        self.mark_last_instruction(span);
+        self.mir.push(mir);
+        self.consume_ownership(sequence.register, MirOwnershipState::Moved);
+        if let Some(initial_register) = fold_initial {
+            if is_affine(&result) {
+                let ownership = self
+                    .ownership_states
+                    .get(&initial_register)
+                    .copied()
+                    .ok_or_else(|| {
+                        Diagnostic::new(
+                            "E3011",
+                            "affine fold accumulator has no ownership state",
+                            arguments[1].span,
+                        )
+                    })?;
+                self.consume_ownership(initial_register, MirOwnershipState::Moved);
+                self.record_ownership(
+                    register,
+                    ownership.scope,
+                    MirOwnershipState::Live,
+                    ownership.must_consume,
+                );
+            }
+        } else if matches!(result, ValueType::Sequence(_)) {
+            self.record_ownership(
+                register,
+                self.current_scope(),
+                MirOwnershipState::Live,
+                false,
+            );
+        }
+        let effects = self.union_effects(operand_effects);
+        Ok(CompiledExpr {
+            register,
+            value_type: result.clone(),
+            effects,
+            hir: self.hir(hir, None, &result, effects, span),
+        })
+    }
+
     #[allow(clippy::too_many_lines)]
     pub(super) fn compile_string_builtin(
         &mut self,
@@ -2113,74 +4146,7 @@ impl FunctionLowering<'_, '_> {
         arguments: &[LoweredExpr],
         span: Span,
     ) -> Result<CompiledExpr, Diagnostic> {
-        let (name, expected, result) = match operation {
-            StringOperation::ByteLength => (
-                "string.byte_length",
-                vec![ValueType::String],
-                ValueType::Int,
-            ),
-            StringOperation::Concat => (
-                "string.concat",
-                vec![ValueType::String, ValueType::String],
-                ValueType::String,
-            ),
-            StringOperation::Get => (
-                "string.get",
-                vec![ValueType::String, ValueType::Int],
-                ValueType::Option(Box::new(ValueType::String)),
-            ),
-            StringOperation::Slice => (
-                "string.slice",
-                vec![ValueType::String, ValueType::Int, ValueType::Int],
-                ValueType::Option(Box::new(ValueType::String)),
-            ),
-            StringOperation::Find => (
-                "string.find",
-                vec![ValueType::String, ValueType::String],
-                ValueType::Option(Box::new(ValueType::Int)),
-            ),
-            StringOperation::Contains => (
-                "string.contains",
-                vec![ValueType::String, ValueType::String],
-                ValueType::Bool,
-            ),
-            StringOperation::StartsWith => (
-                "string.starts_with",
-                vec![ValueType::String, ValueType::String],
-                ValueType::Bool,
-            ),
-            StringOperation::EndsWith => (
-                "string.ends_with",
-                vec![ValueType::String, ValueType::String],
-                ValueType::Bool,
-            ),
-            StringOperation::Split => (
-                "string.split",
-                vec![ValueType::String, ValueType::String],
-                ValueType::Option(Box::new(ValueType::List(Box::new(ValueType::String)))),
-            ),
-            StringOperation::Join => (
-                "string.join",
-                vec![
-                    ValueType::List(Box::new(ValueType::String)),
-                    ValueType::String,
-                ],
-                ValueType::String,
-            ),
-            StringOperation::TrimAscii => (
-                "string.trim_ascii",
-                vec![ValueType::String],
-                ValueType::String,
-            ),
-            StringOperation::FromUtf8 => (
-                "string.from_utf8",
-                vec![ValueType::Bytes],
-                ValueType::Option(Box::new(ValueType::String)),
-            ),
-            StringOperation::TemplateConcat => {
-                unreachable!("template concatenation is not a source builtin")
-            }
-        };
+        let (name, expected, result) = string_operation_signature(operation);
         if arguments.len() != expected.len() {
             return Err(Diagnostic::new(
                 "E3011",
@@ -2260,24 +4226,98 @@ impl FunctionLowering<'_, '_> {
         })
     }
 
+    #[allow(clippy::too_many_lines)]
+    pub(super) fn compile_standard_builtin(
+        &mut self,
+        operation: StandardOperation,
+        arguments: &[LoweredExpr],
+        span: Span,
+    ) -> Result<CompiledExpr, Diagnostic> {
+        let (name, expected, result) = standard_operation_signature(operation);
+        if arguments.len() != expected.len() {
+            return Err(Diagnostic::new(
+                "E3011",
+                format!(
+                    "{name} requires exactly {} argument{}",
+                    expected.len(),
+                    if expected.len() == 1 { "" } else { "s" }
+                ),
+                span,
+            ));
+        }
+        let mut values = Vec::with_capacity(arguments.len());
+        let mut terminal = None;
+        for (argument, expected) in arguments.iter().zip(&expected) {
+            let value = if terminal.is_some() {
+                self.compile_without_runtime(|lowering| {
+                    lowering.compile_expected(argument, expected, name)
+                })?
+            } else {
+                self.compile_expected(argument, expected, name)?
+            };
+            if terminal.is_none() && value.value_type == ValueType::Never {
+                terminal = Some(value.register);
+            }
+            values.push(value);
+        }
+        let effects = self.union_effects(values.iter().map(|value| value.effects));
+        if let Some(register) = terminal {
+            return Ok(CompiledExpr {
+                register,
+                value_type: ValueType::Never,
+                effects,
+                hir: self.hir(
+                    HirExprKind::StandardOperation {
+                        operation,
+                        arguments: values.into_iter().map(|value| value.hir).collect(),
+                    },
+                    None,
+                    &ValueType::Never,
+                    effects,
+                    span,
+                ),
+            });
+        }
+        let register = self.allocate(result.clone())?;
+        let argument_registers = values
+            .iter()
+            .map(|value| value.register)
+            .collect::<Vec<_>>();
+        self.code.push(Instruction::StandardCall {
+            destination: register,
+            operation,
+            arguments: argument_registers.clone(),
+        });
+        self.mark_last_instruction(span);
+        self.mir.push(MirOperation::StandardOperation {
+            destination: u32::from(register),
+            operation,
+            arguments: argument_registers.into_iter().map(u32::from).collect(),
+        });
+        Ok(CompiledExpr {
+            register,
+            value_type: result.clone(),
+            effects,
+            hir: self.hir(
+                HirExprKind::StandardOperation {
+                    operation,
+                    arguments: values.into_iter().map(|value| value.hir).collect(),
+                },
+                None,
+                &result,
+                effects,
+                span,
+            ),
+        })
+    }
+
     pub(super) fn compile_capability_builtin(
         &mut self,
         operation: CapabilityOperation,
         arguments: &[LoweredExpr],
         span: Span,
     ) -> Result<CompiledExpr, Diagnostic> {
-        let (name, expected, result) = match operation {
-            CapabilityOperation::IsGranted => (
-                "capability.is_granted",
-                vec![ValueType::String],
-                ValueType::Bool,
-            ),
-            CapabilityOperation::Granted => (
-                "capability.granted",
-                Vec::new(),
-                ValueType::List(Box::new(ValueType::String)),
-            ),
-        };
+        let (name, expected, result) = capability_operation_signature(operation);
         if arguments.len() != expected.len() {
             return Err(Diagnostic::new(
                 "E3011",
@@ -2486,7 +4526,11 @@ impl FunctionLowering<'_, '_> {
             }
             CollectionBuiltin::Length
             | CollectionBuiltin::Safe(_)
-            | CollectionBuiltin::CheckedInt(_) => {
+            | CollectionBuiltin::CheckedInt(_)
+            | CollectionBuiltin::Operation(_)
+            | CollectionBuiltin::ListFold
+            | CollectionBuiltin::ListCombinator(_)
+            | CollectionBuiltin::Sequence(_) => {
                 unreachable!("length builtin is handled before list lowering")
             }
         }
@@ -2776,6 +4820,147 @@ impl FunctionLowering<'_, '_> {
         })
     }
 
+    fn compile_named_function_value(
+        &mut self,
+        symbol: SymbolId,
+        span: Span,
+    ) -> Result<CompiledExpr, Diagnostic> {
+        let target = self.global.bundle.functions[symbol as usize].clone();
+        if !target.lowered.generics.is_empty() {
+            return Err(Diagnostic::new(
+                "E3007",
+                format!(
+                    "generic function '{}' needs an exact instantiation before use as a value",
+                    target.lowered.name
+                ),
+                span,
+            ));
+        }
+        let parameters = target.lowered.parameters.clone();
+        let arguments = parameters
+            .iter()
+            .map(|(name, _, parameter_span)| LoweredCallArgument {
+                label: None,
+                value: LoweredExpr {
+                    kind: LoweredExprKind::Variable(name.clone()),
+                    span: *parameter_span,
+                },
+                placeholder: false,
+                trailing: false,
+                preceding_call_span: None,
+                span: *parameter_span,
+            })
+            .collect();
+        let call = LoweredExpr {
+            kind: LoweredExprKind::Call {
+                callee: Box::new(LoweredExpr {
+                    kind: LoweredExprKind::Variable(target.lowered.name.clone()),
+                    span,
+                }),
+                type_arguments: Vec::new(),
+                arguments,
+            },
+            span,
+        };
+        let body = LoweredBody {
+            statements: Vec::new(),
+            tail: Some(call),
+            span,
+        };
+        let return_type = concrete_type(
+            &target.return_type,
+            &BTreeMap::new(),
+            &self.global.effect_sets,
+        )?;
+        let return_type = if target.lowered.is_async {
+            self.lowered_type_for_short_closure(
+                &ValueType::Future(Box::new(return_type)),
+                target.lowered.return_type.span(),
+            )?
+        } else {
+            target.lowered.return_type.clone()
+        };
+        self.compile_closure(
+            &parameters,
+            &return_type,
+            Some(&target.effects),
+            &body,
+            span,
+        )
+    }
+
+    fn resolve_callable(&self, name: &str) -> Result<Option<(FunctionInfo, bool)>, Diagnostic> {
+        if let Some(function) = self.local_functions.get(name) {
+            return Ok(Some((function.clone(), true)));
+        }
+        let Some(symbol) = resolve_function_name(self.global.bundle, &self.info.module, name)?
+        else {
+            return Ok(None);
+        };
+        Ok(Some((
+            self.global.bundle.functions[symbol as usize].clone(),
+            false,
+        )))
+    }
+
+    fn local_name_conflicts(&self, name: &str) -> bool {
+        self.local_functions.contains_key(name) || self.unavailable_local_functions.contains(name)
+    }
+
+    fn reserved_local_names(&self) -> BTreeSet<String> {
+        self.unavailable_local_functions
+            .iter()
+            .cloned()
+            .chain(self.local_functions.keys().cloned())
+            .collect()
+    }
+
+    fn compile_local_function_value(
+        &mut self,
+        target: &FunctionInfo,
+        span: Span,
+    ) -> Result<CompiledExpr, Diagnostic> {
+        let parameters = target
+            .parameters
+            .iter()
+            .map(|parameter| concrete_type(parameter, &BTreeMap::new(), &self.global.effect_sets))
+            .collect::<Result<Vec<_>, _>>()?;
+        let return_type = concrete_type(
+            &target.return_type,
+            &BTreeMap::new(),
+            &self.global.effect_sets,
+        )?;
+        let effect = effect_id(&self.global.effect_sets, &target.effects);
+        let value_type = ValueType::Function {
+            parameters,
+            return_type: Box::new(return_type),
+            effects: effect,
+        };
+        let register = self.allocate(value_type.clone())?;
+        self.code.push(Instruction::ClosureNew {
+            destination: register,
+            function: target.bytecode.expect("compiled local function"),
+            captures: Vec::new(),
+        });
+        self.mir.push(MirOperation::ClosureEnvironment {
+            destination: u32::from(register),
+            function: target.symbol,
+            captures: Vec::new(),
+        });
+        Ok(CompiledExpr {
+            register,
+            value_type: value_type.clone(),
+            effects: effect,
+            hir: self.hir(
+                HirExprKind::Variable,
+                Some(target.symbol),
+                &value_type,
+                effect,
+                span,
+            ),
+        })
+    }
+
     #[allow(clippy::too_many_lines)]
     pub(super) fn compile_expression(
         &mut self,
@@ -2928,6 +5113,61 @@ impl FunctionLowering<'_, '_> {
                 })
             }
             LoweredExprKind::Variable(name) => {
+                if !self.bindings.contains_key(name) {
+                    if let Some((target, local)) = self.resolve_callable(name)? {
+                        let symbol = target.symbol;
+                        if target.is_const {
+                            if let Some(value) = self.global.constant_values.get(&symbol).cloned() {
+                                let expected = concrete_type(
+                                    &target.return_type,
+                                    &BTreeMap::new(),
+                                    &self.global.effect_sets,
+                                )?;
+                                return self.materialize_constant(
+                                    &value,
+                                    &expected,
+                                    symbol,
+                                    expression.span,
+                                );
+                            }
+                            if self.global.constant_evaluation {
+                                let value_type = concrete_type(
+                                    &target.return_type,
+                                    &BTreeMap::new(),
+                                    &self.global.effect_sets,
+                                )?;
+                                let register = self.allocate(value_type.clone())?;
+                                self.code.push(Instruction::DirectCall {
+                                    destination: register,
+                                    function: target.bytecode.expect("constant bytecode"),
+                                    arguments: Vec::new(),
+                                });
+                                self.mir.push(MirOperation::DirectCall {
+                                    destination: u32::from(register),
+                                    function: target.symbol,
+                                    arguments: Vec::new(),
+                                });
+                                let effects = self.empty_effects();
+                                return Ok(CompiledExpr {
+                                    register,
+                                    value_type: value_type.clone(),
+                                    effects,
+                                    hir: self.hir(
+                                        HirExprKind::Variable,
+                                        Some(symbol),
+                                        &value_type,
+                                        effects,
+                                        expression.span,
+                                    ),
+                                });
+                            }
+                        } else if local {
+                            return self.compile_local_function_value(&target, expression.span);
+                        } else {
+                            return self.compile_named_function_value(symbol, expression.span);
+                        }
+                    }
+                }
                 let binding = self.bindings.get_mut(name).ok_or_else(|| {
                     Diagnostic::new(
                         "E3005",
@@ -3162,7 +5402,7 @@ impl FunctionLowering<'_, '_> {
             }
             LoweredExprKind::Try(value) => self.compile_try(value, expression.span),
             LoweredExprKind::Match { source, arms } => {
-                self.compile_match(source, arms, expression.span)
+                self.compile_match(source, arms, expression.span, None)
             }
             LoweredExprKind::If {
                 condition,
@@ -3174,9 +5414,34 @@ impl FunctionLowering<'_, '_> {
                 else_branch.as_ref(),
                 expression.span,
                 None,
+                None,
             ),
             LoweredExprKind::List(elements) => self.compile_list(expression, elements, None),
             LoweredExprKind::Map(entries) => self.compile_map(expression, entries, None),
+            LoweredExprKind::ListWithSpread(items) => {
+                self.compile_list_with_spread(expression, items, None)
+            }
+            LoweredExprKind::MapWithSpread(items) => {
+                self.compile_map_with_spread(expression, items, None)
+            }
+            LoweredExprKind::RecordUpdate {
+                name,
+                base,
+                spread_span,
+                fields,
+            } => self.compile_record_update(expression, name, base, *spread_span, fields),
+            LoweredExprKind::OptionalFieldGet {
+                receiver,
+                field,
+                operator_span,
+                field_span,
+            } => self.compile_optional_field_get(
+                receiver,
+                field,
+                *operator_span,
+                *field_span,
+                expression.span,
+            ),
             LoweredExprKind::Tuple(elements) => {
                 let values = elements
                     .iter()
@@ -3297,6 +5562,156 @@ impl FunctionLowering<'_, '_> {
                         HirExprKind::Unary(Box::new(operand.hir)),
                         None,
                         &value_type,
+                        effects,
+                        expression.span,
+                    ),
+                })
+            }
+            LoweredExprKind::Range {
+                start,
+                end,
+                inclusive,
+                operator_span,
+            } => {
+                let start = self.compile_expected(start, &ValueType::Int, "range start")?;
+                let end = if start.value_type == ValueType::Never {
+                    self.compile_without_runtime(|lowering| {
+                        lowering.compile_expected(end, &ValueType::Int, "range end")
+                    })?
+                } else {
+                    self.compile_expected(end, &ValueType::Int, "range end")?
+                };
+                let effects = self.union_effects([start.effects, end.effects]);
+                if start.value_type == ValueType::Never || end.value_type == ValueType::Never {
+                    let register = if start.value_type == ValueType::Never {
+                        start.register
+                    } else {
+                        end.register
+                    };
+                    return Ok(CompiledExpr {
+                        register,
+                        value_type: ValueType::Never,
+                        effects,
+                        hir: self.hir(
+                            HirExprKind::Range {
+                                start: Box::new(start.hir),
+                                end: Box::new(end.hir),
+                                inclusive: *inclusive,
+                            },
+                            None,
+                            &ValueType::Never,
+                            effects,
+                            expression.span,
+                        ),
+                    });
+                }
+                let register = self.allocate(ValueType::Range)?;
+                self.code.push(Instruction::RangeNew {
+                    destination: register,
+                    start: start.register,
+                    end: end.register,
+                    inclusive: *inclusive,
+                });
+                self.mark_last_instruction(*operator_span);
+                self.mir.push(MirOperation::Range {
+                    destination: u32::from(register),
+                    start: u32::from(start.register),
+                    end: u32::from(end.register),
+                    inclusive: *inclusive,
+                });
+                Ok(CompiledExpr {
+                    register,
+                    value_type: ValueType::Range,
+                    effects,
+                    hir: self.hir(
+                        HirExprKind::Range {
+                            start: Box::new(start.hir),
+                            end: Box::new(end.hir),
+                            inclusive: *inclusive,
+                        },
+                        None,
+                        &ValueType::Range,
+                        effects,
+                        expression.span,
+                    ),
+                })
+            }
+            LoweredExprKind::Slice {
+                collection,
+                range,
+                bracket_span,
+            } => {
+                let collection = self.compile_expression(collection)?;
+                let result_type = match &collection.value_type {
+                    ValueType::List(element) => {
+                        ValueType::Option(Box::new(ValueType::List(element.clone())))
+                    }
+                    ValueType::Bytes => ValueType::Option(Box::new(ValueType::Bytes)),
+                    ValueType::String => ValueType::Option(Box::new(ValueType::String)),
+                    found => {
+                        return Err(Diagnostic::new(
+                            "E2009",
+                            format!("cannot slice a value of type {found}"),
+                            *bracket_span,
+                        ));
+                    }
+                };
+                let LoweredExprKind::Range {
+                    start,
+                    end,
+                    inclusive,
+                    ..
+                } = &range.kind
+                else {
+                    unreachable!("slice syntax lowering always retains a literal range")
+                };
+                if *inclusive {
+                    return Err(Diagnostic::new(
+                        "E3010",
+                        "slice ranges must be half-open; `..=` is not allowed",
+                        range.span,
+                    ));
+                }
+                let start = self.compile_expected(start, &ValueType::Int, "slice start")?;
+                let end = self.compile_expected(end, &ValueType::Int, "slice end")?;
+                let register = self.allocate(result_type.clone())?;
+                self.code.push(Instruction::SliceGet {
+                    destination: register,
+                    collection: collection.register,
+                    start: start.register,
+                    end: end.register,
+                });
+                self.mark_last_instruction(*bracket_span);
+                self.mir.push(MirOperation::Slice {
+                    destination: u32::from(register),
+                    collection: u32::from(collection.register),
+                    start: u32::from(start.register),
+                    end: u32::from(end.register),
+                });
+                let bounds_effects = self.union_effects([start.effects, end.effects]);
+                let range_hir = self.hir(
+                    HirExprKind::Range {
+                        start: Box::new(start.hir),
+                        end: Box::new(end.hir),
+                        inclusive: false,
+                    },
+                    None,
+                    &ValueType::Range,
+                    bounds_effects,
+                    range.span,
+                );
+                let effects = self.union_effects([collection.effects, bounds_effects]);
+                Ok(CompiledExpr {
+                    register,
+                    value_type: result_type.clone(),
+                    effects,
+                    hir: self.hir(
+                        HirExprKind::Slice {
+                            collection: Box::new(collection.hir),
+                            range: Box::new(range_hir),
+                        },
+                        None,
+                        &result_type,
                         effects,
                         expression.span,
                     ),
@@ -3476,16 +5891,10 @@ impl FunctionLowering<'_, '_> {
                         ValueType::Bool
                     }
                     Binary::Less | Binary::LessEqual | Binary::Greater | Binary::GreaterEqual => {
-                        if !matches!(
-                            left.value_type,
-                            ValueType::Int
-                                | ValueType::Float
-                                | ValueType::String
-                                | ValueType::Bytes
-                        ) {
+                        if !left.value_type.is_ordered() {
                             return Err(Diagnostic::new(
                                 "E2003",
-                                "ordered comparison requires Int, Float, String, or Bytes",
+                                "ordered comparison requires an ordered type",
                                 expression.span,
                             ));
                         }
@@ -3562,6 +5971,208 @@ impl FunctionLowering<'_, '_> {
                     ),
                 })
             }
+            LoweredExprKind::Compose {
+                left,
+                right,
+                operator_span,
+            } => {
+                let _ = operator_span;
+                let left = self.compile_expression(left)?;
+                let right = self.compile_expression(right)?;
+                let ValueType::Function {
+                    parameters: left_parameters,
+                    return_type: left_return,
+                    effects: left_effects,
+                } = &left.value_type
+                else {
+                    return Err(Diagnostic::new(
+                        "E3007",
+                        "left composition operand must be an exact unary function",
+                        expression.span,
+                    ));
+                };
+                let ValueType::Function {
+                    parameters: right_parameters,
+                    return_type: right_return,
+                    effects: right_effects,
+                } = &right.value_type
+                else {
+                    return Err(Diagnostic::new(
+                        "E3007",
+                        "right composition operand must be an exact unary function",
+                        expression.span,
+                    ));
+                };
+                if left_parameters.len() != 1 || right_parameters.len() != 1 {
+                    return Err(Diagnostic::new(
+                        "E3007",
+                        "composition requires two unary function values",
+                        expression.span,
+                    ));
+                }
+                if left_return.as_ref() != &right_parameters[0] {
+                    return Err(Diagnostic::new(
+                        "E3007",
+                        format!(
+                            "composition intermediate type {} does not match {}",
+                            left_return, right_parameters[0]
+                        ),
+                        expression.span,
+                    ));
+                }
+                if is_affine(&left.value_type) || is_affine(&right.value_type) {
+                    return Err(Diagnostic::new(
+                        "E3011",
+                        "composition cannot capture an affine function value",
+                        expression.span,
+                    ));
+                }
+                let left_name = format!("__allen_compose_left_{}", self.global.allocate_symbol());
+                let right_name = format!("__allen_compose_right_{}", self.global.allocate_symbol());
+                let scope = self.current_scope();
+                for (name, value) in [(&left_name, &left), (&right_name, &right)] {
+                    self.bindings.insert(
+                        name.clone(),
+                        LocalBinding {
+                            register: value.register,
+                            symbol: self.global.allocate_symbol(),
+                            value_type: value.value_type.clone(),
+                            scope,
+                            value_scope: scope,
+                            mutable: false,
+                            moved: false,
+                        },
+                    );
+                }
+                let parameter_name =
+                    format!("__allen_compose_value_{}", self.global.allocate_symbol());
+                let parameter_type =
+                    self.lowered_type_for_short_closure(&left_parameters[0], expression.span)?;
+                let return_type =
+                    self.lowered_type_for_short_closure(right_return, expression.span)?;
+                let variable = |name: String| LoweredExpr {
+                    kind: LoweredExprKind::Variable(name),
+                    span: expression.span,
+                };
+                let argument = |value: LoweredExpr| LoweredCallArgument {
+                    label: None,
+                    value,
+                    placeholder: false,
+                    trailing: false,
+                    preceding_call_span: None,
+                    span: expression.span,
+                };
+                let first_call = LoweredExpr {
+                    kind: LoweredExprKind::Call {
+                        callee: Box::new(variable(left_name)),
+                        type_arguments: Vec::new(),
+                        arguments: vec![argument(variable(parameter_name.clone()))],
+                    },
+                    span: expression.span,
+                };
+                let body_expression = LoweredExpr {
+                    kind: LoweredExprKind::Call {
+                        callee: Box::new(variable(right_name)),
+                        type_arguments: Vec::new(),
+                        arguments: vec![argument(first_call)],
+                    },
+                    span: expression.span,
+                };
+                let body = LoweredBody {
+                    statements: Vec::new(),
+                    tail: Some(body_expression),
+                    span: expression.span,
+                };
+                let composed_effects = self.union_effects([*left_effects, *right_effects]);
+                let declared_effects = self.global.effect_sets[composed_effects as usize].clone();
+                let mut compiled = self.compile_closure(
+                    &[(parameter_name, parameter_type, expression.span)],
+                    &return_type,
+                    Some(&declared_effects),
+                    &body,
+                    expression.span,
+                )?;
+                compiled.effects =
+                    self.union_effects([left.effects, right.effects, compiled.effects]);
+                compiled.hir.effects = compiled.effects;
+                Ok(compiled)
+            }
+            LoweredExprKind::Pipe {
+                left,
+                stage,
+                operator_span,
+            } => {
+                let _ = operator_span;
+                let left_span = left.span;
+                let left = self.compile_expression(left)?;
+                let LoweredExprKind::Call {
+                    callee,
+                    type_arguments,
+                    arguments,
+                } = &stage.kind
+                else {
+                    return Err(Diagnostic::new(
+                        "E3010",
+                        "a pipeline stage must be a direct call",
+                        stage.span,
+                    ));
+                };
+                let placeholder_count = arguments
+                    .iter()
+                    .filter(|argument| argument.placeholder)
+                    .count();
+                if placeholder_count > 1 {
+                    return Err(Diagnostic::new(
+                        "E3010",
+                        "a pipeline stage can contain at most one placeholder",
+                        stage.span,
+                    ));
+                }
+                let temporary = format!("__allen_pipe_value_{}", self.global.allocate_symbol());
+                let scope = self.current_scope();
+                self.bindings.insert(
+                    temporary.clone(),
+                    LocalBinding {
+                        register: left.register,
+                        symbol: self.global.allocate_symbol(),
+                        value_type: left.value_type,
+                        scope,
+                        value_scope: scope,
+                        mutable: false,
+                        moved: false,
+                    },
+                );
+                let inserted = LoweredExpr {
+                    kind: LoweredExprKind::Variable(temporary),
+                    span: left_span,
+                };
+                let mut expanded = arguments.clone();
+                if placeholder_count == 1 {
+                    let placeholder = expanded
+                        .iter_mut()
+                        .find(|argument| argument.placeholder)
+                        .expect("one pipeline placeholder");
+                    placeholder.placeholder = false;
+                    placeholder.value = inserted;
+                } else {
+                    expanded.insert(
+                        0,
+                        LoweredCallArgument {
+                            label: None,
+                            value: inserted,
+                            placeholder: false,
+                            trailing: false,
+                            preceding_call_span: None,
+                            span: left_span,
+                        },
+                    );
+                }
+                let mut compiled =
+                    self.compile_call(callee, type_arguments, &expanded, stage.span)?;
+                compiled.effects = self.union_effects([left.effects, compiled.effects]);
+                compiled.hir.effects = compiled.effects;
+                Ok(compiled)
+            }
             LoweredExprKind::Call {
                 callee,
                 type_arguments,
@@ -3582,6 +6193,11 @@ impl FunctionLowering<'_, '_> {
                 body,
                 expression.span,
             ),
+            LoweredExprKind::ShortClosure { .. } => Err(Diagnostic::new(
+                "E3011",
+                "concise lambda requires one exact expected function type",
+                expression.span,
+            )),
         }
     }
 
@@ -3632,6 +6248,7 @@ impl FunctionLowering<'_, '_> {
                     &right_body,
                     Some(&false_branch),
                     span,
+                    None,
                     Some(compiled_left),
                 )?
             }
@@ -3643,6 +6260,7 @@ impl FunctionLowering<'_, '_> {
                     &true_branch,
                     Some(&false_branch),
                     span,
+                    None,
                     Some(compiled_left),
                 )?
             }
@@ -4535,11 +7153,20 @@ impl FunctionLowering<'_, '_> {
         })
     }
 
-    #[allow(clippy::too_many_lines)]
     pub(super) fn compile_block_value(
         &mut self,
         body: &LoweredBody,
     ) -> Result<(HirExpr, CompiledExpr, bool), Diagnostic> {
+        self.compile_block_value_expected(body, None)
+    }
+
+    #[allow(clippy::too_many_lines)]
+    fn compile_block_value_expected(
+        &mut self,
+        body: &LoweredBody,
+        expected: Option<(&ValueType, &str)>,
+    ) -> Result<(HirExpr, CompiledExpr, bool), Diagnostic> {
+        let outer_local_functions = self.local_functions.clone();
         let mut expressions = Vec::new();
         let mut result = None;
         let mut returns_from_function = false;
@@ -4553,7 +7180,7 @@ impl FunctionLowering<'_, '_> {
                     annotation,
                     value,
                 } => {
-                    if self.bindings.contains_key(name) {
+                    if self.bindings.contains_key(name) || self.local_name_conflicts(name) {
                         return Err(Diagnostic::new(
                             "E3005",
                             format!("duplicate local binding '{name}'"),
@@ -4742,6 +7369,9 @@ impl FunctionLowering<'_, '_> {
                         });
                     }
                 }
+                LoweredStatement::LocalFunction(function) => {
+                    self.compile_local_function_declaration(function)?;
+                }
                 LoweredStatement::Break(span) | LoweredStatement::Continue(span) => {
                     let value = self.compile_loop_control(
                         matches!(statement, LoweredStatement::Break(_)),
@@ -4763,12 +7393,18 @@ impl FunctionLowering<'_, '_> {
         let result = if let Some(result) = result {
             result
         } else if let Some(tail) = &body.tail {
-            self.compile_expression(tail)?
+            match expected {
+                Some((expected, label)) => {
+                    self.compile_contextually_expected(tail, expected, label)?
+                }
+                None => self.compile_expression(tail)?,
+            }
         } else {
-            self.compile_expression(&LoweredExpr {
+            let unit = LoweredExpr {
                 kind: LoweredExprKind::Tuple(Vec::new()),
                 span: body.span,
-            })?
+            };
+            self.compile_expression(&unit)?
         };
         runtime_falls_through &= self.runtime_falls_through(&result);
         if !runtime_falls_through {
@@ -4791,6 +7427,7 @@ impl FunctionLowering<'_, '_> {
             effects,
             body.span,
         );
+        self.local_functions = outer_local_functions;
         Ok((hir, result, returns_from_function))
     }
 
@@ -4880,6 +7517,48 @@ impl FunctionLowering<'_, '_> {
         span: Span,
     ) -> Result<CompiledExpr, Diagnostic> {
         let record = self.compile_expression(record)?;
+        self.compile_field_get_compiled(record, field, field_span, span)
+    }
+
+    fn compile_field_get_compiled(
+        &mut self,
+        record: CompiledExpr,
+        field: &str,
+        field_span: Span,
+        span: Span,
+    ) -> Result<CompiledExpr, Diagnostic> {
+        if let ValueType::Newtype { underlying, .. } = &record.value_type {
+            if field != "value" {
+                return Err(Diagnostic::new(
+                    "E3007",
+                    format!("newtype has no field '{field}'"),
+                    field_span,
+                ));
+            }
+            let value_type = underlying.as_ref().clone();
+            let register = self.allocate(value_type.clone())?;
+            self.code.push(Instruction::NewtypeUnwrap {
+                destination: register,
+                source: record.register,
+            });
+            self.mir.push(MirOperation::NewtypeUnwrap {
+                destination: u32::from(register),
+                source: u32::from(record.register),
+            });
+            let effects = record.effects;
+            return Ok(CompiledExpr {
+                register,
+                value_type: value_type.clone(),
+                effects,
+                hir: self.hir(
+                    HirExprKind::NewtypeUnwrap(Box::new(record.hir)),
+                    None,
+                    &value_type,
+                    effects,
+                    span,
+                ),
+            });
+        }
         let ValueType::Record(layout) = &record.value_type else {
             return Err(Diagnostic::new(
                 "E3007",
@@ -4922,18 +7601,458 @@ impl FunctionLowering<'_, '_> {
         })
     }
 
+    #[allow(clippy::too_many_lines)]
+    fn compile_record_update(
+        &mut self,
+        expression: &LoweredExpr,
+        name: &str,
+        base: &LoweredExpr,
+        spread_span: Span,
+        fields: &[(String, LoweredExpr, Span)],
+    ) -> Result<CompiledExpr, Diagnostic> {
+        let base = self.compile_expression(base)?;
+        let ValueType::Record(_) = &base.value_type else {
+            return Err(Diagnostic::new(
+                "E3007",
+                "record update base must be a record value",
+                spread_span,
+            ));
+        };
+        let expected_type = if name == "$anonymous" {
+            base.value_type.clone()
+        } else {
+            resolve_named_type(
+                &self.global.bundle.modules,
+                &self.global.bundle.types,
+                &self.info.module,
+                name,
+                expression.span,
+            )?
+        };
+        if expected_type != base.value_type {
+            return Err(Diagnostic::new(
+                "E3007",
+                "record update base has a different record type",
+                spread_span,
+            ));
+        }
+        let ValueType::Record(layout) = &expected_type else {
+            return Err(Diagnostic::new(
+                "E3007",
+                "record update target must be a record type",
+                expression.span,
+            ));
+        };
+        let mut replacements = BTreeMap::new();
+        for (field, value, field_span) in fields {
+            if replacements.contains_key(field) {
+                return Err(Diagnostic::new(
+                    "E3007",
+                    format!("duplicate record field '{field}'"),
+                    *field_span,
+                ));
+            }
+            let index = layout
+                .iter()
+                .position(|candidate| candidate.name == *field)
+                .ok_or_else(|| {
+                    Diagnostic::new(
+                        "E3007",
+                        format!("record has no field '{field}'"),
+                        *field_span,
+                    )
+                })?;
+            let compiled =
+                self.compile_expected(value, &layout[index].value_type, "record field")?;
+            replacements.insert(field.clone(), (index, compiled));
+        }
+        let mut compiled_fields = Vec::with_capacity(layout.len());
+        for (index, field) in layout.iter().enumerate() {
+            let value = if let Some((_, value)) = replacements.remove(&field.name) {
+                value
+            } else {
+                self.compile_field_get_compiled(
+                    CompiledExpr {
+                        register: base.register,
+                        value_type: base.value_type.clone(),
+                        effects: base.effects,
+                        hir: base.hir.clone(),
+                    },
+                    &field.name,
+                    spread_span,
+                    expression.span,
+                )?
+            };
+            compiled_fields.push((index, value));
+        }
+        let register = self.allocate(expected_type.clone())?;
+        self.code.push(Instruction::RecordNew {
+            destination: register,
+            fields: compiled_fields
+                .iter()
+                .map(|(index, value)| {
+                    (
+                        u32::try_from(*index).expect("field index fits"),
+                        value.register,
+                    )
+                })
+                .collect(),
+        });
+        self.mir.push(MirOperation::Record {
+            destination: u32::from(register),
+        });
+        let effects = self.union_effects(
+            std::iter::once(base.effects)
+                .chain(compiled_fields.iter().map(|(_, value)| value.effects)),
+        );
+        Ok(CompiledExpr {
+            register,
+            value_type: expected_type.clone(),
+            effects,
+            hir: self.hir(
+                HirExprKind::Record(
+                    compiled_fields
+                        .into_iter()
+                        .map(|(_, value)| value.hir)
+                        .collect(),
+                ),
+                None,
+                &expected_type,
+                effects,
+                expression.span,
+            ),
+        })
+    }
+
+    fn wrap_optional_value(
+        &mut self,
+        value: CompiledExpr,
+        span: Span,
+    ) -> Result<CompiledExpr, Diagnostic> {
+        if matches!(value.value_type, ValueType::Option(_)) {
+            return Ok(value);
+        }
+        let value_type = ValueType::Option(Box::new(value.value_type.clone()));
+        let register = self.allocate(value_type.clone())?;
+        self.code.push(Instruction::EnumNew {
+            destination: register,
+            variant: 1,
+            payload: vec![value.register],
+        });
+        self.mir.push(MirOperation::Enum {
+            destination: u32::from(register),
+        });
+        Ok(CompiledExpr {
+            register,
+            value_type: value_type.clone(),
+            effects: value.effects,
+            hir: self.hir(HirExprKind::Enum, None, &value_type, value.effects, span),
+        })
+    }
+
+    #[allow(clippy::too_many_lines)]
+    fn compile_optional_branch<F>(
+        &mut self,
+        receiver: &LoweredExpr,
+        span: Span,
+        operation: F,
+    ) -> Result<CompiledExpr, Diagnostic>
+    where
+        F: FnOnce(&mut Self, CompiledExpr) -> Result<CompiledExpr, Diagnostic>,
+    {
+        let source = self.compile_expression(receiver)?;
+        let ValueType::Option(payload_type) = source.value_type.clone() else {
+            return Err(Diagnostic::new(
+                "E3007",
+                "optional chain requires an Option value",
+                span,
+            ));
+        };
+        let branch_index = self.code.len();
+        self.code.push(Instruction::Jump { target: 0 });
+        let base = self.next_mir_block();
+        self.mir_blocks.extend((0..=2).map(|_| MirBlock {
+            operations: Vec::new(),
+            terminator: MirTerminator::Unreachable,
+        }));
+        let outer_bindings = self.bindings.clone();
+        let outer_ownership = self.ownership_states.clone();
+        let mut joined_bindings = None;
+        let mut joined_ownership = None;
+        let mut arm_operations = Vec::new();
+        let mut arm_regions = Vec::new();
+        let mut arm_terminals = Vec::new();
+        let mut hir_arms = Vec::new();
+
+        // Compile the Some arm first so its exact result type determines the
+        // local Option type used by the None arm.
+        let some_target = u32::try_from(self.code.len()).expect("instruction index fits");
+        self.bindings = outer_bindings.clone();
+        self.ownership_states = outer_ownership.clone();
+        let payload_register = self.allocate(payload_type.as_ref().clone())?;
+        let payload_name = format!("__allen_optional_payload_{}", self.global.allocate_symbol());
+        let payload_symbol = self.global.allocate_symbol();
+        self.bindings.insert(
+            payload_name.clone(),
+            LocalBinding {
+                register: payload_register,
+                symbol: payload_symbol,
+                value_type: payload_type.as_ref().clone(),
+                scope: self.current_scope(),
+                value_scope: self.current_scope(),
+                mutable: false,
+                moved: false,
+            },
+        );
+        let payload = CompiledExpr {
+            register: payload_register,
+            value_type: payload_type.as_ref().clone(),
+            effects: self.empty_effects(),
+            hir: self.hir(
+                HirExprKind::Variable,
+                Some(payload_symbol),
+                payload_type.as_ref(),
+                self.empty_effects(),
+                span,
+            ),
+        };
+        let region_capture = self.begin_nested_mir_region();
+        let operation_start = self.mir.len();
+        let value = operation(self, payload)?;
+        let value = self.wrap_optional_value(value, span)?;
+        let region = self.finish_nested_mir_region(region_capture);
+        arm_operations.push(self.mir.split_off(operation_start));
+        arm_regions.push(region);
+        arm_terminals.push(None);
+        let operation_effects = value.effects;
+        Self::validate_conditional_branch_state(
+            self,
+            &outer_bindings,
+            &outer_ownership,
+            Some(value.register),
+            span,
+            &mut joined_bindings,
+            &mut joined_ownership,
+        )?;
+        let result_type = value.value_type.clone();
+        let result_register = self.allocate(result_type.clone())?;
+        self.code.push(Instruction::Move {
+            destination: result_register,
+            source: value.register,
+        });
+        self.mir.push(MirOperation::Move {
+            destination: u32::from(result_register),
+            source: u32::from(value.register),
+        });
+        hir_arms.push(value.hir);
+        let some_jump = self.code.len();
+        self.code.push(Instruction::Jump { target: 0 });
+
+        // None constructs a local result and never evaluates anything after
+        // the chain receiver.
+        self.bindings = outer_bindings.clone();
+        self.ownership_states = outer_ownership.clone();
+        let none_target = u32::try_from(self.code.len()).expect("instruction index fits");
+        let none = self.allocate(result_type.clone())?;
+        self.code.push(Instruction::EnumNew {
+            destination: none,
+            variant: 0,
+            payload: Vec::new(),
+        });
+        self.mir.push(MirOperation::Enum {
+            destination: u32::from(none),
+        });
+        self.code.push(Instruction::Move {
+            destination: result_register,
+            source: none,
+        });
+        self.mir.push(MirOperation::Move {
+            destination: u32::from(result_register),
+            source: u32::from(none),
+        });
+        hir_arms.push(self.hir(
+            HirExprKind::Enum,
+            None,
+            &result_type,
+            self.empty_effects(),
+            span,
+        ));
+        arm_operations.push(self.mir.split_off(self.mir.len().saturating_sub(2)));
+        arm_regions.push(CapturedMirRegion::default());
+        arm_terminals.push(None);
+        Self::validate_conditional_branch_state(
+            self,
+            &outer_bindings,
+            &outer_ownership,
+            Some(result_register),
+            span,
+            &mut joined_bindings,
+            &mut joined_ownership,
+        )?;
+        let join = u32::try_from(self.code.len()).expect("instruction index fits");
+        self.code[some_jump] = Instruction::Jump { target: join };
+        self.code[branch_index] = Instruction::SwitchEnum {
+            source: source.register,
+            arms: vec![
+                allen_bytecode::EnumSwitchArm {
+                    variant: 0,
+                    target: none_target,
+                    bindings: Vec::new(),
+                },
+                allen_bytecode::EnumSwitchArm {
+                    variant: 1,
+                    target: some_target,
+                    bindings: vec![payload_register],
+                },
+            ],
+        };
+        let join_block = self.next_mir_block();
+        self.mir_blocks.push(MirBlock {
+            operations: Vec::new(),
+            terminator: MirTerminator::Unreachable,
+        });
+        self.mir_blocks[base as usize - 1] = MirBlock {
+            operations: Vec::new(),
+            terminator: MirTerminator::SwitchEnum {
+                targets: vec![base + 2, base + 1],
+            },
+        };
+        for (arm, ((operations, terminal), region)) in arm_operations
+            .into_iter()
+            .zip(arm_terminals)
+            .zip(arm_regions)
+            .enumerate()
+        {
+            let arm_block = base + 1 + u32::try_from(arm).expect("arm ID fits");
+            self.mir_blocks[arm_block as usize - 1] = MirBlock {
+                operations,
+                terminator: region.entry.map_or(
+                    terminal
+                        .clone()
+                        .unwrap_or(MirTerminator::Goto { target: join_block }),
+                    |target| MirTerminator::Goto { target },
+                ),
+            };
+            if let Some(tail) = region.tail {
+                self.set_mir_handoff(
+                    tail,
+                    terminal.unwrap_or(MirTerminator::Goto { target: join_block }),
+                );
+            }
+        }
+        self.register_mir_region(base, join_block);
+        self.bindings = outer_bindings;
+        if let Some(joined) = joined_bindings {
+            for (name, state) in joined {
+                if let Some(binding) = self.bindings.get_mut(&name) {
+                    binding.moved = state.moved;
+                    binding.value_scope = state.value_scope;
+                }
+            }
+        }
+        if let Some(joined) = joined_ownership {
+            for (register, state) in joined {
+                self.ownership_states.insert(register, state);
+            }
+        }
+        let effects = self.union_effects([source.effects, operation_effects]);
+        Ok(CompiledExpr {
+            register: result_register,
+            value_type: result_type.clone(),
+            effects,
+            hir: self.hir(
+                HirExprKind::Match {
+                    source: Box::new(source.hir),
+                    arms: hir_arms,
+                },
+                None,
+                &result_type,
+                effects,
+                span,
+            ),
+        })
+    }
+
+    fn compile_optional_field_get(
+        &mut self,
+        receiver: &LoweredExpr,
+        field: &str,
+        operator_span: Span,
+        field_span: Span,
+        span: Span,
+    ) -> Result<CompiledExpr, Diagnostic> {
+        self.compile_optional_branch(receiver, operator_span, |this, value| {
+            this.compile_field_get_compiled(value, field, field_span, span)
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn compile_optional_call(
+        &mut self,
+        receiver: &LoweredExpr,
+        field: &str,
+        operator_span: Span,
+        field_span: Span,
+        type_arguments: &[LoweredType],
+        arguments: &[LoweredCallArgument],
+        span: Span,
+    ) -> Result<CompiledExpr, Diagnostic> {
+        self.compile_optional_branch(receiver, operator_span, |this, value| {
+            let receiver_name = format!(
+                "__allen_optional_receiver_{}",
+                this.global.allocate_symbol()
+            );
+            this.bindings.insert(
+                receiver_name.clone(),
+                LocalBinding {
+                    register: value.register,
+                    symbol: this.global.allocate_symbol(),
+                    value_type: value.value_type.clone(),
+                    scope: this.current_scope(),
+                    value_scope: this.sub_agent_value_scope(&value),
+                    mutable: false,
+                    moved: false,
+                },
+            );
+            let callee = LoweredExpr {
+                kind: LoweredExprKind::FieldGet {
+                    record: Box::new(LoweredExpr {
+                        kind: LoweredExprKind::Variable(receiver_name),
+                        span: field_span,
+                    }),
+                    field: field.to_owned(),
+                    field_span,
+                },
+                span,
+            };
+            this.compile_call(&callee, type_arguments, arguments, span)
+        })
+    }
+
     pub(super) fn compile_try(
         &mut self,
         value: &LoweredExpr,
         span: Span,
     ) -> Result<CompiledExpr, Diagnostic> {
         let value = self.compile_expression(value)?;
-        let ValueType::Result(ok, error) = &value.value_type else {
-            return Err(Diagnostic::new(
+        match value.value_type {
+            ValueType::Result(..) => self.compile_try_result(value, span),
+            ValueType::Option(..) => self.compile_try_option(value, span),
+            _ => Err(Diagnostic::new(
                 "E2017",
-                "'?' requires a Result value",
+                "'?' requires a Result or Option value",
                 span,
-            ));
+            )),
+        }
+    }
+
+    fn compile_try_result(
+        &mut self,
+        value: CompiledExpr,
+        span: Span,
+    ) -> Result<CompiledExpr, Diagnostic> {
+        let ValueType::Result(ok, error) = &value.value_type else {
+            unreachable!("result try dispatch checks the operand type")
         };
         let ValueType::Result(_, return_error) = &self.return_type else {
             return Err(Diagnostic::new(
@@ -5009,6 +8128,1858 @@ impl FunctionLowering<'_, '_> {
         })
     }
 
+    fn compile_try_option(
+        &mut self,
+        value: CompiledExpr,
+        span: Span,
+    ) -> Result<CompiledExpr, Diagnostic> {
+        let ValueType::Option(value_type) = &value.value_type else {
+            unreachable!("option try dispatch checks the operand type")
+        };
+        if !matches!(self.return_type, ValueType::Option(_)) {
+            return Err(Diagnostic::new(
+                "E2017",
+                "a function that uses '?' with Option must return Option",
+                span,
+            ));
+        }
+        if self.ownership_states.iter().any(|(register, ownership)| {
+            ownership.state == MirOwnershipState::Live
+                && ownership.must_consume
+                && (matches!(self.registers[*register as usize], ValueType::Future(_))
+                    || ownership.scope == 0)
+        }) {
+            return Err(Diagnostic::new(
+                "E3011",
+                "try none path would discard a live affine obligation",
+                span,
+            ));
+        }
+        let value_type = value_type.as_ref().clone();
+        let register = self.allocate(value_type.clone())?;
+        self.code.push(Instruction::TryOption {
+            destination: register,
+            source: value.register,
+        });
+        let base = self.next_mir_block();
+        let cleanup_operations = self.cleanup_operations(MirCleanupKind::NormalJoin);
+        let some = base + 1;
+        let none = base + 2;
+        let continuation = base + 3;
+        self.mir_blocks.extend([
+            MirBlock {
+                operations: Vec::new(),
+                terminator: MirTerminator::TryOption { some, none },
+            },
+            MirBlock {
+                operations: Vec::new(),
+                terminator: MirTerminator::Goto {
+                    target: continuation,
+                },
+            },
+            MirBlock {
+                operations: cleanup_operations,
+                terminator: MirTerminator::Return {
+                    source: u32::from(value.register),
+                },
+            },
+            MirBlock {
+                operations: Vec::new(),
+                terminator: MirTerminator::Unreachable,
+            },
+        ]);
+        self.register_mir_region(base, continuation);
+        Ok(CompiledExpr {
+            register,
+            value_type: value_type.clone(),
+            effects: value.effects,
+            hir: self.hir(
+                HirExprKind::Try(Box::new(value.hir)),
+                None,
+                &value_type,
+                value.effects,
+                span,
+            ),
+        })
+    }
+
+    fn simple_pattern_binding(
+        pattern: &LoweredPattern,
+        span: Span,
+    ) -> Result<Option<String>, Diagnostic> {
+        match pattern {
+            LoweredPattern::Binding {
+                name,
+                span: binding_span,
+            } => {
+                let _ = binding_span;
+                Ok(Some(name.clone()))
+            }
+            LoweredPattern::Wildcard => Ok(None),
+            LoweredPattern::Range {
+                start,
+                end,
+                inclusive,
+                operator_span,
+            } => {
+                let _ = (start, end, inclusive);
+                Err(Diagnostic::new(
+                    "E3011",
+                    "range patterns are not implemented in this compiler pass",
+                    *operator_span,
+                ))
+            }
+            LoweredPattern::Or { operator_spans, .. } => Err(Diagnostic::new(
+                "E3011",
+                "OR patterns are not implemented in this compiler pass",
+                operator_spans.first().copied().unwrap_or(span),
+            )),
+            _ => Err(Diagnostic::new(
+                "E3011",
+                "nested patterns are not implemented in this compiler pass",
+                span,
+            )),
+        }
+    }
+
+    fn pattern_literal(
+        expression: &LoweredExpr,
+        expected: &ValueType,
+    ) -> Result<PatternLiteralValue, Diagnostic> {
+        let value = match &expression.kind {
+            LoweredExprKind::Int(value) => PatternLiteralValue::Int(*value),
+            LoweredExprKind::String(value) => PatternLiteralValue::String(value.clone()),
+            LoweredExprKind::Bytes(value) => PatternLiteralValue::Bytes(value.clone()),
+            LoweredExprKind::Float(_) => {
+                return Err(Diagnostic::new(
+                    "E3007",
+                    "range-pattern endpoints cannot be Float",
+                    expression.span,
+                ));
+            }
+            _ => {
+                return Err(Diagnostic::new(
+                    "E3007",
+                    "range-pattern endpoints must be compile-time Int, String, or Bytes literals",
+                    expression.span,
+                ));
+            }
+        };
+        let actual = match value {
+            PatternLiteralValue::Int(_) => ValueType::Int,
+            PatternLiteralValue::String(_) => ValueType::String,
+            PatternLiteralValue::Bytes(_) => ValueType::Bytes,
+        };
+        if &actual != expected {
+            return Err(Diagnostic::new(
+                "E3007",
+                format!(
+                    "range-pattern endpoint has type {actual}, but the scrutinee has type {expected}"
+                ),
+                expression.span,
+            ));
+        }
+        Ok(value)
+    }
+
+    fn pattern_interval(
+        pattern: &LoweredPattern,
+        expected: &ValueType,
+    ) -> Result<Option<PatternInterval>, Diagnostic> {
+        let LoweredPattern::Range {
+            start,
+            end,
+            inclusive,
+            operator_span,
+        } = pattern
+        else {
+            return Ok(None);
+        };
+        if !matches!(
+            expected,
+            ValueType::Int | ValueType::String | ValueType::Bytes
+        ) {
+            return Err(Diagnostic::new(
+                "E3007",
+                format!("range pattern cannot match {expected}"),
+                *operator_span,
+            ));
+        }
+        let start = Self::pattern_literal(start, expected)?;
+        let end = Self::pattern_literal(end, expected)?;
+        let ordering = start
+            .compare(&end)
+            .expect("validated endpoints have one exact type");
+        if ordering.is_gt() || ordering.is_eq() && !inclusive {
+            return Err(Diagnostic::new(
+                "E3007",
+                "range pattern is empty",
+                *operator_span,
+            ));
+        }
+        Ok(Some(PatternInterval {
+            start,
+            end,
+            inclusive: *inclusive,
+        }))
+    }
+
+    fn insert_pattern_binding(
+        bindings: &mut BTreeMap<String, ValueType>,
+        name: &str,
+        value_type: &ValueType,
+        span: Span,
+    ) -> Result<(), Diagnostic> {
+        if bindings
+            .insert(name.to_owned(), value_type.clone())
+            .is_some()
+        {
+            return Err(Diagnostic::new(
+                "E3005",
+                format!("duplicate pattern binding '{name}'"),
+                span,
+            ));
+        }
+        Ok(())
+    }
+
+    fn collect_pattern_bindings(
+        &self,
+        pattern: &LoweredPattern,
+        value_type: &ValueType,
+        span: Span,
+    ) -> Result<BTreeMap<String, ValueType>, Diagnostic> {
+        let mut bindings = BTreeMap::new();
+        self.collect_pattern_bindings_into(pattern, value_type, span, &mut bindings)?;
+        Ok(bindings)
+    }
+
+    #[allow(clippy::too_many_lines)]
+    fn collect_pattern_bindings_into(
+        &self,
+        pattern: &LoweredPattern,
+        value_type: &ValueType,
+        span: Span,
+        bindings: &mut BTreeMap<String, ValueType>,
+    ) -> Result<(), Diagnostic> {
+        match pattern {
+            LoweredPattern::Binding {
+                name,
+                span: binding_span,
+            } => Self::insert_pattern_binding(bindings, name, value_type, *binding_span),
+            LoweredPattern::Wildcard => Ok(()),
+            LoweredPattern::Bool(_) if *value_type == ValueType::Bool => Ok(()),
+            LoweredPattern::Range { .. } => {
+                Self::pattern_interval(pattern, value_type)?;
+                Ok(())
+            }
+            LoweredPattern::Or {
+                alternatives,
+                operator_spans,
+            } => {
+                let Some(first) = alternatives.first() else {
+                    return Err(Diagnostic::new(
+                        "E3007",
+                        "OR pattern has no alternatives",
+                        span,
+                    ));
+                };
+                let expected = self.collect_pattern_bindings(first, value_type, span)?;
+                let mut earlier = vec![first];
+                for (index, alternative) in alternatives.iter().enumerate().skip(1) {
+                    let actual = self.collect_pattern_bindings(alternative, value_type, span)?;
+                    if actual != expected {
+                        let mismatch = expected
+                            .keys()
+                            .chain(actual.keys())
+                            .find(|name| expected.get(*name) != actual.get(*name))
+                            .cloned()
+                            .unwrap_or_else(|| "<binding>".to_owned());
+                        let detail = match (expected.get(&mismatch), actual.get(&mismatch)) {
+                            (Some(expected), Some(actual)) => format!(
+                                "binding '{mismatch}' has type {actual}, expected {expected}; OR alternatives must bind the same names, types, and ownership"
+                            ),
+                            (Some(_), None) => format!(
+                                "OR alternative does not bind '{mismatch}'; every alternative must bind the same names, types, and ownership"
+                            ),
+                            (None, Some(_)) => format!(
+                                "OR alternative unexpectedly binds '{mismatch}'; every alternative must bind the same names, types, and ownership"
+                            ),
+                            (None, None) => unreachable!(),
+                        };
+                        return Err(Diagnostic::new(
+                            "E3007",
+                            detail,
+                            operator_spans.get(index - 1).copied().unwrap_or(span),
+                        ));
+                    }
+                    if self.pattern_fully_covered(&earlier, alternative, value_type)? {
+                        return Err(Diagnostic::new(
+                            "E2016",
+                            "OR pattern alternative is unreachable",
+                            operator_spans.get(index - 1).copied().unwrap_or(span),
+                        ));
+                    }
+                    earlier.push(alternative);
+                }
+                for (name, value_type) in expected {
+                    Self::insert_pattern_binding(bindings, &name, &value_type, span)?;
+                }
+                Ok(())
+            }
+            LoweredPattern::Option { some: false, .. }
+                if matches!(value_type, ValueType::Option(_)) =>
+            {
+                Ok(())
+            }
+            LoweredPattern::Option {
+                some: true,
+                payload: Some(payload),
+            } => {
+                let ValueType::Option(payload_type) = value_type else {
+                    return Err(Diagnostic::new(
+                        "E3007",
+                        "option pattern does not match the source type",
+                        span,
+                    ));
+                };
+                self.collect_pattern_bindings_into(payload, payload_type, span, bindings)
+            }
+            LoweredPattern::Result { ok, payload } => {
+                let ValueType::Result(ok_type, error_type) = value_type else {
+                    return Err(Diagnostic::new(
+                        "E3007",
+                        "result pattern does not match the source type",
+                        span,
+                    ));
+                };
+                self.collect_pattern_bindings_into(
+                    payload,
+                    if *ok { ok_type } else { error_type },
+                    span,
+                    bindings,
+                )
+            }
+            LoweredPattern::Enum {
+                name,
+                variant,
+                patterns,
+                fields,
+            } => {
+                let expected = resolve_named_type(
+                    &self.global.bundle.modules,
+                    &self.global.bundle.types,
+                    &self.info.module,
+                    name,
+                    span,
+                )?;
+                if expected != *value_type {
+                    return Err(Diagnostic::new(
+                        "E3007",
+                        "match pattern uses a different nominal enum",
+                        span,
+                    ));
+                }
+                let ValueType::Enum(id) = value_type else {
+                    return Err(Diagnostic::new(
+                        "E3007",
+                        "enum pattern does not match the source type",
+                        span,
+                    ));
+                };
+                let metadata = self.global.bundle.enum_types[*id as usize]
+                    .variants
+                    .iter()
+                    .find(|candidate| candidate.name == *variant)
+                    .ok_or_else(|| {
+                        Diagnostic::new("E3007", format!("unknown enum variant '{variant}'"), span)
+                    })?;
+                match (&metadata.payload, fields) {
+                    (EnumPayloadType::Unit, None) if patterns.is_empty() => Ok(()),
+                    (EnumPayloadType::Tuple(types), None) if types.len() == patterns.len() => {
+                        for (pattern, value_type) in patterns.iter().zip(types) {
+                            self.collect_pattern_bindings_into(
+                                pattern, value_type, span, bindings,
+                            )?;
+                        }
+                        Ok(())
+                    }
+                    (EnumPayloadType::Record(types), Some(fields))
+                        if types.len() == fields.len() =>
+                    {
+                        let supplied = fields
+                            .iter()
+                            .map(|(name, _, _)| name)
+                            .collect::<BTreeSet<_>>();
+                        if supplied.len() != fields.len()
+                            || types.iter().any(|field| !supplied.contains(&field.name))
+                        {
+                            return Err(Diagnostic::new(
+                                "E3007",
+                                "enum record pattern must contain every field exactly once",
+                                span,
+                            ));
+                        }
+                        for field in types {
+                            let (_, field_span, pattern) = fields
+                                .iter()
+                                .find(|(name, _, _)| *name == field.name)
+                                .expect("validated enum record field");
+                            self.collect_pattern_bindings_into(
+                                pattern,
+                                &field.value_type,
+                                *field_span,
+                                bindings,
+                            )?;
+                        }
+                        Ok(())
+                    }
+                    _ => Err(Diagnostic::new(
+                        "E3007",
+                        "enum pattern uses the wrong payload form or count",
+                        span,
+                    )),
+                }
+            }
+            LoweredPattern::Record { name, fields } => {
+                let expected = resolve_named_type(
+                    &self.global.bundle.modules,
+                    &self.global.bundle.types,
+                    &self.info.module,
+                    name,
+                    span,
+                )?;
+                if expected != *value_type {
+                    return Err(Diagnostic::new(
+                        "E3007",
+                        "record pattern has a different structural type",
+                        span,
+                    ));
+                }
+                let ValueType::Record(layout) = value_type else {
+                    return Err(Diagnostic::new(
+                        "E3007",
+                        "record pattern does not match the source type",
+                        span,
+                    ));
+                };
+                if fields.len() != layout.len() {
+                    return Err(Diagnostic::new(
+                        "E3007",
+                        "record pattern must contain exactly the declared fields",
+                        span,
+                    ));
+                }
+                let mut seen = BTreeSet::new();
+                for (field, field_span, pattern) in fields {
+                    if !seen.insert(field) {
+                        return Err(Diagnostic::new(
+                            "E3007",
+                            format!("duplicate record pattern field '{field}'"),
+                            *field_span,
+                        ));
+                    }
+                    let field_type = layout
+                        .iter()
+                        .find(|candidate| candidate.name == *field)
+                        .map(|field| &field.value_type)
+                        .ok_or_else(|| {
+                            Diagnostic::new(
+                                "E3007",
+                                format!("record pattern has no field '{field}'"),
+                                *field_span,
+                            )
+                        })?;
+                    self.collect_pattern_bindings_into(pattern, field_type, *field_span, bindings)?;
+                }
+                Ok(())
+            }
+            _ => Err(Diagnostic::new(
+                "E3007",
+                "match pattern does not match the source type",
+                span,
+            )),
+        }
+    }
+
+    fn pattern_uses_decision_lowering(pattern: &LoweredPattern) -> bool {
+        match pattern {
+            LoweredPattern::Range { .. } | LoweredPattern::Or { .. } => true,
+            LoweredPattern::Record { fields, .. } => fields
+                .iter()
+                .any(|(_, _, pattern)| Self::pattern_uses_decision_lowering(pattern)),
+            LoweredPattern::Enum {
+                patterns, fields, ..
+            } => {
+                patterns.iter().any(Self::pattern_uses_decision_lowering)
+                    || fields.as_ref().is_some_and(|fields| {
+                        fields
+                            .iter()
+                            .any(|(_, _, pattern)| Self::pattern_uses_decision_lowering(pattern))
+                    })
+            }
+            LoweredPattern::Option { payload, .. } => payload
+                .as_deref()
+                .is_some_and(Self::pattern_uses_decision_lowering),
+            LoweredPattern::Result { payload, .. } => Self::pattern_uses_decision_lowering(payload),
+            LoweredPattern::Binding { .. } | LoweredPattern::Wildcard | LoweredPattern::Bool(_) => {
+                false
+            }
+        }
+    }
+
+    fn flattened_alternatives<'a>(
+        pattern: &'a LoweredPattern,
+        output: &mut Vec<&'a LoweredPattern>,
+    ) {
+        if let LoweredPattern::Or { alternatives, .. } = pattern {
+            for alternative in alternatives {
+                Self::flattened_alternatives(alternative, output);
+            }
+        } else {
+            output.push(pattern);
+        }
+    }
+
+    fn pattern_is_irrefutable(pattern: &LoweredPattern) -> bool {
+        match pattern {
+            LoweredPattern::Binding { .. } | LoweredPattern::Wildcard => true,
+            LoweredPattern::Or { alternatives, .. } => {
+                alternatives.iter().any(Self::pattern_is_irrefutable)
+            }
+            LoweredPattern::Record { fields, .. } => fields
+                .iter()
+                .all(|(_, _, pattern)| Self::pattern_is_irrefutable(pattern)),
+            _ => false,
+        }
+    }
+
+    fn interval_covers(intervals: &[PatternInterval], target: &PatternInterval) -> bool {
+        let mut intervals = intervals.to_vec();
+        intervals.sort_by(|left, right| {
+            left.start
+                .compare(&right.start)
+                .expect("range intervals have one exact type")
+        });
+        let mut cursor = target.start.clone();
+        for interval in intervals {
+            let end_to_cursor = interval
+                .end
+                .compare(&cursor)
+                .expect("range intervals have one exact type");
+            if end_to_cursor.is_lt() || end_to_cursor.is_eq() && !interval.inclusive {
+                continue;
+            }
+            if interval
+                .start
+                .compare(&cursor)
+                .expect("range intervals have one exact type")
+                .is_gt()
+            {
+                return false;
+            }
+            let end_to_target = interval
+                .end
+                .compare(&target.end)
+                .expect("range intervals have one exact type");
+            if end_to_target.is_gt()
+                || end_to_target.is_eq() && (interval.inclusive || !target.inclusive)
+            {
+                return true;
+            }
+            cursor = if interval.inclusive {
+                match interval.end {
+                    PatternLiteralValue::Int(value) => {
+                        let Some(value) = value.checked_add(1) else {
+                            return true;
+                        };
+                        PatternLiteralValue::Int(value)
+                    }
+                    PatternLiteralValue::String(mut value) => {
+                        value.push('\0');
+                        PatternLiteralValue::String(value)
+                    }
+                    PatternLiteralValue::Bytes(mut value) => {
+                        value.push(0);
+                        PatternLiteralValue::Bytes(value)
+                    }
+                }
+            } else {
+                interval.end
+            };
+            if !target.inclusive
+                && cursor
+                    .compare(&target.end)
+                    .expect("range intervals have one exact type")
+                    .is_eq()
+            {
+                return true;
+            }
+        }
+        false
+    }
+
+    #[allow(clippy::too_many_lines)]
+    fn patterns_equivalent(left: &LoweredPattern, right: &LoweredPattern) -> bool {
+        match (left, right) {
+            (LoweredPattern::Wildcard, LoweredPattern::Wildcard)
+            | (LoweredPattern::Binding { .. }, LoweredPattern::Binding { .. }) => true,
+            (LoweredPattern::Bool(left), LoweredPattern::Bool(right)) => left == right,
+            (
+                LoweredPattern::Range {
+                    start: left_start,
+                    end: left_end,
+                    inclusive: left_inclusive,
+                    ..
+                },
+                LoweredPattern::Range {
+                    start: right_start,
+                    end: right_end,
+                    inclusive: right_inclusive,
+                    ..
+                },
+            ) => {
+                left_inclusive == right_inclusive
+                    && Self::literal_expressions_equal(left_start, right_start)
+                    && Self::literal_expressions_equal(left_end, right_end)
+            }
+            (
+                LoweredPattern::Option {
+                    some: left_some,
+                    payload: left_payload,
+                },
+                LoweredPattern::Option {
+                    some: right_some,
+                    payload: right_payload,
+                },
+            ) => {
+                left_some == right_some
+                    && match (left_payload, right_payload) {
+                        (None, None) => true,
+                        (Some(left), Some(right)) => Self::patterns_equivalent(left, right),
+                        _ => false,
+                    }
+            }
+            (
+                LoweredPattern::Result {
+                    ok: left_ok,
+                    payload: left_payload,
+                },
+                LoweredPattern::Result {
+                    ok: right_ok,
+                    payload: right_payload,
+                },
+            ) => left_ok == right_ok && Self::patterns_equivalent(left_payload, right_payload),
+            (
+                LoweredPattern::Enum {
+                    name: left_name,
+                    variant: left_variant,
+                    patterns: left_patterns,
+                    fields: left_fields,
+                },
+                LoweredPattern::Enum {
+                    name: right_name,
+                    variant: right_variant,
+                    patterns: right_patterns,
+                    fields: right_fields,
+                },
+            ) => {
+                left_name == right_name
+                    && left_variant == right_variant
+                    && left_patterns.len() == right_patterns.len()
+                    && left_patterns
+                        .iter()
+                        .zip(right_patterns)
+                        .all(|(left, right)| Self::patterns_equivalent(left, right))
+                    && match (left_fields, right_fields) {
+                        (None, None) => true,
+                        (Some(left), Some(right)) if left.len() == right.len() => left
+                            .iter()
+                            .zip(right)
+                            .all(|((left_name, _, left), (right_name, _, right))| {
+                                left_name == right_name && Self::patterns_equivalent(left, right)
+                            }),
+                        _ => false,
+                    }
+            }
+            (
+                LoweredPattern::Record {
+                    name: left_name,
+                    fields: left_fields,
+                },
+                LoweredPattern::Record {
+                    name: right_name,
+                    fields: right_fields,
+                },
+            ) => {
+                left_name == right_name
+                    && left_fields.len() == right_fields.len()
+                    && left_fields.iter().all(|(left_name, _, left)| {
+                        right_fields.iter().any(|(right_name, _, right)| {
+                            left_name == right_name && Self::patterns_equivalent(left, right)
+                        })
+                    })
+            }
+            (
+                LoweredPattern::Or {
+                    alternatives: left, ..
+                },
+                right,
+            ) => left
+                .iter()
+                .any(|left| Self::patterns_equivalent(left, right)),
+            (
+                left,
+                LoweredPattern::Or {
+                    alternatives: right,
+                    ..
+                },
+            ) => right
+                .iter()
+                .all(|right| Self::patterns_equivalent(left, right)),
+            _ => false,
+        }
+    }
+
+    fn literal_expressions_equal(left: &LoweredExpr, right: &LoweredExpr) -> bool {
+        match (&left.kind, &right.kind) {
+            (LoweredExprKind::Int(left), LoweredExprKind::Int(right)) => left == right,
+            (LoweredExprKind::String(left), LoweredExprKind::String(right)) => left == right,
+            (LoweredExprKind::Bytes(left), LoweredExprKind::Bytes(right)) => left == right,
+            (LoweredExprKind::Float(left), LoweredExprKind::Float(right)) => left == right,
+            _ => false,
+        }
+    }
+
+    #[allow(clippy::too_many_lines)]
+    fn pattern_fully_covered(
+        &self,
+        earlier: &[&LoweredPattern],
+        target: &LoweredPattern,
+        value_type: &ValueType,
+    ) -> Result<bool, Diagnostic> {
+        let mut expanded_earlier = Vec::new();
+        for pattern in earlier {
+            Self::flattened_alternatives(pattern, &mut expanded_earlier);
+        }
+        let earlier = expanded_earlier.as_slice();
+        if earlier
+            .iter()
+            .any(|pattern| Self::pattern_is_irrefutable(pattern))
+        {
+            return Ok(true);
+        }
+        if let LoweredPattern::Or { alternatives, .. } = target {
+            return alternatives.iter().try_fold(true, |covered, alternative| {
+                Ok(covered && self.pattern_fully_covered(earlier, alternative, value_type)?)
+            });
+        }
+        if let Some(target) = Self::pattern_interval(target, value_type)? {
+            let intervals = earlier
+                .iter()
+                .filter_map(|pattern| Self::pattern_interval(pattern, value_type).transpose())
+                .collect::<Result<Vec<_>, _>>()?;
+            return Ok(Self::interval_covers(&intervals, &target));
+        }
+        if let (ValueType::Option(payload_type), LoweredPattern::Option { some, payload }) =
+            (value_type, target)
+        {
+            if !some {
+                return Ok(earlier
+                    .iter()
+                    .any(|pattern| matches!(pattern, LoweredPattern::Option { some: false, .. })));
+            }
+            let Some(payload) = payload.as_deref() else {
+                return Ok(false);
+            };
+            let payloads = earlier
+                .iter()
+                .filter_map(|pattern| match pattern {
+                    LoweredPattern::Option {
+                        some: true,
+                        payload: Some(payload),
+                    } => Some(payload.as_ref()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            return self.pattern_fully_covered(&payloads, payload, payload_type);
+        }
+        if let (ValueType::Result(ok_type, error_type), LoweredPattern::Result { ok, payload }) =
+            (value_type, target)
+        {
+            let payloads = earlier
+                .iter()
+                .filter_map(|pattern| match pattern {
+                    LoweredPattern::Result {
+                        ok: earlier_ok,
+                        payload,
+                    } if earlier_ok == ok => Some(payload.as_ref()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            return self.pattern_fully_covered(
+                &payloads,
+                payload,
+                if *ok { ok_type } else { error_type },
+            );
+        }
+        if let (
+            ValueType::Enum(id),
+            LoweredPattern::Enum {
+                variant,
+                patterns,
+                fields,
+                ..
+            },
+        ) = (value_type, target)
+        {
+            let metadata = self.global.bundle.enum_types[*id as usize]
+                .variants
+                .iter()
+                .find(|candidate| candidate.name == *variant)
+                .expect("enum pattern was validated before usefulness");
+            let matching = earlier
+                .iter()
+                .filter(|pattern| {
+                    matches!(pattern, LoweredPattern::Enum { variant: earlier, .. } if earlier == variant)
+                })
+                .copied()
+                .collect::<Vec<_>>();
+            return match (&metadata.payload, fields) {
+                (EnumPayloadType::Unit, None) => Ok(!matching.is_empty()),
+                (EnumPayloadType::Tuple(types), None) if types.len() == patterns.len() => {
+                    Ok(matching.iter().any(|earlier| {
+                        let LoweredPattern::Enum {
+                            patterns: earlier, ..
+                        } = earlier
+                        else {
+                            unreachable!()
+                        };
+                        earlier.len() == patterns.len()
+                            && earlier.iter().zip(patterns).zip(types).all(
+                                |((earlier, target), value_type)| {
+                                    self.pattern_fully_covered(&[earlier], target, value_type)
+                                        .unwrap_or(false)
+                                },
+                            )
+                    }))
+                }
+                (EnumPayloadType::Record(types), Some(fields)) => {
+                    Ok(matching.iter().any(|earlier| {
+                        let LoweredPattern::Enum {
+                            fields: Some(earlier),
+                            ..
+                        } = earlier
+                        else {
+                            return false;
+                        };
+                        types.iter().all(|field| {
+                            let target = fields
+                                .iter()
+                                .find(|(name, _, _)| *name == field.name)
+                                .map(|(_, _, pattern)| pattern.as_ref());
+                            let earlier = earlier
+                                .iter()
+                                .find(|(name, _, _)| *name == field.name)
+                                .map(|(_, _, pattern)| pattern.as_ref());
+                            match (earlier, target) {
+                                (Some(earlier), Some(target)) => self
+                                    .pattern_fully_covered(&[earlier], target, &field.value_type)
+                                    .unwrap_or(false),
+                                _ => false,
+                            }
+                        })
+                    }))
+                }
+                _ => Ok(false),
+            };
+        }
+        if let (
+            ValueType::Record(layout),
+            LoweredPattern::Record {
+                name: target_name,
+                fields: target_fields,
+            },
+        ) = (value_type, target)
+        {
+            let matching = earlier
+                .iter()
+                .filter_map(|pattern| match pattern {
+                    LoweredPattern::Record { name, fields } if name == target_name => Some(fields),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            if layout.len() == 1 {
+                let field = &layout[0];
+                let target = target_fields
+                    .iter()
+                    .find(|(name, _, _)| *name == field.name)
+                    .map(|(_, _, pattern)| pattern.as_ref())
+                    .expect("record pattern was validated before usefulness");
+                let earlier = matching
+                    .iter()
+                    .filter_map(|fields| {
+                        fields
+                            .iter()
+                            .find(|(name, _, _)| *name == field.name)
+                            .map(|(_, _, pattern)| pattern.as_ref())
+                    })
+                    .collect::<Vec<_>>();
+                return self.pattern_fully_covered(&earlier, target, &field.value_type);
+            }
+        }
+        Ok(earlier.iter().any(|pattern| match (*pattern, target) {
+            (LoweredPattern::Bool(left), LoweredPattern::Bool(right)) => left == right,
+            (
+                LoweredPattern::Option {
+                    some: left_some,
+                    payload: left_payload,
+                },
+                LoweredPattern::Option {
+                    some: right_some,
+                    payload: right_payload,
+                },
+            ) if left_some == right_some => match (left_payload, right_payload) {
+                (None, None) => true,
+                (Some(left), Some(right)) => {
+                    Self::pattern_is_irrefutable(left) || Self::patterns_equivalent(left, right)
+                }
+                _ => false,
+            },
+            (
+                LoweredPattern::Result {
+                    ok: left_ok,
+                    payload: left_payload,
+                },
+                LoweredPattern::Result {
+                    ok: right_ok,
+                    payload: right_payload,
+                },
+            ) => {
+                left_ok == right_ok
+                    && (Self::pattern_is_irrefutable(left_payload)
+                        || Self::patterns_equivalent(left_payload, right_payload))
+            }
+            (
+                LoweredPattern::Enum {
+                    name: left_name,
+                    variant: left_variant,
+                    patterns: left_patterns,
+                    fields: left_fields,
+                },
+                LoweredPattern::Enum {
+                    name: right_name,
+                    variant: right_variant,
+                    patterns: _,
+                    fields: _,
+                },
+            ) => {
+                left_name == right_name
+                    && left_variant == right_variant
+                    && (left_patterns.iter().all(Self::pattern_is_irrefutable)
+                        && left_fields.as_ref().is_none_or(|fields| {
+                            fields
+                                .iter()
+                                .all(|(_, _, pattern)| Self::pattern_is_irrefutable(pattern))
+                        })
+                        || Self::patterns_equivalent(pattern, target))
+            }
+            _ => Self::patterns_equivalent(pattern, target),
+        }))
+    }
+
+    #[allow(clippy::too_many_lines)]
+    fn advanced_patterns_are_exhaustive(
+        &self,
+        alternatives: &[&LoweredPattern],
+        value_type: &ValueType,
+    ) -> Result<bool, Diagnostic> {
+        let mut expanded_alternatives = Vec::new();
+        for pattern in alternatives {
+            Self::flattened_alternatives(pattern, &mut expanded_alternatives);
+        }
+        let alternatives = expanded_alternatives.as_slice();
+        if alternatives
+            .iter()
+            .any(|pattern| Self::pattern_is_irrefutable(pattern))
+        {
+            return Ok(true);
+        }
+        match value_type {
+            ValueType::Int => Ok(Self::pattern_interval(
+                &LoweredPattern::Range {
+                    start: LoweredExpr {
+                        kind: LoweredExprKind::Int(i64::MIN),
+                        span: Span { start: 0, end: 0 },
+                    },
+                    end: LoweredExpr {
+                        kind: LoweredExprKind::Int(i64::MAX),
+                        span: Span { start: 0, end: 0 },
+                    },
+                    inclusive: true,
+                    operator_span: Span { start: 0, end: 0 },
+                },
+                value_type,
+            )?
+            .is_some_and(|target| {
+                let intervals = alternatives
+                    .iter()
+                    .filter_map(|pattern| {
+                        Self::pattern_interval(pattern, value_type).ok().flatten()
+                    })
+                    .collect::<Vec<_>>();
+                Self::interval_covers(&intervals, &target)
+            })),
+            ValueType::Bool => Ok([false, true].into_iter().all(|value| {
+                alternatives.iter().any(
+                    |pattern| matches!(pattern, LoweredPattern::Bool(actual) if *actual == value),
+                )
+            })),
+            ValueType::Option(payload_type) => {
+                let none = alternatives
+                    .iter()
+                    .any(|pattern| matches!(pattern, LoweredPattern::Option { some: false, .. }));
+                let some = alternatives
+                    .iter()
+                    .filter_map(|pattern| match pattern {
+                        LoweredPattern::Option {
+                            some: true,
+                            payload: Some(payload),
+                        } => Some(payload.as_ref()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>();
+                Ok(none && self.advanced_patterns_are_exhaustive(&some, payload_type)?)
+            }
+            ValueType::Result(ok_type, error_type) => {
+                let ok = alternatives
+                    .iter()
+                    .filter_map(|pattern| match pattern {
+                        LoweredPattern::Result { ok: true, payload } => Some(payload.as_ref()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>();
+                let error = alternatives
+                    .iter()
+                    .filter_map(|pattern| match pattern {
+                        LoweredPattern::Result { ok: false, payload } => Some(payload.as_ref()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>();
+                Ok(self.advanced_patterns_are_exhaustive(&ok, ok_type)?
+                    && self.advanced_patterns_are_exhaustive(&error, error_type)?)
+            }
+            ValueType::Enum(id) => {
+                for variant in &self.global.bundle.enum_types[*id as usize].variants {
+                    let matching = alternatives
+                        .iter()
+                        .filter_map(|pattern| match pattern {
+                            LoweredPattern::Enum {
+                                variant: actual,
+                                patterns,
+                                fields,
+                                ..
+                            } if *actual == variant.name => Some((patterns, fields)),
+                            _ => None,
+                        })
+                        .collect::<Vec<_>>();
+                    let covered = match &variant.payload {
+                        EnumPayloadType::Unit => !matching.is_empty(),
+                        EnumPayloadType::Tuple(types) if types.len() == 1 => {
+                            let payloads = matching
+                                .iter()
+                                .filter_map(|(patterns, _)| patterns.first())
+                                .collect::<Vec<_>>();
+                            self.advanced_patterns_are_exhaustive(&payloads, &types[0])?
+                        }
+                        EnumPayloadType::Record(fields) if fields.len() == 1 => {
+                            let field = &fields[0];
+                            let payloads = matching
+                                .iter()
+                                .filter_map(|(_, pattern_fields)| {
+                                    pattern_fields.as_ref()?.iter().find_map(
+                                        |(name, _, pattern)| {
+                                            (name == &field.name).then_some(pattern.as_ref())
+                                        },
+                                    )
+                                })
+                                .collect::<Vec<_>>();
+                            self.advanced_patterns_are_exhaustive(&payloads, &field.value_type)?
+                        }
+                        _ => matching.iter().any(|(patterns, fields)| {
+                            patterns.iter().all(Self::pattern_is_irrefutable)
+                                && fields.as_ref().is_none_or(|fields| {
+                                    fields.iter().all(|(_, _, pattern)| {
+                                        Self::pattern_is_irrefutable(pattern)
+                                    })
+                                })
+                        }),
+                    };
+                    if !covered {
+                        return Ok(false);
+                    }
+                }
+                Ok(true)
+            }
+            ValueType::Record(layout) if layout.len() == 1 => {
+                let field = &layout[0];
+                let payloads = alternatives
+                    .iter()
+                    .filter_map(|pattern| match pattern {
+                        LoweredPattern::Record { fields, .. } => {
+                            fields.iter().find_map(|(name, _, pattern)| {
+                                (name == &field.name).then_some(pattern.as_ref())
+                            })
+                        }
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>();
+                self.advanced_patterns_are_exhaustive(&payloads, &field.value_type)
+            }
+            ValueType::Record(_) => Ok(alternatives.iter().any(|pattern| match pattern {
+                LoweredPattern::Record { fields, .. } => fields
+                    .iter()
+                    .all(|(_, _, pattern)| Self::pattern_is_irrefutable(pattern)),
+                _ => false,
+            })),
+            _ => Ok(false),
+        }
+    }
+
+    fn pattern_body(expression: LoweredExpr, span: Span) -> LoweredBody {
+        LoweredBody {
+            statements: Vec::new(),
+            tail: Some(expression),
+            span,
+        }
+    }
+
+    fn pattern_if(
+        condition: LoweredExpr,
+        success: LoweredExpr,
+        failure: LoweredExpr,
+        span: Span,
+    ) -> LoweredExpr {
+        LoweredExpr {
+            kind: LoweredExprKind::If {
+                condition: Box::new(condition),
+                then_body: Box::new(Self::pattern_body(success, span)),
+                else_branch: Some(LoweredElse::Body(Box::new(Self::pattern_body(
+                    failure, span,
+                )))),
+            },
+            span,
+        }
+    }
+
+    fn internal_pattern_failure(span: Span) -> LoweredExpr {
+        let reason = LoweredExpr {
+            kind: LoweredExprKind::String("internal non-exhaustive pattern decision".to_owned()),
+            span,
+        };
+        LoweredExpr {
+            kind: LoweredExprKind::Call {
+                callee: Box::new(LoweredExpr {
+                    kind: LoweredExprKind::Variable("fail".to_owned()),
+                    span,
+                }),
+                type_arguments: Vec::new(),
+                arguments: vec![LoweredCallArgument {
+                    label: None,
+                    value: reason,
+                    placeholder: false,
+                    trailing: false,
+                    preceding_call_span: None,
+                    span,
+                }],
+            },
+            span,
+        }
+    }
+
+    fn generated_pattern_name(counter: &mut usize) -> String {
+        let name = format!("$pattern_payload_{}", *counter);
+        *counter += 1;
+        name
+    }
+
+    #[allow(clippy::too_many_lines)]
+    fn pattern_decision_expression(
+        pattern: &LoweredPattern,
+        source: LoweredExpr,
+        success: LoweredExpr,
+        failure: LoweredExpr,
+        span: Span,
+        counter: &mut usize,
+    ) -> LoweredExpr {
+        match pattern {
+            LoweredPattern::Binding {
+                name,
+                span: name_span,
+            } => LoweredExpr {
+                kind: LoweredExprKind::If {
+                    condition: Box::new(LoweredExpr {
+                        kind: LoweredExprKind::Bool(true),
+                        span,
+                    }),
+                    then_body: Box::new(LoweredBody {
+                        statements: vec![LoweredStatement::Let {
+                            name: name.clone(),
+                            name_span: *name_span,
+                            mutable: false,
+                            annotation: None,
+                            value: source,
+                        }],
+                        tail: Some(success),
+                        span,
+                    }),
+                    else_branch: Some(LoweredElse::Body(Box::new(Self::pattern_body(
+                        failure, span,
+                    )))),
+                },
+                span,
+            },
+            LoweredPattern::Wildcard => success,
+            LoweredPattern::Bool(value) => {
+                let condition = LoweredExpr {
+                    kind: LoweredExprKind::Binary {
+                        operation: Binary::Equal,
+                        left: Box::new(source),
+                        right: Box::new(LoweredExpr {
+                            kind: LoweredExprKind::Bool(*value),
+                            span,
+                        }),
+                    },
+                    span,
+                };
+                Self::pattern_if(condition, success, failure, span)
+            }
+            LoweredPattern::Range {
+                start,
+                end,
+                inclusive,
+                ..
+            } => {
+                let lower = LoweredExpr {
+                    kind: LoweredExprKind::Binary {
+                        operation: Binary::LessEqual,
+                        left: Box::new(start.clone()),
+                        right: Box::new(source.clone()),
+                    },
+                    span,
+                };
+                let upper = LoweredExpr {
+                    kind: LoweredExprKind::Binary {
+                        operation: if *inclusive {
+                            Binary::LessEqual
+                        } else {
+                            Binary::Less
+                        },
+                        left: Box::new(source),
+                        right: Box::new(end.clone()),
+                    },
+                    span,
+                };
+                let condition = LoweredExpr {
+                    kind: LoweredExprKind::Binary {
+                        operation: Binary::And,
+                        left: Box::new(lower),
+                        right: Box::new(upper),
+                    },
+                    span,
+                };
+                Self::pattern_if(condition, success, failure, span)
+            }
+            LoweredPattern::Or { alternatives, .. } => {
+                alternatives
+                    .iter()
+                    .rev()
+                    .fold(failure, |failure, alternative| {
+                        Self::pattern_decision_expression(
+                            alternative,
+                            source.clone(),
+                            success.clone(),
+                            failure,
+                            span,
+                            counter,
+                        )
+                    })
+            }
+            LoweredPattern::Option { some, payload } => {
+                let (outer_pattern, nested_success) = if *some {
+                    let name = Self::generated_pattern_name(counter);
+                    let nested_success = payload.as_deref().map_or_else(
+                        || success.clone(),
+                        |payload| {
+                            Self::pattern_decision_expression(
+                                payload,
+                                LoweredExpr {
+                                    kind: LoweredExprKind::Variable(name.clone()),
+                                    span,
+                                },
+                                success.clone(),
+                                failure.clone(),
+                                span,
+                                counter,
+                            )
+                        },
+                    );
+                    (
+                        LoweredPattern::Option {
+                            some: true,
+                            payload: Some(Box::new(LoweredPattern::Binding { name, span })),
+                        },
+                        nested_success,
+                    )
+                } else {
+                    (
+                        LoweredPattern::Option {
+                            some: false,
+                            payload: None,
+                        },
+                        success,
+                    )
+                };
+                LoweredExpr {
+                    kind: LoweredExprKind::Match {
+                        source: Box::new(source),
+                        arms: vec![
+                            (outer_pattern, nested_success, span),
+                            (LoweredPattern::Wildcard, failure, span),
+                        ],
+                    },
+                    span,
+                }
+            }
+            LoweredPattern::Result { ok, payload } => {
+                let name = Self::generated_pattern_name(counter);
+                let nested_success = Self::pattern_decision_expression(
+                    payload,
+                    LoweredExpr {
+                        kind: LoweredExprKind::Variable(name.clone()),
+                        span,
+                    },
+                    success,
+                    failure.clone(),
+                    span,
+                    counter,
+                );
+                LoweredExpr {
+                    kind: LoweredExprKind::Match {
+                        source: Box::new(source),
+                        arms: vec![
+                            (
+                                LoweredPattern::Result {
+                                    ok: *ok,
+                                    payload: Box::new(LoweredPattern::Binding { name, span }),
+                                },
+                                nested_success,
+                                span,
+                            ),
+                            (LoweredPattern::Wildcard, failure, span),
+                        ],
+                    },
+                    span,
+                }
+            }
+            LoweredPattern::Enum {
+                name,
+                variant,
+                patterns,
+                fields,
+            } => {
+                let mut nested = success;
+                let outer = if let Some(fields) = fields {
+                    let mut generated = Vec::new();
+                    for (field, field_span, pattern) in fields.iter().rev() {
+                        let binding = Self::generated_pattern_name(counter);
+                        nested = Self::pattern_decision_expression(
+                            pattern,
+                            LoweredExpr {
+                                kind: LoweredExprKind::Variable(binding.clone()),
+                                span: *field_span,
+                            },
+                            nested,
+                            failure.clone(),
+                            *field_span,
+                            counter,
+                        );
+                        generated.push((
+                            field.clone(),
+                            *field_span,
+                            Box::new(LoweredPattern::Binding {
+                                name: binding,
+                                span: *field_span,
+                            }),
+                        ));
+                    }
+                    generated.reverse();
+                    LoweredPattern::Enum {
+                        name: name.clone(),
+                        variant: variant.clone(),
+                        patterns: Vec::new(),
+                        fields: Some(generated),
+                    }
+                } else {
+                    let mut generated = Vec::new();
+                    for pattern in patterns.iter().rev() {
+                        let binding = Self::generated_pattern_name(counter);
+                        nested = Self::pattern_decision_expression(
+                            pattern,
+                            LoweredExpr {
+                                kind: LoweredExprKind::Variable(binding.clone()),
+                                span,
+                            },
+                            nested,
+                            failure.clone(),
+                            span,
+                            counter,
+                        );
+                        generated.push(LoweredPattern::Binding {
+                            name: binding,
+                            span,
+                        });
+                    }
+                    generated.reverse();
+                    LoweredPattern::Enum {
+                        name: name.clone(),
+                        variant: variant.clone(),
+                        patterns: generated,
+                        fields: None,
+                    }
+                };
+                LoweredExpr {
+                    kind: LoweredExprKind::Match {
+                        source: Box::new(source),
+                        arms: vec![
+                            (outer, nested, span),
+                            (LoweredPattern::Wildcard, failure, span),
+                        ],
+                    },
+                    span,
+                }
+            }
+            LoweredPattern::Record { name: _, fields } => {
+                fields
+                    .iter()
+                    .rev()
+                    .fold(success, |nested, (field, field_span, pattern)| {
+                        Self::pattern_decision_expression(
+                            pattern,
+                            LoweredExpr {
+                                kind: LoweredExprKind::FieldGet {
+                                    record: Box::new(source.clone()),
+                                    field: field.clone(),
+                                    field_span: *field_span,
+                                },
+                                span: *field_span,
+                            },
+                            nested,
+                            failure.clone(),
+                            *field_span,
+                            counter,
+                        )
+                    })
+            }
+        }
+    }
+
+    fn compile_advanced_match(
+        &mut self,
+        source: CompiledExpr,
+        arms: &[(LoweredPattern, LoweredExpr, Span)],
+        span: Span,
+        expected: Option<(&ValueType, &str)>,
+    ) -> Result<CompiledExpr, Diagnostic> {
+        let name = format!("$pattern_source_{}_{}", span.start, span.end);
+        let source_expression = LoweredExpr {
+            kind: LoweredExprKind::Variable(name.clone()),
+            span,
+        };
+        let mut counter = 0;
+        let mut decision = Self::internal_pattern_failure(span);
+        for (pattern, body, pattern_span) in arms.iter().rev() {
+            decision = Self::pattern_decision_expression(
+                pattern,
+                source_expression.clone(),
+                body.clone(),
+                decision,
+                *pattern_span,
+                &mut counter,
+            );
+        }
+        let previous = self.bindings.insert(
+            name.clone(),
+            LocalBinding {
+                register: source.register,
+                symbol: self.global.allocate_symbol(),
+                value_type: source.value_type.clone(),
+                scope: self.active_scopes.last().copied().unwrap_or(0),
+                value_scope: self.active_scopes.last().copied().unwrap_or(0),
+                mutable: false,
+                moved: false,
+            },
+        );
+        let value = match expected {
+            Some((expected, label)) => {
+                self.compile_contextually_expected(&decision, expected, label)
+            }
+            None => self.compile_expression(&decision),
+        };
+        if let Some(previous) = previous {
+            self.bindings.insert(name, previous);
+        } else {
+            self.bindings.remove(&name);
+        }
+        let value = value?;
+        let effects = self.union_effects([source.effects, value.effects]);
+        Ok(CompiledExpr {
+            register: value.register,
+            value_type: value.value_type.clone(),
+            effects,
+            hir: self.hir(
+                HirExprKind::Match {
+                    source: Box::new(source.hir),
+                    arms: vec![value.hir],
+                },
+                None,
+                &value.value_type,
+                effects,
+                span,
+            ),
+        })
+    }
+
+    fn compile_expanded_or_match(
+        &mut self,
+        source: CompiledExpr,
+        arms: Vec<(LoweredPattern, LoweredExpr, Span)>,
+        span: Span,
+        expected: Option<(&ValueType, &str)>,
+    ) -> Result<CompiledExpr, Diagnostic> {
+        let name = format!("$or_pattern_source_{}_{}", span.start, span.end);
+        let previous = self.bindings.insert(
+            name.clone(),
+            LocalBinding {
+                register: source.register,
+                symbol: self.global.allocate_symbol(),
+                value_type: source.value_type.clone(),
+                scope: self.active_scopes.last().copied().unwrap_or(0),
+                value_scope: self.active_scopes.last().copied().unwrap_or(0),
+                mutable: false,
+                moved: false,
+            },
+        );
+        let expanded = LoweredExpr {
+            kind: LoweredExprKind::Match {
+                source: Box::new(LoweredExpr {
+                    kind: LoweredExprKind::Variable(name.clone()),
+                    span,
+                }),
+                arms,
+            },
+            span,
+        };
+        let value = match expected {
+            Some((expected, label)) => {
+                self.compile_contextually_expected(&expanded, expected, label)
+            }
+            None => self.compile_expression(&expanded),
+        };
+        if let Some(previous) = previous {
+            self.bindings.insert(name, previous);
+        } else {
+            self.bindings.remove(&name);
+        }
+        let value = value?;
+        let effects = self.union_effects([source.effects, value.effects]);
+        Ok(CompiledExpr {
+            register: value.register,
+            value_type: value.value_type.clone(),
+            effects,
+            hir: self.hir(
+                HirExprKind::Match {
+                    source: Box::new(source.hir),
+                    arms: vec![value.hir],
+                },
+                None,
+                &value.value_type,
+                effects,
+                span,
+            ),
+        })
+    }
+
+    fn validate_local_function_effects(
+        &self,
+        function: &FunctionInfo,
+        span: Span,
+    ) -> Result<(), Diagnostic> {
+        let current = self
+            .global
+            .bundle
+            .functions
+            .iter()
+            .map(|function| function.effects.clone())
+            .collect::<Vec<_>>();
+        let required = required_body_effects(self.global.bundle, function, &current)?;
+        if required
+            .iter()
+            .any(|effect| function.effects.binary_search(effect).is_err())
+        {
+            return Err(Diagnostic::new(
+                "E2403",
+                format!(
+                    "local function '{}' requires undeclared effects [{}]",
+                    function.lowered.name,
+                    required.join(", ")
+                ),
+                span,
+            ));
+        }
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_lines)]
+    fn compile_local_function_declaration(
+        &mut self,
+        function: &super::LoweredLocalFunction,
+    ) -> Result<(), Diagnostic> {
+        if self.bindings.contains_key(&function.name)
+            || self.local_name_conflicts(&function.name)
+            || resolve_function_name(self.global.bundle, &self.info.module, &function.name)?
+                .is_some()
+            || resolve_named_type(
+                &self.global.bundle.modules,
+                &self.global.bundle.types,
+                &self.info.module,
+                &function.name,
+                function.name_span,
+            )
+            .is_ok()
+        {
+            return Err(Diagnostic::new(
+                "E3005",
+                format!(
+                    "local function '{}' conflicts with an existing name",
+                    function.name
+                ),
+                function.name_span,
+            ));
+        }
+
+        let parameter_names = function
+            .parameters
+            .iter()
+            .map(|(name, _, _)| name.clone())
+            .collect::<BTreeSet<_>>();
+        if parameter_names.len() != function.parameters.len() {
+            return Err(Diagnostic::new(
+                "E3005",
+                format!(
+                    "local function '{}' has duplicate parameters",
+                    function.name
+                ),
+                function.name_span,
+            ));
+        }
+        let mut free = free_variables(&function.body, &function.parameters);
+        for (parameter_index, default) in function.parameter_defaults.iter().enumerate() {
+            let Some(default) = default else {
+                continue;
+            };
+            let default_body = LoweredBody {
+                statements: Vec::new(),
+                tail: Some(default.value.clone()),
+                span: default.span,
+            };
+            free.extend(free_variables(
+                &default_body,
+                &function.parameters[..parameter_index],
+            ));
+        }
+        let mut captures = free
+            .into_iter()
+            .filter(|name| self.bindings.contains_key(name))
+            .collect::<Vec<_>>();
+        captures.sort();
+        if let Some(binding) = captures.first() {
+            return Err(Diagnostic::new(
+                "E3011",
+                format!(
+                    "local function '{}' cannot capture enclosing binding '{binding}'",
+                    function.name
+                ),
+                function.span,
+            ));
+        }
+
+        if function.parameter_defaults.len() != function.parameters.len() {
+            return Err(Diagnostic::new(
+                "E3010",
+                format!(
+                    "local function '{}' has inconsistent parameter default metadata",
+                    function.name
+                ),
+                function.name_span,
+            ));
+        }
+        let ordinal = self.local_function_ordinal;
+        self.local_function_ordinal = self
+            .local_function_ordinal
+            .checked_add(1)
+            .expect("local function ordinal fits");
+        let private_name = format!("$local@{}@{ordinal}@{}", self.info.symbol, function.name);
+        let generics = BTreeSet::new();
+        let parameters = function
+            .parameters
+            .iter()
+            .map(|(_, value_type, _)| {
+                semantic_type(
+                    value_type,
+                    &generics,
+                    &self.info.module,
+                    &self.global.bundle.modules,
+                    &self.global.bundle.types,
+                )
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let return_type = semantic_type(
+            &function.return_type,
+            &generics,
+            &self.info.module,
+            &self.global.bundle.modules,
+            &self.global.bundle.types,
+        )?;
+        let effects = function.declared_effects.clone().unwrap_or_default();
+        let mut unavailable_local_functions = self.reserved_local_names();
+        unavailable_local_functions.insert(function.name.clone());
+        let mut saw_default = false;
+        for (parameter_index, default) in function.parameter_defaults.iter().enumerate() {
+            let Some(default) = default else {
+                if saw_default {
+                    let (parameter, _, parameter_span) = &function.parameters[parameter_index];
+                    return Err(Diagnostic::new(
+                        "E3010",
+                        format!(
+                            "required parameter '{parameter}' cannot follow a default parameter"
+                        ),
+                        *parameter_span,
+                    ));
+                }
+                continue;
+            };
+            saw_default = true;
+            let helper_name = default_helper_name(&private_name, parameter_index);
+            let helper_symbol = self.global.allocate_symbol();
+            let helper_id = u32::try_from(self.global.functions.len()).map_err(|_| {
+                Diagnostic::new("E3005", "too many local default helpers", default.span)
+            })?;
+            let helper = FunctionInfo {
+                module: self.info.module.clone(),
+                symbol: helper_symbol,
+                bytecode: Some(helper_id),
+                lowered: LoweredFunction {
+                    exported: false,
+                    is_async: false,
+                    name: helper_name.clone(),
+                    name_span: default.span,
+                    generics: Vec::new(),
+                    parameters: function.parameters[..parameter_index].to_vec(),
+                    parameter_defaults: vec![None; parameter_index],
+                    return_type: function.parameters[parameter_index].1.clone(),
+                    declared_effects: Some(Vec::new()),
+                    effects_span: Some(default.span),
+                    body: LoweredBody {
+                        statements: Vec::new(),
+                        tail: Some(default.value.clone()),
+                        span: default.span,
+                    },
+                },
+                parameters: parameters[..parameter_index].to_vec(),
+                return_type: parameters[parameter_index].clone(),
+                effects: Vec::new(),
+                is_const: false,
+            };
+            self.validate_local_function_effects(&helper, default.span)?;
+            self.global.functions.push(None);
+            let (compiled, hir, mir) = lower_one_function(
+                self.global,
+                helper.clone(),
+                helper_id,
+                Vec::new(),
+                BTreeMap::new(),
+                unavailable_local_functions.clone(),
+                &BTreeMap::new(),
+            )?;
+            self.global.functions[helper_id as usize] = Some(compiled);
+            self.global
+                .hir_modules
+                .entry(helper.module.clone())
+                .or_default()
+                .push(hir);
+            self.global.mir_functions.push(mir);
+            self.local_functions.insert(helper_name, helper);
+        }
+
+        let symbol = self.global.allocate_symbol();
+        let function_id = u32::try_from(self.global.functions.len()).map_err(|_| {
+            Diagnostic::new("E3005", "too many local functions", function.name_span)
+        })?;
+        let target = FunctionInfo {
+            module: self.info.module.clone(),
+            symbol,
+            bytecode: Some(function_id),
+            lowered: LoweredFunction {
+                exported: false,
+                is_async: false,
+                name: private_name,
+                name_span: function.name_span,
+                generics: Vec::new(),
+                parameters: function.parameters.clone(),
+                parameter_defaults: function.parameter_defaults.clone(),
+                return_type: function.return_type.clone(),
+                declared_effects: Some(effects.clone()),
+                effects_span: function.effects_span,
+                body: function.body.clone(),
+            },
+            parameters,
+            return_type,
+            effects,
+            is_const: false,
+        };
+        self.validate_local_function_effects(
+            &target,
+            function.effects_span.unwrap_or(function.span),
+        )?;
+        self.global.functions.push(None);
+        let (compiled, hir, mir) = lower_one_function(
+            self.global,
+            target.clone(),
+            function_id,
+            Vec::new(),
+            BTreeMap::new(),
+            unavailable_local_functions,
+            &BTreeMap::new(),
+        )?;
+        if !compiled.captures.is_empty() {
+            return Err(Diagnostic::new(
+                "E3011",
+                format!("local function '{}' cannot capture values", function.name),
+                function.name_span,
+            ));
+        }
+        self.global.functions[function_id as usize] = Some(compiled);
+        self.global
+            .hir_modules
+            .entry(target.module.clone())
+            .or_default()
+            .push(hir);
+        self.global.mir_functions.push(mir);
+        self.local_functions.insert(function.name.clone(), target);
+        Ok(())
+    }
+
     #[allow(clippy::too_many_lines)]
     pub(super) fn compile_record_match(
         &mut self,
@@ -5016,6 +9987,7 @@ impl FunctionLowering<'_, '_> {
         layout: &[RecordField],
         arms: &[(LoweredPattern, LoweredExpr, Span)],
         span: Span,
+        expected: Option<(&ValueType, &str)>,
     ) -> Result<CompiledExpr, Diagnostic> {
         if arms.len() != 1 {
             return Err(Diagnostic::new(
@@ -5080,8 +10052,11 @@ impl FunctionLowering<'_, '_> {
                         field_span,
                     )
                 })?;
-            if let Some(binding) = binding {
-                if !seen_bindings.insert(binding.clone()) || self.bindings.contains_key(&binding) {
+            if let Some(binding) = Self::simple_pattern_binding(&binding, field_span)? {
+                if !seen_bindings.insert(binding.clone())
+                    || self.bindings.contains_key(&binding)
+                    || self.local_name_conflicts(&binding)
+                {
                     return Err(Diagnostic::new(
                         "E3005",
                         format!("duplicate pattern binding '{binding}'"),
@@ -5115,7 +10090,10 @@ impl FunctionLowering<'_, '_> {
                 );
             }
         }
-        let value = self.compile_expression(arm)?;
+        let value = match expected {
+            Some((expected, label)) => self.compile_contextually_expected(arm, expected, label)?,
+            None => self.compile_expression(arm)?,
+        };
         self.bindings = outer;
         let effects = self.union_effects([source.effects, value.effects]);
         Ok(CompiledExpr {
@@ -5142,6 +10120,7 @@ impl FunctionLowering<'_, '_> {
         then_body: &LoweredBody,
         else_branch: Option<&LoweredElse>,
         span: Span,
+        expected: Option<(&ValueType, &str)>,
         compiled_condition: Option<CompiledExpr>,
     ) -> Result<CompiledExpr, Diagnostic> {
         let constant_condition = match &condition.kind {
@@ -5196,18 +10175,24 @@ impl FunctionLowering<'_, '_> {
         };
         let (false_hir, false_value) = match else_branch {
             Some(LoweredElse::Body(body)) => {
-                let (hir, value, _) = self.compile_block_value(body)?;
+                let (hir, value, _) = self.compile_block_value_expected(body, expected)?;
                 (hir, value)
             }
             Some(LoweredElse::If(expression)) => {
-                let value = self.compile_expression(expression)?;
+                let value = match expected {
+                    Some((expected, label)) => {
+                        self.compile_contextually_expected(expression, expected, label)?
+                    }
+                    None => self.compile_expression(expression)?,
+                };
                 (value.hir.clone(), value)
             }
             None => {
-                let value = self.compile_expression(&LoweredExpr {
+                let unit = LoweredExpr {
                     kind: LoweredExprKind::Unit,
                     span,
-                })?;
+                };
+                let value = self.compile_expression(&unit)?;
                 (value.hir.clone(), value)
             }
         };
@@ -5221,7 +10206,11 @@ impl FunctionLowering<'_, '_> {
             if !false_branch_continues
                 && !matches!(
                     self.code.last(),
-                    Some(Instruction::Return { .. } | Instruction::Stop { .. })
+                    Some(
+                        Instruction::Return { .. }
+                            | Instruction::Stop { .. }
+                            | Instruction::Fail { .. }
+                    )
                 )
             {
                 let ownership_at_entry = outer_ownership.keys().copied().collect();
@@ -5238,6 +10227,9 @@ impl FunctionLowering<'_, '_> {
                         source: u32::from(*source),
                     }),
                     Some(Instruction::Stop { reason }) => Some(MirTerminator::Stop {
+                        reason: u32::from(*reason),
+                    }),
+                    Some(Instruction::Fail { reason }) => Some(MirTerminator::Fail {
                         reason: u32::from(*reason),
                     }),
                     Some(Instruction::Jump { .. }) if false_branch_continues => None,
@@ -5316,7 +10308,7 @@ impl FunctionLowering<'_, '_> {
         self.control_reachable = outer_control_reachable && constant_condition != Some(false);
         let true_region_capture = self.begin_nested_mir_region();
         let true_operation_start = self.mir.len();
-        let (true_hir, true_value, _) = self.compile_block_value(then_body)?;
+        let (true_hir, true_value, _) = self.compile_block_value_expected(then_body, expected)?;
         let true_region = self.finish_nested_mir_region(true_region_capture);
         let true_value_scope = self.sub_agent_value_scope(&true_value);
         let true_runtime_falls_through =
@@ -5339,7 +10331,11 @@ impl FunctionLowering<'_, '_> {
             if !true_branch_continues
                 && !matches!(
                     self.code.last(),
-                    Some(Instruction::Return { .. } | Instruction::Stop { .. })
+                    Some(
+                        Instruction::Return { .. }
+                            | Instruction::Stop { .. }
+                            | Instruction::Fail { .. }
+                    )
                 )
             {
                 let ownership_at_entry = outer_ownership.keys().copied().collect();
@@ -5357,6 +10353,9 @@ impl FunctionLowering<'_, '_> {
                         source: u32::from(*source),
                     }),
                     Some(Instruction::Stop { reason }) => Some(MirTerminator::Stop {
+                        reason: u32::from(*reason),
+                    }),
+                    Some(Instruction::Fail { reason }) => Some(MirTerminator::Fail {
                         reason: u32::from(*reason),
                     }),
                     Some(Instruction::Jump { .. }) if true_branch_continues => None,
@@ -5626,10 +10625,85 @@ impl FunctionLowering<'_, '_> {
         source: &LoweredExpr,
         arms: &[(LoweredPattern, LoweredExpr, Span)],
         span: Span,
+        expected: Option<(&ValueType, &str)>,
     ) -> Result<CompiledExpr, Diagnostic> {
         let source = self.compile_expression(source)?;
+        if arms
+            .iter()
+            .any(|(pattern, _, _)| Self::pattern_uses_decision_lowering(pattern))
+        {
+            let mut earlier = Vec::new();
+            let mut alternatives = Vec::new();
+            for (pattern, _, pattern_span) in arms {
+                self.collect_pattern_bindings(pattern, &source.value_type, *pattern_span)?;
+                let mut current = Vec::new();
+                Self::flattened_alternatives(pattern, &mut current);
+                for (index, alternative) in current.into_iter().enumerate() {
+                    if self.pattern_fully_covered(&earlier, alternative, &source.value_type)? {
+                        let unreachable_span = match pattern {
+                            LoweredPattern::Or { operator_spans, .. } if index > 0 => {
+                                operator_spans
+                                    .get(index - 1)
+                                    .copied()
+                                    .unwrap_or(*pattern_span)
+                            }
+                            _ => *pattern_span,
+                        };
+                        return Err(Diagnostic::new(
+                            "E2016",
+                            "match pattern alternative is unreachable",
+                            unreachable_span,
+                        ));
+                    }
+                    earlier.push(alternative);
+                    alternatives.push(alternative);
+                }
+            }
+            if !self.advanced_patterns_are_exhaustive(&alternatives, &source.value_type)? {
+                return Err(Diagnostic::new(
+                    "E2015",
+                    "non-exhaustive match; add a finite complete set of patterns or a catch-all",
+                    span,
+                ));
+            }
+            let pure_top_level_or = arms.iter().all(|(pattern, _, _)| match pattern {
+                LoweredPattern::Or { alternatives, .. } => alternatives
+                    .iter()
+                    .all(|pattern| !Self::pattern_uses_decision_lowering(pattern)),
+                _ => !Self::pattern_uses_decision_lowering(pattern),
+            });
+            if pure_top_level_or {
+                let mut expanded = Vec::new();
+                for (pattern, body, pattern_span) in arms {
+                    if let LoweredPattern::Or {
+                        alternatives,
+                        operator_spans,
+                    } = pattern
+                    {
+                        for (index, alternative) in alternatives.iter().enumerate() {
+                            expanded.push((
+                                alternative.clone(),
+                                body.clone(),
+                                if index == 0 {
+                                    *pattern_span
+                                } else {
+                                    operator_spans
+                                        .get(index - 1)
+                                        .copied()
+                                        .unwrap_or(*pattern_span)
+                                },
+                            ));
+                        }
+                    } else {
+                        expanded.push((pattern.clone(), body.clone(), *pattern_span));
+                    }
+                }
+                return self.compile_expanded_or_match(source, expanded, span, expected);
+            }
+            return self.compile_advanced_match(source, arms, span, expected);
+        }
         if let ValueType::Record(layout) = source.value_type.clone() {
-            return self.compile_record_match(source, &layout, arms, span);
+            return self.compile_record_match(source, &layout, arms, span, expected);
         }
         let variant_count = match &source.value_type {
             ValueType::Bool | ValueType::Option(_) | ValueType::Result(_, _) => 2,
@@ -5645,6 +10719,20 @@ impl FunctionLowering<'_, '_> {
         let mut planned = vec![None; variant_count];
         let mut wildcard = None;
         for (arm_index, (pattern, _, pattern_span)) in arms.iter().enumerate() {
+            if matches!(pattern, LoweredPattern::Range { .. }) {
+                return Err(Diagnostic::new(
+                    "E3011",
+                    "range patterns are not implemented in this compiler pass",
+                    *pattern_span,
+                ));
+            }
+            if matches!(pattern, LoweredPattern::Or { .. }) {
+                return Err(Diagnostic::new(
+                    "E3011",
+                    "OR patterns are not implemented in this compiler pass",
+                    *pattern_span,
+                ));
+            }
             if wildcard.is_some() || planned.iter().all(Option::is_some) {
                 return Err(Diagnostic::new(
                     "E2016",
@@ -5660,7 +10748,7 @@ impl FunctionLowering<'_, '_> {
                     LoweredPattern::Enum {
                         name,
                         variant,
-                        bindings,
+                        patterns,
                         fields,
                     },
                 ) => {
@@ -5694,9 +10782,14 @@ impl FunctionLowering<'_, '_> {
                             .payload,
                         fields,
                     ) {
-                        (EnumPayloadType::Unit, None) if bindings.is_empty() => {}
+                        (EnumPayloadType::Unit, None) if patterns.is_empty() => {}
                         (EnumPayloadType::Tuple(expected), None)
-                            if expected.len() == bindings.len() => {}
+                            if expected.len() == patterns.len() =>
+                        {
+                            for pattern in patterns {
+                                Self::simple_pattern_binding(pattern, *pattern_span)?;
+                            }
+                        }
                         (EnumPayloadType::Record(expected), Some(fields)) => {
                             let supplied = fields
                                 .iter()
@@ -5711,6 +10804,9 @@ impl FunctionLowering<'_, '_> {
                                     "enum record pattern must contain every field exactly once",
                                     *pattern_span,
                                 ));
+                            }
+                            for (_, field_span, pattern) in fields {
+                                Self::simple_pattern_binding(pattern, *field_span)?;
                             }
                         }
                         _ => {
@@ -5806,14 +10902,14 @@ impl FunctionLowering<'_, '_> {
         let mut hir_arms = Vec::new();
         let mut arm_effects = Vec::new();
         let mut arm_operations = Vec::new();
-        let mut arm_stops = Vec::new();
+        let mut arm_terminals = Vec::new();
         let mut arm_regions = Vec::new();
         let mut arm_value_scopes = Vec::new();
         let branch_bindings = self.bindings.clone();
         let branch_ownership = self.ownership_states.clone();
         let mut joined_bindings: Option<BTreeMap<String, BindingState>> = None;
         let mut joined_ownership: Option<BTreeMap<Register, OwnershipRecord>> = None;
-        for arm_index in planned.into_iter().map(Option::unwrap) {
+        for (variant_index, arm_index) in planned.into_iter().map(Option::unwrap).enumerate() {
             self.bindings = branch_bindings.clone();
             for (register, state) in &branch_ownership {
                 self.ownership_states.insert(*register, *state);
@@ -5824,17 +10920,25 @@ impl FunctionLowering<'_, '_> {
                     ValueType::Option(_),
                     LoweredPattern::Option {
                         some: true,
-                        binding,
+                        payload,
                     },
-                )
-                | (ValueType::Result(_, _), LoweredPattern::Result { binding, .. }) => {
-                    vec![binding.clone()]
+                ) => {
+                    vec![
+                        payload
+                            .as_deref()
+                            .map(|pattern| Self::simple_pattern_binding(pattern, arms[arm_index].2))
+                            .transpose()?
+                            .flatten(),
+                    ]
+                }
+                (ValueType::Result(_, _), LoweredPattern::Result { payload, .. }) => {
+                    vec![Self::simple_pattern_binding(payload, arms[arm_index].2)?]
                 }
                 (
                     ValueType::Enum(id),
                     LoweredPattern::Enum {
                         variant,
-                        bindings,
+                        patterns,
                         fields,
                         ..
                     },
@@ -5845,11 +10949,18 @@ impl FunctionLowering<'_, '_> {
                         .find(|candidate| candidate.name == *variant)
                         .expect("validated enum match variant");
                     match (&metadata.payload, fields) {
-                        (EnumPayloadType::Tuple(_), None) => bindings.clone(),
+                        (EnumPayloadType::Tuple(_), None) => patterns
+                            .iter()
+                            .map(|pattern| Self::simple_pattern_binding(pattern, arms[arm_index].2))
+                            .collect::<Result<Vec<_>, _>>()?,
                         (EnumPayloadType::Record(expected), Some(fields)) => {
                             let supplied = fields
                                 .iter()
-                                .map(|(name, _, binding)| (name, binding.clone()))
+                                .map(|(name, field_span, pattern)| {
+                                    Ok((name, Self::simple_pattern_binding(pattern, *field_span)?))
+                                })
+                                .collect::<Result<Vec<_>, Diagnostic>>()?
+                                .into_iter()
                                 .collect::<BTreeMap<_, _>>();
                             expected
                                 .iter()
@@ -5890,6 +11001,32 @@ impl FunctionLowering<'_, '_> {
                             .collect(),
                     }
                 }
+                (ValueType::Option(payload), LoweredPattern::Wildcard) => {
+                    if variant_index == 1 {
+                        vec![payload.as_ref().clone()]
+                    } else {
+                        Vec::new()
+                    }
+                }
+                (ValueType::Result(ok, error), LoweredPattern::Wildcard) => {
+                    vec![if variant_index == 0 {
+                        ok.as_ref().clone()
+                    } else {
+                        error.as_ref().clone()
+                    }]
+                }
+                (ValueType::Enum(id), LoweredPattern::Wildcard) => {
+                    match &self.global.bundle.enum_types[*id as usize].variants[variant_index]
+                        .payload
+                    {
+                        EnumPayloadType::Unit => Vec::new(),
+                        EnumPayloadType::Tuple(values) => values.clone(),
+                        EnumPayloadType::Record(fields) => fields
+                            .iter()
+                            .map(|field| field.value_type.clone())
+                            .collect(),
+                    }
+                }
                 _ => vec![],
             };
             for (index, value_type) in payload_types.into_iter().enumerate() {
@@ -5904,6 +11041,13 @@ impl FunctionLowering<'_, '_> {
                         return Err(Diagnostic::new(
                             "E3005",
                             format!("duplicate pattern binding '{name}'"),
+                            arms[arm_index].2,
+                        ));
+                    }
+                    if self.local_name_conflicts(name) {
+                        return Err(Diagnostic::new(
+                            "E3005",
+                            format!("pattern binding '{name}' conflicts with a local function"),
                             arms[arm_index].2,
                         ));
                     }
@@ -5926,7 +11070,12 @@ impl FunctionLowering<'_, '_> {
             }
             let region_capture = self.begin_nested_mir_region();
             let operation_start = self.mir.len();
-            let value = self.compile_expression(&arms[arm_index].1)?;
+            let value = match expected {
+                Some((expected, label)) => {
+                    self.compile_contextually_expected(&arms[arm_index].1, expected, label)?
+                }
+                None => self.compile_expression(&arms[arm_index].1)?,
+            };
             let region = self.finish_nested_mir_region(region_capture);
             arm_operations.push(self.mir.split_off(operation_start));
             arm_regions.push(region);
@@ -5934,10 +11083,15 @@ impl FunctionLowering<'_, '_> {
                 value.value_type != ValueType::Never,
                 self.sub_agent_value_scope(&value),
             ));
-            arm_stops.push((value.value_type == ValueType::Never).then(
+            arm_terminals.push((value.value_type == ValueType::Never).then(
                 || match self.code.last() {
-                    Some(Instruction::Stop { reason }) => u32::from(*reason),
-                    _ => u32::MAX,
+                    Some(Instruction::Stop { reason }) => MirTerminator::Stop {
+                        reason: u32::from(*reason),
+                    },
+                    Some(Instruction::Fail { reason }) => MirTerminator::Fail {
+                        reason: u32::from(*reason),
+                    },
+                    _ => MirTerminator::Unreachable,
                 },
             ));
             if value.value_type != ValueType::Never {
@@ -6054,18 +11208,13 @@ impl FunctionLowering<'_, '_> {
                 }
             },
         };
-        let has_continuation = arm_stops.iter().any(Option::is_none);
-        for (arm, ((operations, stop), region)) in arm_operations
+        let has_continuation = arm_terminals.iter().any(Option::is_none);
+        for (arm, ((operations, terminal), region)) in arm_operations
             .into_iter()
-            .zip(arm_stops)
+            .zip(arm_terminals)
             .zip(arm_regions)
             .enumerate()
         {
-            let terminal = match stop {
-                Some(reason) if reason != u32::MAX => Some(MirTerminator::Stop { reason }),
-                Some(_) => Some(MirTerminator::Unreachable),
-                None => None,
-            };
             let arm_block = base + 1 + u32::try_from(arm).expect("arm ID fits");
             self.mir_blocks[arm_block as usize - 1] = MirBlock {
                 operations,
@@ -6381,6 +11530,56 @@ impl FunctionLowering<'_, '_> {
         })
     }
 
+    fn needs_expected_context(expression: &LoweredExpr) -> bool {
+        match &expression.kind {
+            LoweredExprKind::ShortClosure { .. }
+            | LoweredExprKind::List(_)
+            | LoweredExprKind::ListWithSpread(_)
+            | LoweredExprKind::Map(_)
+            | LoweredExprKind::MapWithSpread(_)
+            | LoweredExprKind::Tuple(_)
+            | LoweredExprKind::Match { .. }
+            | LoweredExprKind::If { .. } => true,
+            LoweredExprKind::Record { name, .. } => name == "$anonymous",
+            LoweredExprKind::Variable(name) => name == "None",
+            LoweredExprKind::Call { callee, .. } => matches!(
+                &callee.kind,
+                LoweredExprKind::Variable(name)
+                    if matches!(name.as_str(), "Some" | "Ok" | "Err")
+            ),
+            _ => false,
+        }
+    }
+
+    fn compile_contextually_expected(
+        &mut self,
+        expression: &LoweredExpr,
+        expected: &ValueType,
+        label: &str,
+    ) -> Result<CompiledExpr, Diagnostic> {
+        if Self::needs_expected_context(expression) {
+            self.compile_expected(expression, expected, label)
+        } else {
+            self.compile_expression(expression)
+        }
+    }
+
+    fn require_expected_result(
+        value: CompiledExpr,
+        expected: &ValueType,
+        label: &str,
+        span: Span,
+    ) -> Result<CompiledExpr, Diagnostic> {
+        if value.value_type != ValueType::Never && &value.value_type != expected {
+            return Err(Diagnostic::new(
+                expected_type_diagnostic_code(label),
+                format!("expected {expected}, found {}", value.value_type),
+                span,
+            ));
+        }
+        Ok(value)
+    }
+
     #[allow(clippy::too_many_lines)]
     pub(super) fn compile_expected(
         &mut self,
@@ -6388,15 +11587,42 @@ impl FunctionLowering<'_, '_> {
         expected: &ValueType,
         label: &str,
     ) -> Result<CompiledExpr, Diagnostic> {
+        if let LoweredExprKind::ShortClosure { parameters, body } = &expression.kind {
+            return self.compile_short_closure(parameters, body, expected, expression.span);
+        }
+        if let LoweredExprKind::Match { source, arms } = &expression.kind {
+            let value =
+                self.compile_match(source, arms, expression.span, Some((expected, label)))?;
+            return Self::require_expected_result(value, expected, label, expression.span);
+        }
+        if let LoweredExprKind::If {
+            condition,
+            then_body,
+            else_branch,
+        } = &expression.kind
+        {
+            let value = self.compile_if(
+                condition,
+                then_body,
+                else_branch.as_ref(),
+                expression.span,
+                Some((expected, label)),
+                None,
+            )?;
+            return Self::require_expected_result(value, expected, label, expression.span);
+        }
         let constructor = match &expression.kind {
-            LoweredExprKind::Variable(name) if name == "None" => Some((name.as_str(), &[][..])),
+            LoweredExprKind::Variable(name) if name == "None" => Some((name.as_str(), Vec::new())),
             LoweredExprKind::Call {
                 callee, arguments, ..
             } => match &callee.kind {
                 LoweredExprKind::Variable(name)
                     if matches!(name.as_str(), "Some" | "Ok" | "Err") =>
                 {
-                    Some((name.as_str(), arguments.as_slice()))
+                    Some((
+                        name.as_str(),
+                        arguments.iter().map(|argument| &argument.value).collect(),
+                    ))
                 }
                 _ => None,
             },
@@ -6420,7 +11646,7 @@ impl FunctionLowering<'_, '_> {
             let values = match payload_type {
                 None if arguments.is_empty() => Vec::new(),
                 Some(payload_type) if arguments.len() == 1 => vec![self.compile_expected(
-                    &arguments[0],
+                    arguments[0],
                     payload_type,
                     "constructor payload",
                 )?],
@@ -6452,8 +11678,31 @@ impl FunctionLowering<'_, '_> {
         if let LoweredExprKind::List(elements) = &expression.kind {
             return self.compile_list(expression, elements, Some(expected));
         }
+        if let LoweredExprKind::ListWithSpread(items) = &expression.kind {
+            return self.compile_list_with_spread(expression, items, Some(expected));
+        }
         if let LoweredExprKind::Map(entries) = &expression.kind {
             return self.compile_map(expression, entries, Some(expected));
+        }
+        if let LoweredExprKind::MapWithSpread(items) = &expression.kind {
+            return self.compile_map_with_spread(expression, items, Some(expected));
+        }
+        if let LoweredExprKind::RecordUpdate {
+            name,
+            base,
+            spread_span,
+            fields,
+        } = &expression.kind
+        {
+            let value = self.compile_record_update(expression, name, base, *spread_span, fields)?;
+            if value.value_type != ValueType::Never && &value.value_type != expected {
+                return Err(Diagnostic::new(
+                    expected_type_diagnostic_code(label),
+                    format!("expected {expected}, found {}", value.value_type),
+                    expression.span,
+                ));
+            }
+            return Ok(value);
         }
         if let (LoweredExprKind::Tuple(elements), ValueType::Tuple(element_types)) =
             (&expression.kind, expected)
@@ -6603,15 +11852,1117 @@ impl FunctionLowering<'_, '_> {
     }
 
     #[allow(clippy::too_many_lines)]
-    pub(super) fn compile_call(
+    fn compile_template_render(
         &mut self,
-        callee: &LoweredExpr,
+        name: &str,
         type_arguments: &[LoweredType],
         arguments: &[LoweredExpr],
         span: Span,
     ) -> Result<CompiledExpr, Diagnostic> {
+        if !type_arguments.is_empty() {
+            return Err(Diagnostic::new(
+                "E3012",
+                "template render does not take type arguments",
+                span,
+            ));
+        }
+        let binding = template_binding(self.global.bundle, &self.info.module, name)
+            .cloned()
+            .ok_or_else(|| {
+                Diagnostic::new(
+                    "E3012",
+                    format!("template '{name}' is not declared in this package"),
+                    span,
+                )
+            })?;
+        let [argument] = arguments else {
+            return Err(Diagnostic::new(
+                "E3012",
+                "template render requires exactly one record argument",
+                span,
+            ));
+        };
+        let LoweredExprKind::Record {
+            name: record_name,
+            fields,
+        } = &argument.kind
+        else {
+            return Err(Diagnostic::new(
+                "E3012",
+                "template render argument must be a record literal",
+                argument.span,
+            ));
+        };
+        if record_name != "$anonymous" {
+            return Err(Diagnostic::new(
+                "E3012",
+                "template render argument must be an anonymous record literal",
+                argument.span,
+            ));
+        }
+        let mut seen = BTreeSet::new();
+        for (field, _, field_span) in fields {
+            if !seen.insert(field.as_str()) {
+                return Err(Diagnostic::new(
+                    "E3012",
+                    format!("duplicate template field '{field}'"),
+                    *field_span,
+                ));
+            }
+            if !binding.holes.iter().any(|(hole, _)| hole == field) {
+                return Err(Diagnostic::new(
+                    "E3012",
+                    format!("template '{name}' has no hole '{field}'"),
+                    *field_span,
+                ));
+            }
+        }
+        if let Some((missing, _)) = binding
+            .holes
+            .iter()
+            .find(|(hole, _)| !seen.contains(hole.as_str()))
+        {
+            return Err(Diagnostic::new(
+                "E3012",
+                format!("template '{name}' requires hole '{missing}'"),
+                argument.span,
+            ));
+        }
+
+        let mut compiled = Vec::with_capacity(fields.len());
+        for (field, value, field_span) in fields {
+            let index = binding
+                .holes
+                .iter()
+                .position(|(hole, _)| hole == field)
+                .expect("template field shape was checked");
+            let value = self.compile_expression(value)?;
+            if value.value_type == ValueType::Never {
+                return Ok(value);
+            }
+            let expected = &binding.holes[index].1;
+            if template_scalar_type(&value.value_type) != expected {
+                return Err(Diagnostic::new(
+                    "E3012",
+                    format!(
+                        "template hole '{field}' expects {expected}, found {}",
+                        value.value_type
+                    ),
+                    *field_span,
+                ));
+            }
+            compiled.push((index, value));
+        }
+        compiled.sort_by_key(|(index, _)| *index);
+        let register = self.allocate(ValueType::String)?;
+        let operand_registers = compiled
+            .iter()
+            .map(|(_, value)| value.register)
+            .collect::<Vec<_>>();
+        self.code.push(Instruction::TemplateRender {
+            destination: register,
+            template: binding.template,
+            arguments: operand_registers.clone(),
+        });
+        self.mark_last_instruction(span);
+        self.mir.push(MirOperation::TemplateRender {
+            destination: u32::from(register),
+            template: binding.template,
+            arguments: operand_registers
+                .iter()
+                .map(|register| u32::from(*register))
+                .collect(),
+        });
+        let effects = self.union_effects(compiled.iter().map(|(_, value)| value.effects));
+        Ok(CompiledExpr {
+            register,
+            value_type: ValueType::String,
+            effects,
+            hir: self.hir(
+                HirExprKind::TemplateRender {
+                    template: binding.template,
+                    arguments: compiled.into_iter().map(|(_, value)| value.hir).collect(),
+                },
+                None,
+                &ValueType::String,
+                effects,
+                span,
+            ),
+        })
+    }
+
+    #[allow(clippy::too_many_lines)]
+    fn direct_builtin_partial_contract(
+        &self,
+        callee: &LoweredExpr,
+        known: &[Option<ValueType>],
+        span: Span,
+    ) -> Result<Option<DirectPartialContract>, Diagnostic> {
+        let pure = |parameters, result| DirectPartialContract {
+            parameters,
+            result,
+            effects: Vec::new(),
+        };
+        if let Some(operation) = string_builtin_callee(callee) {
+            let (_, parameters, result) = string_operation_signature(operation);
+            return Ok(Some(pure(parameters, result)));
+        }
+        if let Some(operation) = standard_operation_callee(callee) {
+            let (_, parameters, result) = standard_operation_signature(operation);
+            return Ok(Some(pure(parameters, result)));
+        }
+        if let Some(operation) = capability_builtin_callee(callee) {
+            let (_, parameters, result) = capability_operation_signature(operation);
+            return Ok(Some(DirectPartialContract {
+                parameters,
+                result,
+                effects: vec!["capability.inspect".to_owned()],
+            }));
+        }
+        if let Some(StandardBuiltin::Operation(operation)) = standard_builtin_callee(callee) {
+            let Some((parameters, result, effect, _)) =
+                effect_operation_signature(operation, self.global.bundle.transcript_part)
+            else {
+                return Err(Diagnostic::new(
+                    "E3010",
+                    "placeholder partial application requires one exact builtin signature",
+                    span,
+                ));
+            };
+            return Ok(Some(DirectPartialContract {
+                parameters,
+                result: ValueType::Future(Box::new(result)),
+                effects: vec![effect.to_owned()],
+            }));
+        }
+        let Some(builtin) = collection_builtin_callee(callee) else {
+            return Ok(None);
+        };
+        let known_at = |index: usize| known.get(index).and_then(Option::as_ref);
+        let list_item = |list: Option<&ValueType>| match list {
+            Some(ValueType::List(item)) => Some(item.as_ref().clone()),
+            _ => None,
+        };
+        let map_parts = |map: Option<&ValueType>| match map {
+            Some(ValueType::Map(key, value)) => {
+                Some((key.as_ref().clone(), value.as_ref().clone()))
+            }
+            _ => None,
+        };
+        let contract = match builtin {
+            CollectionBuiltin::Length => {
+                let Some(value_type) = known_at(0).cloned() else {
+                    return Err(Diagnostic::new(
+                        "E3010",
+                        "cannot infer the collection type for this call placeholder",
+                        span,
+                    ));
+                };
+                if !matches!(
+                    value_type,
+                    ValueType::String
+                        | ValueType::Bytes
+                        | ValueType::List(_)
+                        | ValueType::Map(_, _)
+                ) {
+                    return Err(Diagnostic::new(
+                        "E3011",
+                        "length requires String, Bytes, List<T>, or Map<K, V>",
+                        span,
+                    ));
+                }
+                pure(vec![value_type], ValueType::Int)
+            }
+            CollectionBuiltin::ListAppend => {
+                let item = list_item(known_at(0))
+                    .or_else(|| known_at(1).cloned())
+                    .ok_or_else(|| {
+                        Diagnostic::new(
+                            "E3010",
+                            "cannot infer the list element type for this call placeholder",
+                            span,
+                        )
+                    })?;
+                let list = ValueType::List(Box::new(item.clone()));
+                pure(vec![list.clone(), item], list)
+            }
+            CollectionBuiltin::ListSet => {
+                let item = list_item(known_at(0))
+                    .or_else(|| known_at(2).cloned())
+                    .ok_or_else(|| {
+                        Diagnostic::new(
+                            "E3010",
+                            "cannot infer the list element type for this call placeholder",
+                            span,
+                        )
+                    })?;
+                let list = ValueType::List(Box::new(item.clone()));
+                pure(vec![list.clone(), ValueType::Int, item], list)
+            }
+            CollectionBuiltin::Safe(SafeCollectionOperation::BytesGet) => pure(
+                vec![ValueType::Bytes, ValueType::Int],
+                ValueType::Option(Box::new(ValueType::Int)),
+            ),
+            CollectionBuiltin::Safe(SafeCollectionOperation::ListGet) => {
+                let item = list_item(known_at(0)).ok_or_else(|| {
+                    Diagnostic::new(
+                        "E3010",
+                        "cannot infer the list element type for this call placeholder",
+                        span,
+                    )
+                })?;
+                pure(
+                    vec![ValueType::List(Box::new(item.clone())), ValueType::Int],
+                    ValueType::Option(Box::new(item)),
+                )
+            }
+            CollectionBuiltin::Safe(SafeCollectionOperation::ListTrySet) => {
+                let item = list_item(known_at(0))
+                    .or_else(|| known_at(2).cloned())
+                    .ok_or_else(|| {
+                        Diagnostic::new(
+                            "E3010",
+                            "cannot infer the list element type for this call placeholder",
+                            span,
+                        )
+                    })?;
+                let list = ValueType::List(Box::new(item.clone()));
+                pure(
+                    vec![list.clone(), ValueType::Int, item],
+                    ValueType::Option(Box::new(list)),
+                )
+            }
+            CollectionBuiltin::Safe(SafeCollectionOperation::MapGet) => {
+                let (key, value) = map_parts(known_at(0)).ok_or_else(|| {
+                    Diagnostic::new(
+                        "E3010",
+                        "cannot infer the Map types for this call placeholder",
+                        span,
+                    )
+                })?;
+                pure(
+                    vec![
+                        ValueType::Map(Box::new(key.clone()), Box::new(value.clone())),
+                        key,
+                    ],
+                    ValueType::Option(Box::new(value)),
+                )
+            }
+            CollectionBuiltin::Safe(SafeCollectionOperation::MapInsert) => {
+                let (key, value) = map_parts(known_at(0))
+                    .or_else(|| Some((known_at(1)?.clone(), known_at(2)?.clone())))
+                    .ok_or_else(|| {
+                        Diagnostic::new(
+                            "E3010",
+                            "cannot infer the Map types for this call placeholder",
+                            span,
+                        )
+                    })?;
+                let map = ValueType::Map(Box::new(key.clone()), Box::new(value.clone()));
+                pure(
+                    vec![map.clone(), key, value.clone()],
+                    ValueType::Record(vec![
+                        RecordField {
+                            name: "previous".to_owned(),
+                            value_type: ValueType::Option(Box::new(value)),
+                        },
+                        RecordField {
+                            name: "values".to_owned(),
+                            value_type: map,
+                        },
+                    ]),
+                )
+            }
+            CollectionBuiltin::Safe(SafeCollectionOperation::MapRemove) => {
+                let (key, value) = map_parts(known_at(0)).ok_or_else(|| {
+                    Diagnostic::new(
+                        "E3010",
+                        "cannot infer the Map types for this call placeholder",
+                        span,
+                    )
+                })?;
+                let map = ValueType::Map(Box::new(key.clone()), Box::new(value.clone()));
+                pure(
+                    vec![map.clone(), key],
+                    ValueType::Record(vec![
+                        RecordField {
+                            name: "removed".to_owned(),
+                            value_type: ValueType::Option(Box::new(value)),
+                        },
+                        RecordField {
+                            name: "values".to_owned(),
+                            value_type: map,
+                        },
+                    ]),
+                )
+            }
+            CollectionBuiltin::Safe(SafeCollectionOperation::MapKeys) => {
+                let (key, value) = map_parts(known_at(0)).ok_or_else(|| {
+                    Diagnostic::new(
+                        "E3010",
+                        "cannot infer the Map types for this call placeholder",
+                        span,
+                    )
+                })?;
+                pure(
+                    vec![ValueType::Map(Box::new(key.clone()), Box::new(value))],
+                    ValueType::List(Box::new(key)),
+                )
+            }
+            CollectionBuiltin::CheckedInt(operation) => pure(
+                vec![
+                    ValueType::Int;
+                    if operation == CheckedIntOperation::Negate {
+                        1
+                    } else {
+                        2
+                    }
+                ],
+                ValueType::Option(Box::new(ValueType::Int)),
+            ),
+            CollectionBuiltin::Operation(
+                operation @ (CollectionOperation::ListMin
+                | CollectionOperation::ListMax
+                | CollectionOperation::ListSumInt
+                | CollectionOperation::ListSumFloat),
+            ) => {
+                let item = list_item(known_at(0)).ok_or_else(|| {
+                    Diagnostic::new(
+                        "E3010",
+                        "cannot infer the list element type for this call placeholder",
+                        span,
+                    )
+                })?;
+                let result = match (operation, &item) {
+                    (
+                        CollectionOperation::ListMin | CollectionOperation::ListMax,
+                        ValueType::Int | ValueType::Float,
+                    ) => ValueType::Option(Box::new(item.clone())),
+                    (CollectionOperation::ListSumInt, ValueType::Int) => {
+                        ValueType::Option(Box::new(ValueType::Int))
+                    }
+                    (
+                        CollectionOperation::ListSumInt | CollectionOperation::ListSumFloat,
+                        ValueType::Float,
+                    ) => ValueType::Float,
+                    _ => {
+                        return Err(Diagnostic::new(
+                            "E3011",
+                            "list aggregate requires List<Int> or List<Float>",
+                            span,
+                        ));
+                    }
+                };
+                pure(vec![ValueType::List(Box::new(item))], result)
+            }
+            CollectionBuiltin::Operation(CollectionOperation::Zip)
+            | CollectionBuiltin::ListFold
+            | CollectionBuiltin::ListCombinator(_) => {
+                return Err(Diagnostic::new(
+                    "E3010",
+                    "placeholder partial application requires one non-variadic exact builtin signature",
+                    span,
+                ));
+            }
+            CollectionBuiltin::Sequence(_) => {
+                return Err(Diagnostic::new(
+                    "E3010",
+                    "cannot infer a Sequence placeholder contract from this call",
+                    span,
+                ));
+            }
+        };
+        Ok(Some(contract))
+    }
+
+    #[allow(clippy::too_many_lines)]
+    fn compile_builtin_partial_call(
+        &mut self,
+        callee: &LoweredExpr,
+        arguments: &[LoweredCallArgument],
+        span: Span,
+    ) -> Result<Option<CompiledExpr>, Diagnostic> {
+        let Some(labels) = builtin_argument_labels(callee) else {
+            return Ok(None);
+        };
+        if arguments.iter().any(|argument| argument.trailing) {
+            return Err(Diagnostic::new(
+                "E3010",
+                "placeholder partial application does not accept a trailing callback",
+                span,
+            ));
+        }
+        if labels.is_empty() || arguments.len() != labels.len() {
+            return Err(Diagnostic::new(
+                "E3010",
+                "placeholder partial application requires every builtin argument or a placeholder",
+                span,
+            ));
+        }
+        let has_labels = arguments.iter().any(|argument| argument.label.is_some());
+        if has_labels != arguments.iter().all(|argument| argument.label.is_some()) {
+            return Err(Diagnostic::new(
+                "E3010",
+                "placeholder partial application cannot mix labeled and positional arguments",
+                span,
+            ));
+        }
+        let mut seen = BTreeSet::new();
+        let parameter_indexes = if has_labels {
+            arguments
+                .iter()
+                .map(|argument| {
+                    let (label, label_span) = argument.label.as_ref().expect("labeled partial");
+                    let index = labels
+                        .iter()
+                        .position(|candidate| *candidate == label)
+                        .ok_or_else(|| {
+                            Diagnostic::new(
+                                "E3010",
+                                format!("direct builtin has no parameter labeled '{label}'"),
+                                *label_span,
+                            )
+                        })?;
+                    if !seen.insert(index) {
+                        return Err(Diagnostic::new(
+                            "E3010",
+                            format!("direct builtin received duplicate label '{label}'"),
+                            *label_span,
+                        ));
+                    }
+                    Ok(index)
+                })
+                .collect::<Result<Vec<_>, Diagnostic>>()?
+        } else {
+            (0..arguments.len()).collect()
+        };
+        let mut known = vec![None; labels.len()];
+        let mut rewritten = arguments.to_vec();
+        let mut creation_effects = Vec::new();
+        for (source_index, (argument, parameter_index)) in
+            arguments.iter().zip(&parameter_indexes).enumerate()
+        {
+            if argument.placeholder {
+                continue;
+            }
+            let expected = self
+                .direct_builtin_partial_contract(callee, &known, argument.span)
+                .ok()
+                .flatten()
+                .and_then(|contract| contract.parameters.get(*parameter_index).cloned());
+            let value = match expected {
+                Some(expected) => {
+                    self.compile_expected(&argument.value, &expected, "partial argument")?
+                }
+                None => self.compile_expression(&argument.value)?,
+            };
+            known[*parameter_index] = Some(value.value_type.clone());
+            creation_effects.push(value.effects);
+            let temporary = format!("__allen_partial_capture_{}", self.global.allocate_symbol());
+            let scope = self.current_scope();
+            self.bindings.insert(
+                temporary.clone(),
+                LocalBinding {
+                    register: value.register,
+                    symbol: self.global.allocate_symbol(),
+                    value_type: value.value_type,
+                    scope,
+                    value_scope: scope,
+                    mutable: false,
+                    moved: false,
+                },
+            );
+            rewritten[source_index].value = LoweredExpr {
+                kind: LoweredExprKind::Variable(temporary),
+                span: argument.value.span,
+            };
+        }
+        let Some(contract) = self.direct_builtin_partial_contract(callee, &known, span)? else {
+            return Ok(None);
+        };
+        for (source_index, parameter_index) in parameter_indexes.iter().enumerate() {
+            if let Some(found) = &known[*parameter_index] {
+                let expected = &contract.parameters[*parameter_index];
+                if found != expected {
+                    return Err(Diagnostic::new(
+                        "E3011",
+                        format!("partial argument expected {expected}, found {found}"),
+                        arguments[source_index].span,
+                    ));
+                }
+            }
+        }
+        let mut closure_parameters = Vec::new();
+        for (source_index, parameter_index) in parameter_indexes.iter().enumerate() {
+            if !arguments[source_index].placeholder {
+                continue;
+            }
+            let exact = &contract.parameters[*parameter_index];
+            let parameter_name = format!(
+                "__allen_partial_parameter_{}",
+                self.global.allocate_symbol()
+            );
+            closure_parameters.push((
+                parameter_name.clone(),
+                self.lowered_type_for_short_closure(exact, arguments[source_index].span)?,
+                arguments[source_index].span,
+            ));
+            rewritten[source_index].placeholder = false;
+            rewritten[source_index].value = LoweredExpr {
+                kind: LoweredExprKind::Variable(parameter_name),
+                span: arguments[source_index].span,
+            };
+        }
+        let body = LoweredBody {
+            statements: Vec::new(),
+            tail: Some(LoweredExpr {
+                kind: LoweredExprKind::Call {
+                    callee: Box::new(callee.clone()),
+                    type_arguments: Vec::new(),
+                    arguments: rewritten,
+                },
+                span,
+            }),
+            span,
+        };
+        let lowered_return = self.lowered_type_for_short_closure(&contract.result, span)?;
+        let mut compiled = self.compile_closure(
+            &closure_parameters,
+            &lowered_return,
+            Some(&contract.effects),
+            &body,
+            span,
+        )?;
+        let creation_effects = self.union_effects(creation_effects);
+        compiled.effects = self.union_effects([compiled.effects, creation_effects]);
+        compiled.hir.effects = compiled.effects;
+        Ok(Some(compiled))
+    }
+
+    #[allow(clippy::too_many_lines)]
+    fn compile_partial_call(
+        &mut self,
+        callee: &LoweredExpr,
+        type_arguments: &[LoweredType],
+        arguments: &[LoweredCallArgument],
+        span: Span,
+    ) -> Result<CompiledExpr, Diagnostic> {
+        if !type_arguments.is_empty() {
+            return Err(Diagnostic::new(
+                "E3010",
+                "placeholder partial application requires inferred type arguments",
+                span,
+            ));
+        }
+        if let Some(compiled) = self.compile_builtin_partial_call(callee, arguments, span)? {
+            return Ok(compiled);
+        }
+        let LoweredExprKind::Variable(name) = &callee.kind else {
+            return Err(Diagnostic::new(
+                "E3010",
+                "placeholder partial application requires one resolved function name",
+                callee.span,
+            ));
+        };
+        let (target, _) = self.resolve_callable(name)?.ok_or_else(|| {
+            Diagnostic::new("E3005", format!("unknown function '{name}'"), callee.span)
+        })?;
+        if target.is_const || arguments.iter().any(|argument| argument.trailing) {
+            return Err(Diagnostic::new(
+                "E3010",
+                "placeholder partial application requires an ordinary direct function call",
+                span,
+            ));
+        }
+        let has_labels = arguments.iter().any(|argument| argument.label.is_some());
+        if has_labels != arguments.iter().all(|argument| argument.label.is_some()) {
+            return Err(Diagnostic::new(
+                "E3010",
+                "placeholder partial application cannot mix labeled and positional arguments",
+                span,
+            ));
+        }
+        let mut seen = BTreeSet::new();
+        let parameter_indexes = if has_labels {
+            arguments
+                .iter()
+                .map(|argument| {
+                    let (label, label_span) = argument.label.as_ref().expect("labeled partial");
+                    let index = target
+                        .lowered
+                        .parameters
+                        .iter()
+                        .position(|(parameter, _, _)| parameter == label)
+                        .ok_or_else(|| {
+                            Diagnostic::new(
+                                "E3010",
+                                format!("function '{name}' has no parameter labeled '{label}'"),
+                                *label_span,
+                            )
+                        })?;
+                    if !seen.insert(index) {
+                        return Err(Diagnostic::new(
+                            "E3010",
+                            format!("function '{name}' received duplicate label '{label}'"),
+                            *label_span,
+                        ));
+                    }
+                    Ok(index)
+                })
+                .collect::<Result<Vec<_>, Diagnostic>>()?
+        } else {
+            if arguments.len() > target.parameters.len() {
+                return Err(Diagnostic::new(
+                    "E3007",
+                    format!("function '{name}' has the wrong argument count"),
+                    span,
+                ));
+            }
+            (0..arguments.len()).collect()
+        };
+        let mut substitutions = BTreeMap::new();
+        let mut rewritten = arguments.to_vec();
+        let mut creation_effects = Vec::new();
+        for (source_index, (argument, parameter_index)) in
+            arguments.iter().zip(&parameter_indexes).enumerate()
+        {
+            if argument.placeholder {
+                continue;
+            }
+            let parameter = &target.parameters[*parameter_index];
+            let value = if matches!(parameter, SemanticType::Generic(_)) {
+                self.compile_expression(&argument.value)?
+            } else {
+                let expected = concrete_type(parameter, &substitutions, &self.global.effect_sets)?;
+                self.compile_expected(&argument.value, &expected, "partial argument")?
+            };
+            if let SemanticType::Generic(generic) = parameter {
+                if let Some(previous) =
+                    substitutions.insert(generic.clone(), value.value_type.clone())
+                {
+                    if previous != value.value_type {
+                        return Err(Diagnostic::new(
+                            "E3007",
+                            format!("generic '{generic}' inferred as two different types"),
+                            argument.span,
+                        ));
+                    }
+                }
+            }
+            creation_effects.push(value.effects);
+            let temporary = format!("__allen_partial_capture_{}", self.global.allocate_symbol());
+            let scope = self.current_scope();
+            self.bindings.insert(
+                temporary.clone(),
+                LocalBinding {
+                    register: value.register,
+                    symbol: self.global.allocate_symbol(),
+                    value_type: value.value_type,
+                    scope,
+                    value_scope: scope,
+                    mutable: false,
+                    moved: false,
+                },
+            );
+            rewritten[source_index].value = LoweredExpr {
+                kind: LoweredExprKind::Variable(temporary),
+                span: argument.value.span,
+            };
+        }
+        let mut closure_parameters = Vec::new();
+        for (source_index, parameter_index) in parameter_indexes.iter().enumerate() {
+            if !arguments[source_index].placeholder {
+                continue;
+            }
+            let exact = concrete_type(
+                &target.parameters[*parameter_index],
+                &substitutions,
+                &self.global.effect_sets,
+            )
+            .map_err(|_| {
+                Diagnostic::new(
+                    "E3007",
+                    "cannot infer an exact type for this call placeholder",
+                    arguments[source_index].span,
+                )
+            })?;
+            let parameter_name = format!(
+                "__allen_partial_parameter_{}",
+                self.global.allocate_symbol()
+            );
+            closure_parameters.push((
+                parameter_name.clone(),
+                self.lowered_type_for_short_closure(&exact, arguments[source_index].span)?,
+                arguments[source_index].span,
+            ));
+            rewritten[source_index].placeholder = false;
+            rewritten[source_index].value = LoweredExpr {
+                kind: LoweredExprKind::Variable(parameter_name),
+                span: arguments[source_index].span,
+            };
+        }
+        let return_type = concrete_type(
+            &target.return_type,
+            &substitutions,
+            &self.global.effect_sets,
+        )?;
+        let return_type = if target.lowered.is_async {
+            ValueType::Future(Box::new(return_type))
+        } else {
+            return_type
+        };
+        let body_expression = LoweredExpr {
+            kind: LoweredExprKind::Call {
+                callee: Box::new(callee.clone()),
+                type_arguments: Vec::new(),
+                arguments: rewritten,
+            },
+            span,
+        };
+        let body = LoweredBody {
+            statements: Vec::new(),
+            tail: Some(body_expression),
+            span,
+        };
+        let declared_effects = target.effects.clone();
+        let lowered_return = self.lowered_type_for_short_closure(&return_type, span)?;
+        let mut compiled = self.compile_closure(
+            &closure_parameters,
+            &lowered_return,
+            Some(&declared_effects),
+            &body,
+            span,
+        )?;
+        let creation_effects = self.union_effects(creation_effects);
+        compiled.effects = self.union_effects([compiled.effects, creation_effects]);
+        compiled.hir.effects = compiled.effects;
+        Ok(compiled)
+    }
+
+    #[allow(clippy::too_many_lines)]
+    fn compile_extension_call(
+        &mut self,
+        callee: &LoweredExpr,
+        type_arguments: &[LoweredType],
+        arguments: &[LoweredCallArgument],
+        span: Span,
+    ) -> Option<Result<CompiledExpr, Diagnostic>> {
+        if is_task_snapshot_callee(callee)
+            || template_callee(callee).is_some()
+            || tool_callee(callee).is_some()
+            || standard_builtin_callee(callee).is_some()
+            || collection_builtin_callee(callee).is_some()
+            || string_builtin_callee(callee).is_some()
+            || standard_operation_callee(callee).is_some()
+            || capability_builtin_callee(callee).is_some()
+        {
+            return None;
+        }
+        let LoweredExprKind::FieldGet {
+            record,
+            field,
+            field_span,
+        } = &callee.kind
+        else {
+            return None;
+        };
+        if let LoweredExprKind::Variable(name) = &record.kind {
+            let namespace = matches!(
+                name.as_str(),
+                "allen"
+                    | "agent"
+                    | "bytes"
+                    | "capability"
+                    | "float"
+                    | "fs"
+                    | "int"
+                    | "list"
+                    | "map"
+                    | "model"
+                    | "string"
+                    | "sub_agent"
+                    | "task"
+                    | "time"
+                    | "user"
+            );
+            let type_namespace = !self.bindings.contains_key(name)
+                && resolve_named_type(
+                    &self.global.bundle.modules,
+                    &self.global.bundle.types,
+                    &self.info.module,
+                    name,
+                    record.span,
+                )
+                .is_ok();
+            if namespace || type_namespace {
+                return None;
+            }
+        }
+        Some((|| {
+            let receiver = self.compile_expression(record)?;
+            let receiver_effects = receiver.effects;
+            let receiver_type = receiver.value_type.clone();
+            let receiver_scope = self.sub_agent_value_scope(&receiver);
+            let receiver_name = format!(
+                "__allen_extension_receiver_{}",
+                self.global.allocate_symbol()
+            );
+            self.bindings.insert(
+                receiver_name.clone(),
+                LocalBinding {
+                    register: receiver.register,
+                    symbol: self.global.allocate_symbol(),
+                    value_type: receiver_type.clone(),
+                    scope: self.current_scope(),
+                    value_scope: receiver_scope,
+                    mutable: false,
+                    moved: false,
+                },
+            );
+            let receiver_expression = LoweredExpr {
+                kind: LoweredExprKind::Variable(receiver_name),
+                span: record.span,
+            };
+
+            if matches!(&receiver_type, ValueType::Record(fields) if fields.iter().any(|candidate| candidate.name == *field))
+            {
+                let field_value = self.compile_expression(&LoweredExpr {
+                    kind: LoweredExprKind::FieldGet {
+                        record: Box::new(receiver_expression),
+                        field: field.clone(),
+                        field_span: *field_span,
+                    },
+                    span: callee.span,
+                })?;
+                let field_name =
+                    format!("__allen_function_field_{}", self.global.allocate_symbol());
+                self.bindings.insert(
+                    field_name.clone(),
+                    LocalBinding {
+                        register: field_value.register,
+                        symbol: self.global.allocate_symbol(),
+                        value_type: field_value.value_type,
+                        scope: self.current_scope(),
+                        value_scope: self.current_scope(),
+                        mutable: false,
+                        moved: false,
+                    },
+                );
+                let mut compiled = self.compile_call(
+                    &LoweredExpr {
+                        kind: LoweredExprKind::Variable(field_name),
+                        span: callee.span,
+                    },
+                    type_arguments,
+                    arguments,
+                    span,
+                )?;
+                compiled.effects = self.union_effects([receiver_effects, compiled.effects]);
+                compiled.hir.effects = compiled.effects;
+                return Ok(compiled);
+            }
+
+            let namespace = match receiver_type {
+                ValueType::List(_) => Some("list"),
+                ValueType::Map(_, _) => Some("map"),
+                ValueType::String => Some("string"),
+                ValueType::Bytes => Some("bytes"),
+                ValueType::Sequence(_) => Some("seq"),
+                _ => None,
+            };
+            let namespace_callee = namespace.map(|namespace| LoweredExpr {
+                kind: LoweredExprKind::FieldGet {
+                    record: Box::new(LoweredExpr {
+                        kind: LoweredExprKind::Variable(namespace.to_owned()),
+                        span: record.span,
+                    }),
+                    field: field.clone(),
+                    field_span: *field_span,
+                },
+                span: callee.span,
+            });
+            let builtin = namespace_callee.as_ref().is_some_and(|candidate| {
+                collection_builtin_callee(candidate).is_some()
+                    || string_builtin_callee(candidate).is_some()
+            });
+            let candidates = resolve_extension_functions(
+                self.global.bundle,
+                &self.info.module,
+                field,
+                &receiver_type,
+            )?;
+            if builtin && !candidates.is_empty() || candidates.len() > 1 {
+                return Err(Diagnostic::new(
+                    "E3010",
+                    format!("extension call '.{field}' is ambiguous for {receiver_type}"),
+                    *field_span,
+                ));
+            }
+            let mut expanded = Vec::with_capacity(arguments.len() + 1);
+            expanded.push(LoweredCallArgument {
+                label: None,
+                value: receiver_expression,
+                placeholder: false,
+                trailing: false,
+                preceding_call_span: None,
+                span: record.span,
+            });
+            expanded.extend_from_slice(arguments);
+            let labeled = arguments
+                .iter()
+                .any(|argument| !argument.trailing && argument.label.is_some());
+            let mut compiled = if builtin {
+                if labeled {
+                    let receiver_label = builtin_argument_labels(
+                        namespace_callee.as_ref().expect("builtin namespace exists"),
+                    )
+                    .and_then(|labels| labels.first())
+                    .expect("extension builtin has a receiver parameter");
+                    expanded[0].label = Some(((*receiver_label).to_owned(), record.span));
+                }
+                self.compile_call(
+                    namespace_callee.as_ref().expect("builtin namespace exists"),
+                    type_arguments,
+                    &expanded,
+                    span,
+                )?
+            } else if let [symbol] = candidates.as_slice() {
+                let target = self.global.bundle.functions[*symbol as usize].clone();
+                if labeled {
+                    expanded[0].label = Some((target.lowered.parameters[0].0.clone(), record.span));
+                }
+                let direct_callee = LoweredExpr {
+                    kind: LoweredExprKind::Variable(target.lowered.name),
+                    span: callee.span,
+                };
+                let caller_module = std::mem::replace(&mut self.info.module, target.module.clone());
+                let result = self.compile_call(&direct_callee, type_arguments, &expanded, span);
+                self.info.module = caller_module;
+                result?
+            } else {
+                return Err(Diagnostic::new(
+                    "E3005",
+                    format!("type {receiver_type} has no field or extension '{field}'"),
+                    *field_span,
+                ));
+            };
+            compiled.effects = self.union_effects([receiver_effects, compiled.effects]);
+            compiled.hir.effects = compiled.effects;
+            Ok(compiled)
+        })())
+    }
+
+    #[allow(clippy::too_many_lines)]
+    pub(super) fn compile_call(
+        &mut self,
+        callee: &LoweredExpr,
+        type_arguments: &[LoweredType],
+        call_arguments: &[LoweredCallArgument],
+        span: Span,
+    ) -> Result<CompiledExpr, Diagnostic> {
+        if let LoweredExprKind::OptionalFieldGet {
+            receiver,
+            field,
+            field_span,
+            operator_span,
+        } = &callee.kind
+        {
+            return self.compile_optional_call(
+                receiver,
+                field,
+                *operator_span,
+                *field_span,
+                type_arguments,
+                call_arguments,
+                span,
+            );
+        }
+        if let Some(extension) =
+            self.compile_extension_call(callee, type_arguments, call_arguments, span)
+        {
+            return extension;
+        }
+        if call_arguments.iter().any(|argument| argument.placeholder) {
+            return self.compile_partial_call(callee, type_arguments, call_arguments, span);
+        }
+        let source_arguments = call_arguments
+            .iter()
+            .map(|argument| {
+                let _ = argument.preceding_call_span;
+                argument.value.clone()
+            })
+            .collect::<Vec<_>>();
+        let reordered_arguments = builtin_argument_labels(callee)
+            .map(|labels| reorder_labeled_builtin_arguments(call_arguments, labels, span))
+            .transpose()?
+            .flatten();
+        let mut argument_effects = None;
+        let arguments = if let Some(order) = reordered_arguments {
+            if order.iter().copied().eq(0..call_arguments.len()) {
+                source_arguments
+            } else {
+                let mut temporary_names = Vec::with_capacity(call_arguments.len());
+                let mut effects = Vec::with_capacity(call_arguments.len());
+                let mut terminal = false;
+                for argument in call_arguments {
+                    let value = if terminal {
+                        self.compile_without_runtime(|lowering| {
+                            lowering.compile_expression(&argument.value)
+                        })?
+                    } else {
+                        self.compile_expression(&argument.value)?
+                    };
+                    terminal |= value.value_type == ValueType::Never;
+                    effects.push(value.effects);
+                    let name =
+                        format!("__allen_labeled_argument_{}", self.global.allocate_symbol());
+                    let scope = self.active_scopes.last().copied().unwrap_or(0);
+                    self.bindings.insert(
+                        name.clone(),
+                        LocalBinding {
+                            register: value.register,
+                            symbol: self.global.allocate_symbol(),
+                            value_type: value.value_type,
+                            scope,
+                            value_scope: scope,
+                            mutable: false,
+                            moved: false,
+                        },
+                    );
+                    temporary_names.push(name);
+                }
+                argument_effects = Some(self.union_effects(effects));
+                order
+                    .into_iter()
+                    .map(|source_index| LoweredExpr {
+                        kind: LoweredExprKind::Variable(temporary_names[source_index].clone()),
+                        span: call_arguments[source_index].value.span,
+                    })
+                    .collect()
+            }
+        } else {
+            source_arguments
+        };
+        macro_rules! finish_builtin_call {
+            ($value:expr) => {{
+                let mut value = $value?;
+                if let Some(argument_effects) = argument_effects {
+                    value.effects = self.union_effects([value.effects, argument_effects]);
+                    value.hir.effects = value.effects;
+                }
+                return Ok(value);
+            }};
+        }
         if is_task_snapshot_callee(callee) {
-            return self.compile_task_snapshot(arguments, span);
+            finish_builtin_call!(self.compile_task_snapshot(&arguments, span));
+        }
+        if let Some(name) = template_callee(callee) {
+            finish_builtin_call!(self.compile_template_render(
+                name,
+                type_arguments,
+                &arguments,
+                span
+            ));
         }
         if let Some(path) = tool_callee(callee) {
             let binding = self
@@ -6653,7 +13004,7 @@ impl FunctionLowering<'_, '_> {
             self.record_ownership(register, 0, MirOwnershipState::Live, true);
             let call_effect = effect_id(&self.global.effect_sets, &[binding.effect]);
             let effects = self.union_effects([input.effects, call_effect]);
-            return Ok(CompiledExpr {
+            finish_builtin_call!(Ok(CompiledExpr {
                 register,
                 value_type: value_type.clone(),
                 effects,
@@ -6667,10 +13018,10 @@ impl FunctionLowering<'_, '_> {
                     effects,
                     span,
                 ),
-            });
+            }));
         }
         if let Some(builtin) = standard_builtin_callee(callee) {
-            return match builtin {
+            let result = match builtin {
                 StandardBuiltin::Workspace => {
                     if !type_arguments.is_empty() {
                         return Err(Diagnostic::new(
@@ -6679,12 +13030,13 @@ impl FunctionLowering<'_, '_> {
                             span,
                         ));
                     }
-                    self.compile_workspace_get(arguments, span)
+                    self.compile_workspace_get(&arguments, span)
                 }
                 StandardBuiltin::Operation(operation) => {
-                    self.compile_effect_call(operation, type_arguments, arguments, span)
+                    self.compile_effect_call(operation, type_arguments, &arguments, span)
                 }
             };
+            finish_builtin_call!(result);
         }
         if let Some(builtin) = collection_builtin_callee(callee) {
             if !type_arguments.is_empty() {
@@ -6694,7 +13046,7 @@ impl FunctionLowering<'_, '_> {
                     span,
                 ));
             }
-            return self.compile_collection_builtin(builtin, arguments, span);
+            finish_builtin_call!(self.compile_collection_builtin(builtin, &arguments, span));
         }
         if let Some(operation) = string_builtin_callee(callee) {
             if !type_arguments.is_empty() {
@@ -6704,7 +13056,17 @@ impl FunctionLowering<'_, '_> {
                     span,
                 ));
             }
-            return self.compile_string_builtin(operation, arguments, span);
+            finish_builtin_call!(self.compile_string_builtin(operation, &arguments, span));
+        }
+        if let Some(operation) = standard_operation_callee(callee) {
+            if !type_arguments.is_empty() {
+                return Err(Diagnostic::new(
+                    "E3005",
+                    "standard operations do not take type arguments",
+                    span,
+                ));
+            }
+            finish_builtin_call!(self.compile_standard_builtin(operation, &arguments, span));
         }
         if let Some(operation) = capability_builtin_callee(callee) {
             if !type_arguments.is_empty() {
@@ -6714,7 +13076,7 @@ impl FunctionLowering<'_, '_> {
                     span,
                 ));
             }
-            return self.compile_capability_builtin(operation, arguments, span);
+            finish_builtin_call!(self.compile_capability_builtin(operation, &arguments, span));
         }
         if matches!(&callee.kind, LoweredExprKind::Variable(name) if name == "narrow") {
             if type_arguments.len() != 1 || arguments.len() != 1 {
@@ -6757,7 +13119,7 @@ impl FunctionLowering<'_, '_> {
                 destination: u32::from(register),
             });
             let effects = value.effects;
-            return Ok(CompiledExpr {
+            finish_builtin_call!(Ok(CompiledExpr {
                 register,
                 value_type: value_type.clone(),
                 effects,
@@ -6768,7 +13130,102 @@ impl FunctionLowering<'_, '_> {
                     effects,
                     span,
                 ),
+            }));
+        }
+        if !type_arguments.is_empty()
+            && matches!(&callee.kind, LoweredExprKind::Variable(name) if name == "decode")
+        {
+            if type_arguments.len() != 1 || arguments.len() != 1 {
+                return Err(Diagnostic::new(
+                    "E2018",
+                    "decode<T> requires one concrete target type and one Bytes argument",
+                    span,
+                ));
+            }
+            let target = self.annotation_type(&type_arguments[0])?;
+            if !is_strict_schema_type(&target)
+                || contains_workspace(&target)
+                || contains_affine(&target)
+                || contains_sub_agent(&target)
+            {
+                return Err(Diagnostic::new(
+                    "E2018",
+                    "decode target must be a complete concrete entry-boundary value type",
+                    type_arguments[0].span(),
+                ));
+            }
+            let value = self.compile_expected(&arguments[0], &ValueType::Bytes, "decode input")?;
+            let value_type =
+                ValueType::Result(Box::new(target.clone()), Box::new(decode_error_type()));
+            let register = self.allocate(value_type.clone())?;
+            self.code.push(Instruction::Decode {
+                destination: register,
+                source: value.register,
+                target,
             });
+            self.mir.push(MirOperation::Enum {
+                destination: u32::from(register),
+            });
+            let effects = value.effects;
+            return Ok(CompiledExpr {
+                register,
+                value_type: value_type.clone(),
+                effects,
+                hir: self.hir(
+                    HirExprKind::Decode(Box::new(value.hir)),
+                    None,
+                    &value_type,
+                    effects,
+                    span,
+                ),
+            });
+        }
+        if let LoweredExprKind::Variable(name) = &callee.kind {
+            if let Ok(value_type @ ValueType::Newtype { .. }) = resolve_named_type(
+                &self.global.bundle.modules,
+                &self.global.bundle.types,
+                &self.info.module,
+                name,
+                callee.span,
+            ) {
+                if !type_arguments.is_empty() || arguments.len() != 1 {
+                    return Err(Diagnostic::new(
+                        "E3010",
+                        format!("newtype constructor '{name}' requires exactly one argument"),
+                        span,
+                    ));
+                }
+                let ValueType::Newtype { underlying, .. } = &value_type else {
+                    unreachable!("matched newtype")
+                };
+                let value = self.compile_expected(
+                    &arguments[0],
+                    underlying,
+                    "newtype constructor argument",
+                )?;
+                let register = self.allocate(value_type.clone())?;
+                self.code.push(Instruction::NewtypeWrap {
+                    destination: register,
+                    source: value.register,
+                });
+                self.mir.push(MirOperation::NewtypeWrap {
+                    destination: u32::from(register),
+                    source: u32::from(value.register),
+                });
+                let effects = value.effects;
+                return Ok(CompiledExpr {
+                    register,
+                    value_type: value_type.clone(),
+                    effects,
+                    hir: self.hir(
+                        HirExprKind::NewtypeWrap(Box::new(value.hir)),
+                        None,
+                        &value_type,
+                        effects,
+                        span,
+                    ),
+                });
+            }
         }
         if !type_arguments.is_empty() {
             return Err(Diagnostic::new(
@@ -6792,7 +13249,7 @@ impl FunctionLowering<'_, '_> {
                         return self.compile_user_enum(
                             enum_name,
                             field,
-                            &LoweredEnumValuePayload::Tuple(arguments.to_vec()),
+                            &LoweredEnumValuePayload::Tuple(arguments.clone()),
                             span,
                         );
                     }
@@ -6804,6 +13261,13 @@ impl FunctionLowering<'_, '_> {
                 callee.span,
             ));
         };
+        if name == "to_int" {
+            finish_builtin_call!(self.compile_standard_builtin(
+                StandardOperation::ToInt,
+                &arguments,
+                span
+            ));
+        }
         if matches!(
             name.as_str(),
             "to_float" | "to_string" | "to_bytes" | "to_unknown"
@@ -6934,7 +13398,46 @@ impl FunctionLowering<'_, '_> {
                 ),
             });
         }
+        if name == "fail" && arguments.len() == 1 {
+            let values = arguments
+                .iter()
+                .map(|argument| self.compile_expression(argument))
+                .collect::<Result<Vec<_>, _>>()?;
+            if values.len() != 1 || values[0].value_type != ValueType::String {
+                return Err(Diagnostic::new(
+                    "E3011",
+                    "fail requires one String reason",
+                    span,
+                ));
+            }
+            self.code.push(Instruction::Fail {
+                reason: values[0].register,
+            });
+            let effects = values[0].effects;
+            return Ok(CompiledExpr {
+                register: values[0].register,
+                value_type: ValueType::Never,
+                effects,
+                hir: self.hir(
+                    HirExprKind::Fail(Box::new(values.into_iter().next().expect("one value").hir)),
+                    None,
+                    &ValueType::Never,
+                    effects,
+                    span,
+                ),
+            });
+        }
         if let Some(binding) = self.bindings.get(name).cloned() {
+            if let Some(labeled_argument) = call_arguments
+                .iter()
+                .find(|argument| argument.label.is_some())
+            {
+                return Err(Diagnostic::new(
+                    "E3010",
+                    "calls through function values use positional arguments",
+                    labeled_argument.span,
+                ));
+            }
             let ValueType::Function {
                 parameters,
                 return_type,
@@ -7036,26 +13539,175 @@ impl FunctionLowering<'_, '_> {
             });
         }
 
-        let symbol = resolve_function_name(self.global.bundle, &self.info.module, name)?
-            .ok_or_else(|| {
-                Diagnostic::new("E3005", format!("unknown function '{name}'"), callee.span)
-            })?;
-        let target = self.global.bundle.functions[symbol as usize].clone();
-        if arguments.len() != target.parameters.len() {
+        let (target, _) = self.resolve_callable(name)?.ok_or_else(|| {
+            Diagnostic::new("E3005", format!("unknown function '{name}'"), callee.span)
+        })?;
+        let symbol = target.symbol;
+        if target.is_const {
             return Err(Diagnostic::new(
-                "E3007",
-                format!("function '{name}' has the wrong argument count"),
-                span,
+                "E3005",
+                format!("constant '{name}' is a value and cannot be called"),
+                callee.span,
             ));
         }
+        let trailing_arguments = call_arguments
+            .iter()
+            .enumerate()
+            .filter(|(_, argument)| argument.trailing)
+            .collect::<Vec<_>>();
+        if trailing_arguments.len() > 1
+            || trailing_arguments
+                .first()
+                .is_some_and(|(index, _)| *index + 1 != call_arguments.len())
+        {
+            return Err(Diagnostic::new(
+                "E3010",
+                "a call can have only one final trailing callback",
+                trailing_arguments
+                    .first()
+                    .map_or(span, |(_, argument)| argument.span),
+            ));
+        }
+        let supplied_labels = call_arguments
+            .iter()
+            .filter(|argument| !argument.trailing)
+            .filter_map(|argument| argument.label.as_ref());
+        let has_labeled_arguments = supplied_labels.clone().next().is_some();
+        let has_positional_arguments = call_arguments
+            .iter()
+            .any(|argument| !argument.trailing && argument.label.is_none());
+        if has_labeled_arguments && has_positional_arguments {
+            return Err(Diagnostic::new(
+                "E3010",
+                format!("function '{name}' call cannot mix labeled and positional arguments"),
+                call_arguments
+                    .iter()
+                    .find(|argument| !argument.trailing && argument.label.is_none())
+                    .map_or(span, |argument| argument.span),
+            ));
+        }
+        let parameter_indexes = if has_labeled_arguments {
+            let mut indexes = Vec::with_capacity(call_arguments.len());
+            let mut seen = BTreeSet::new();
+            for argument in call_arguments {
+                let index = if argument.trailing {
+                    target.parameters.len().checked_sub(1).ok_or_else(|| {
+                        Diagnostic::new(
+                            "E3010",
+                            format!("function '{name}' has no final callback parameter"),
+                            argument.span,
+                        )
+                    })?
+                } else {
+                    let (label, label_span) = argument.label.as_ref().expect("labeled call");
+                    target
+                        .lowered
+                        .parameters
+                        .iter()
+                        .position(|(parameter, _, _)| parameter == label)
+                        .ok_or_else(|| {
+                            Diagnostic::new(
+                                "E3010",
+                                format!("function '{name}' has no parameter labeled '{label}'"),
+                                *label_span,
+                            )
+                        })?
+                };
+                if !seen.insert(index) {
+                    return Err(Diagnostic::new(
+                        "E3010",
+                        format!("function '{name}' received the same parameter twice"),
+                        argument.span,
+                    ));
+                }
+                indexes.push(index);
+            }
+            let missing = target
+                .lowered
+                .parameters
+                .iter()
+                .enumerate()
+                .filter_map(|(index, (parameter, _, _))| {
+                    (!seen.contains(&index) && target.lowered.parameter_defaults[index].is_none())
+                        .then_some(parameter.as_str())
+                })
+                .collect::<Vec<_>>();
+            if !missing.is_empty() {
+                return Err(Diagnostic::new(
+                    "E3010",
+                    format!(
+                        "function '{name}' is missing labeled argument{} {}",
+                        if missing.len() == 1 { "" } else { "s" },
+                        missing.join(", ")
+                    ),
+                    span,
+                ));
+            }
+            indexes
+        } else {
+            let ordinary_count = call_arguments
+                .iter()
+                .filter(|argument| !argument.trailing)
+                .count();
+            let trailing = usize::from(!trailing_arguments.is_empty());
+            if ordinary_count + trailing > target.parameters.len() {
+                return Err(Diagnostic::new(
+                    "E3007",
+                    format!("function '{name}' has the wrong argument count"),
+                    span,
+                ));
+            }
+            let mut indexes = (0..ordinary_count).collect::<Vec<_>>();
+            if trailing == 1 {
+                let final_index = target.parameters.len() - 1;
+                if indexes.contains(&final_index) {
+                    return Err(Diagnostic::new(
+                        "E3010",
+                        format!("function '{name}' received its final parameter twice"),
+                        trailing_arguments[0].1.span,
+                    ));
+                }
+                indexes.push(final_index);
+            }
+            if let Some((missing_index, (missing, _, _))) = target
+                .lowered
+                .parameters
+                .iter()
+                .enumerate()
+                .find(|(index, _)| {
+                    !indexes.contains(index) && target.lowered.parameter_defaults[*index].is_none()
+                })
+            {
+                let _ = missing_index;
+                return Err(Diagnostic::new(
+                    "E3007",
+                    format!("function '{name}' is missing required parameter '{missing}'"),
+                    span,
+                ));
+            }
+            indexes
+        };
         let mut substitutions = BTreeMap::new();
-        let mut values = Vec::with_capacity(arguments.len());
-        for (parameter, argument) in target.parameters.iter().zip(arguments) {
+        let mut source_values = Vec::with_capacity(target.parameters.len());
+        for (argument, parameter_index) in arguments.iter().zip(parameter_indexes) {
+            if call_arguments[source_values.len()].placeholder {
+                return Err(Diagnostic::new(
+                    "E3010",
+                    "call placeholders require partial-application lowering",
+                    call_arguments[source_values.len()].span,
+                ));
+            }
+            let parameter = &target.parameters[parameter_index];
             let value = if matches!(parameter, SemanticType::Generic(_)) {
                 self.compile_expression(argument)?
             } else {
-                let expected = concrete_type(parameter, &substitutions, &self.global.effect_sets)?;
-                self.compile_expected(argument, &expected, "function argument")?
+                match concrete_type(parameter, &substitutions, &self.global.effect_sets) {
+                    Ok(expected) => {
+                        self.compile_expected(argument, &expected, "function argument")?
+                    }
+                    Err(_) if has_labeled_arguments => self.compile_expression(argument)?,
+                    Err(error) => return Err(error),
+                }
             };
             if let SemanticType::Generic(generic) = parameter {
                 if let Some(previous) =
@@ -7070,7 +13722,110 @@ impl FunctionLowering<'_, '_> {
                     }
                 }
             }
-            values.push(value);
+            source_values.push((parameter_index, value));
+        }
+        let mut values = (0..target.parameters.len())
+            .map(|_| None)
+            .collect::<Vec<Option<CompiledExpr>>>();
+        let mut value_names = vec![None; target.parameters.len()];
+        for (parameter_index, value) in source_values {
+            let temporary = format!("__allen_call_argument_{}", self.global.allocate_symbol());
+            let scope = self.active_scopes.last().copied().unwrap_or(0);
+            self.bindings.insert(
+                temporary.clone(),
+                LocalBinding {
+                    register: value.register,
+                    symbol: self.global.allocate_symbol(),
+                    value_type: value.value_type.clone(),
+                    scope,
+                    value_scope: scope,
+                    mutable: false,
+                    moved: false,
+                },
+            );
+            value_names[parameter_index] = Some(temporary);
+            values[parameter_index] = Some(value);
+        }
+        for parameter_index in 0..target.parameters.len() {
+            if values[parameter_index].is_some() {
+                continue;
+            }
+            let default = target.lowered.parameter_defaults[parameter_index]
+                .as_ref()
+                .expect("required parameter omissions were rejected");
+            let helper_name = default_helper_name(&target.lowered.name, parameter_index);
+            let helper_arguments = value_names[..parameter_index]
+                .iter()
+                .map(|name| LoweredCallArgument {
+                    label: None,
+                    value: LoweredExpr {
+                        kind: LoweredExprKind::Variable(
+                            name.clone()
+                                .expect("earlier default argument was populated"),
+                        ),
+                        span: default.span,
+                    },
+                    placeholder: false,
+                    trailing: false,
+                    preceding_call_span: None,
+                    span: default.span,
+                })
+                .collect::<Vec<_>>();
+            let helper_callee = LoweredExpr {
+                kind: LoweredExprKind::Variable(helper_name),
+                span: default.span,
+            };
+            let caller_module = std::mem::replace(&mut self.info.module, target.module.clone());
+            let value = self.compile_call(&helper_callee, &[], &helper_arguments, default.span);
+            self.info.module = caller_module;
+            let value = value?;
+            let parameter = &target.parameters[parameter_index];
+            if let SemanticType::Generic(generic) = parameter {
+                if let Some(previous) =
+                    substitutions.insert(generic.clone(), value.value_type.clone())
+                {
+                    if previous != value.value_type {
+                        return Err(Diagnostic::new(
+                            "E3007",
+                            format!("generic '{generic}' inferred as two different types"),
+                            default.span,
+                        ));
+                    }
+                }
+            }
+            let temporary = format!("__allen_default_argument_{}", self.global.allocate_symbol());
+            let scope = self.active_scopes.last().copied().unwrap_or(0);
+            self.bindings.insert(
+                temporary.clone(),
+                LocalBinding {
+                    register: value.register,
+                    symbol: self.global.allocate_symbol(),
+                    value_type: value.value_type.clone(),
+                    scope,
+                    value_scope: scope,
+                    mutable: false,
+                    moved: false,
+                },
+            );
+            value_names[parameter_index] = Some(temporary);
+            values[parameter_index] = Some(value);
+        }
+        let values = values
+            .into_iter()
+            .map(|value| value.expect("every call parameter was populated"))
+            .collect::<Vec<_>>();
+        for (parameter, value) in target.parameters.iter().zip(&values) {
+            let expected = concrete_type(parameter, &substitutions, &self.global.effect_sets)?;
+            if value.value_type != ValueType::Never && value.value_type != expected {
+                return Err(Diagnostic::new(
+                    "E3007",
+                    format!(
+                        "function argument expects {expected}, found {}",
+                        value.value_type
+                    ),
+                    span,
+                ));
+            }
         }
         let captured_obligation = values.iter().any(|value| {
             self.must_consume(value.register) || matches!(value.value_type, ValueType::Task(_))
@@ -7142,6 +13897,8 @@ impl FunctionLowering<'_, '_> {
                     instance.clone(),
                     function,
                     Vec::new(),
+                    BTreeMap::new(),
+                    BTreeSet::new(),
                     &substitutions,
                 )
                 .map_err(|diagnostic| diagnostic.with_source(&target.module))?;
@@ -7552,6 +14309,161 @@ impl FunctionLowering<'_, '_> {
         })
     }
 
+    fn lowered_type_for_short_closure(
+        &self,
+        value_type: &ValueType,
+        span: Span,
+    ) -> Result<LoweredType, Diagnostic> {
+        let named = |name: &str| Ok(LoweredType::Named(name.to_owned(), span));
+        match value_type {
+            ValueType::Int => named("Int"),
+            ValueType::Bool => named("Bool"),
+            ValueType::Float => named("Float"),
+            ValueType::String => named("String"),
+            ValueType::Bytes => named("Bytes"),
+            ValueType::Unit => named("Void"),
+            ValueType::List(value) => Ok(LoweredType::List(
+                Box::new(self.lowered_type_for_short_closure(value, span)?),
+                span,
+            )),
+            ValueType::Option(value) => Ok(LoweredType::Option(
+                Box::new(self.lowered_type_for_short_closure(value, span)?),
+                span,
+            )),
+            ValueType::Map(key, value) => Ok(LoweredType::Map(
+                Box::new(self.lowered_type_for_short_closure(key, span)?),
+                Box::new(self.lowered_type_for_short_closure(value, span)?),
+                span,
+            )),
+            ValueType::Result(ok, error) => Ok(LoweredType::Result(
+                Box::new(self.lowered_type_for_short_closure(ok, span)?),
+                Box::new(self.lowered_type_for_short_closure(error, span)?),
+                span,
+            )),
+            ValueType::Future(value) => Ok(LoweredType::Future(
+                Box::new(self.lowered_type_for_short_closure(value, span)?),
+                span,
+            )),
+            ValueType::Task(value) => Ok(LoweredType::Task(
+                Box::new(self.lowered_type_for_short_closure(value, span)?),
+                span,
+            )),
+            ValueType::Workspace => named("Workspace"),
+            ValueType::ExternalFsAccess => named("ExternalFsAccess"),
+            ValueType::SubAgent => named("SubAgent"),
+            ValueType::Tuple(values) => Ok(LoweredType::Tuple(
+                values
+                    .iter()
+                    .map(|value| self.lowered_type_for_short_closure(value, span))
+                    .collect::<Result<_, _>>()?,
+                span,
+            )),
+            ValueType::Record(fields) => Ok(LoweredType::Record(
+                fields
+                    .iter()
+                    .map(|field| {
+                        Ok((
+                            field.name.clone(),
+                            self.lowered_type_for_short_closure(&field.value_type, span)?,
+                            span,
+                        ))
+                    })
+                    .collect::<Result<_, Diagnostic>>()?,
+                span,
+            )),
+            ValueType::Function {
+                parameters,
+                return_type,
+                effects,
+            } => Ok(LoweredType::Function {
+                parameters: parameters
+                    .iter()
+                    .map(|value| self.lowered_type_for_short_closure(value, span))
+                    .collect::<Result<_, _>>()?,
+                return_type: Box::new(self.lowered_type_for_short_closure(return_type, span)?),
+                effects: self.global.effect_sets[*effects as usize].clone(),
+                span,
+            }),
+            ValueType::Enum(id) => self.global.bundle.enum_types.get(*id as usize).map_or_else(
+                || {
+                    Err(Diagnostic::new(
+                        "E3011",
+                        "concise lambda expected type is invalid",
+                        span,
+                    ))
+                },
+                |value| named(&value.name),
+            ),
+            ValueType::Newtype { name, .. } => named(name.rsplit("::").next().unwrap_or(name)),
+            _ => Err(Diagnostic::new(
+                "E3011",
+                "concise lambda requires one exact concrete function type",
+                span,
+            )),
+        }
+    }
+
+    fn compile_short_closure(
+        &mut self,
+        parameters: &[(String, Span)],
+        body: &LoweredExpr,
+        expected: &ValueType,
+        span: Span,
+    ) -> Result<CompiledExpr, Diagnostic> {
+        let ValueType::Function {
+            parameters: expected_parameters,
+            return_type,
+            effects,
+        } = expected
+        else {
+            return Err(Diagnostic::new(
+                "E3011",
+                "concise lambda requires one exact expected function type",
+                span,
+            ));
+        };
+        if parameters.len() != expected_parameters.len() {
+            return Err(Diagnostic::new(
+                "E3011",
+                "concise lambda parameter count does not match its expected function type",
+                span,
+            ));
+        }
+        let parameters = parameters
+            .iter()
+            .zip(expected_parameters)
+            .map(|((name, parameter_span), value_type)| {
+                Ok((
+                    name.clone(),
+                    self.lowered_type_for_short_closure(value_type, *parameter_span)?,
+                    *parameter_span,
+                ))
+            })
+            .collect::<Result<Vec<_>, Diagnostic>>()?;
+        let return_type = self.lowered_type_for_short_closure(return_type, body.span)?;
+        let body = LoweredBody {
+            statements: Vec::new(),
+            tail: Some(body.clone()),
+            span: body.span,
+        };
+        let declared_effects = self.global.effect_sets[*effects as usize].clone();
+        let compiled = self.compile_closure(
+            &parameters,
+            &return_type,
+            Some(&declared_effects),
+            &body,
+            span,
+        )?;
+        if compiled.value_type != *expected {
+            return Err(Diagnostic::new(
+                "E3011",
+                "concise lambda does not match its expected function type",
+                span,
+            ));
+        }
+        Ok(compiled)
+    }
+
     #[allow(clippy::too_many_lines)]
     pub(super) fn compile_closure(
         &mut self,
@@ -7629,6 +14541,7 @@ impl FunctionLowering<'_, '_> {
             name_span: span,
             generics: Vec::new(),
             parameters: parameters.to_vec(),
+            parameter_defaults: vec![None; parameters.len()],
             return_type: return_type.clone(),
             declared_effects: declared_effects.map(<[String]>::to_vec),
             effects_span: None,
@@ -7636,6 +14549,7 @@ impl FunctionLowering<'_, '_> {
         };
         let closure_symbol = self.global.allocate_symbol();
         let mut fake = FunctionInfo {
+            is_const: false,
             module: self.info.module.clone(),
             symbol: closure_symbol,
             bytecode: None,
@@ -7689,6 +14603,8 @@ impl FunctionLowering<'_, '_> {
             fake.clone(),
             function_id,
             capture_bindings,
+            self.local_functions.clone(),
+            self.reserved_local_names(),
             &BTreeMap::new(),
         )
         .map_err(|diagnostic| diagnostic.with_source(&fake.module))?;
@@ -7765,7 +14681,7 @@ impl FunctionLowering<'_, '_> {
                     annotation,
                     value,
                 } => {
-                    if self.bindings.contains_key(name) {
+                    if self.bindings.contains_key(name) || self.local_name_conflicts(name) {
                         return Err(Diagnostic::new(
                             "E3005",
                             format!("duplicate local binding '{name}'"),
@@ -7939,6 +14855,9 @@ impl FunctionLowering<'_, '_> {
                         returned = Some(value.register);
                     }
                 }
+                LoweredStatement::LocalFunction(function) => {
+                    self.compile_local_function_declaration(function)?;
+                }
                 LoweredStatement::Break(span) | LoweredStatement::Continue(span) => {
                     let value = self.compile_loop_control(
                         matches!(statement, LoweredStatement::Break(_)),
@@ -8019,7 +14938,10 @@ impl FunctionLowering<'_, '_> {
                 ));
             }
             self.record_ownership(value.register, scope, MirOwnershipState::Returned, true);
-        } else if matches!(value.value_type, ValueType::Future(_)) {
+        } else if matches!(
+            value.value_type,
+            ValueType::Future(_) | ValueType::Sequence(_)
+        ) {
             self.consume_ownership(value.register, MirOwnershipState::Returned);
         }
         self.reject_live_tasks(Some(value.register), span)
@@ -8050,6 +14972,43 @@ pub(super) fn free_variables(
     body: &LoweredBody,
     parameters: &[(String, LoweredType, Span)],
 ) -> BTreeSet<String> {
+    fn bind_pattern(pattern: &LoweredPattern, bound: &mut BTreeSet<String>) {
+        match pattern {
+            LoweredPattern::Binding { name, .. } => {
+                bound.insert(name.clone());
+            }
+            LoweredPattern::Record { fields, .. } => {
+                for (_, _, pattern) in fields {
+                    bind_pattern(pattern, bound);
+                }
+            }
+            LoweredPattern::Enum {
+                patterns, fields, ..
+            } => {
+                for pattern in patterns {
+                    bind_pattern(pattern, bound);
+                }
+                if let Some(fields) = fields {
+                    for (_, _, pattern) in fields {
+                        bind_pattern(pattern, bound);
+                    }
+                }
+            }
+            LoweredPattern::Option { payload, .. } => {
+                if let Some(pattern) = payload {
+                    bind_pattern(pattern, bound);
+                }
+            }
+            LoweredPattern::Result { payload, .. } => bind_pattern(payload, bound),
+            LoweredPattern::Or { alternatives, .. } => {
+                for pattern in alternatives {
+                    bind_pattern(pattern, bound);
+                }
+            }
+            LoweredPattern::Wildcard | LoweredPattern::Bool(_) | LoweredPattern::Range { .. } => {}
+        }
+    }
+
     pub(super) fn expression(
         value: &LoweredExpr,
         bound: &BTreeSet<String>,
@@ -8076,9 +15035,33 @@ pub(super) fn free_variables(
                     expression(value, bound, free);
                 }
             }
+            LoweredExprKind::ListWithSpread(items) => {
+                for item in items {
+                    expression(&item.value, bound, free);
+                }
+            }
             LoweredExprKind::Map(entries) => {
                 for (key, value) in entries {
                     expression(key, bound, free);
+                    expression(value, bound, free);
+                }
+            }
+            LoweredExprKind::MapWithSpread(items) => {
+                for item in items {
+                    match item {
+                        super::LoweredMapItem::Entry { key, value, .. } => {
+                            expression(key, bound, free);
+                            expression(value, bound, free);
+                        }
+                        super::LoweredMapItem::Spread { value, .. } => {
+                            expression(value, bound, free);
+                        }
+                    }
+                }
+            }
+            LoweredExprKind::RecordUpdate { base, fields, .. } => {
+                expression(base, bound, free);
+                for (_, value, _) in fields {
                     expression(value, bound, free);
                 }
             }
@@ -8105,15 +15088,33 @@ pub(super) fn free_variables(
                     expression(data, bound, free);
                 }
             }
-            LoweredExprKind::Binary { left, right, .. } => {
+            LoweredExprKind::Binary { left, right, .. }
+            | LoweredExprKind::Compose { left, right, .. }
+            | LoweredExprKind::Range {
+                start: left,
+                end: right,
+                ..
+            } => {
                 expression(left, bound, free);
                 expression(right, bound, free);
             }
-            LoweredExprKind::Index { collection, index } => {
+            LoweredExprKind::Pipe { left, stage, .. } => {
+                expression(left, bound, free);
+                expression(stage, bound, free);
+            }
+            LoweredExprKind::Index { collection, index }
+            | LoweredExprKind::Slice {
+                collection,
+                range: index,
+                ..
+            } => {
                 expression(collection, bound, free);
                 expression(index, bound, free);
             }
             LoweredExprKind::FieldGet { record, .. }
+            | LoweredExprKind::OptionalFieldGet {
+                receiver: record, ..
+            }
             | LoweredExprKind::Try(record)
             | LoweredExprKind::Unary {
                 operand: record, ..
@@ -8131,30 +15132,7 @@ pub(super) fn free_variables(
                 expression(source, bound, free);
                 for (pattern, value, _) in arms {
                     let mut arm_bound = bound.clone();
-                    match pattern {
-                        LoweredPattern::Option { binding, .. }
-                        | LoweredPattern::Result { binding, .. } => {
-                            if let Some(binding) = binding {
-                                arm_bound.insert(binding.clone());
-                            }
-                        }
-                        LoweredPattern::Record { fields, .. } => {
-                            arm_bound.extend(
-                                fields.iter().filter_map(|(_, _, binding)| binding.clone()),
-                            );
-                        }
-                        LoweredPattern::Enum {
-                            bindings, fields, ..
-                        } => {
-                            arm_bound.extend(bindings.iter().filter_map(Clone::clone));
-                            if let Some(fields) = fields {
-                                arm_bound.extend(
-                                    fields.iter().filter_map(|(_, _, binding)| binding.clone()),
-                                );
-                            }
-                        }
-                        LoweredPattern::Wildcard | LoweredPattern::Bool(_) => {}
-                    }
+                    bind_pattern(pattern, &mut arm_bound);
                     expression(value, &arm_bound, free);
                 }
             }
@@ -8182,13 +15160,15 @@ pub(super) fn free_variables(
                     && standard_builtin_callee(callee).is_none()
                     && collection_builtin_callee(callee).is_none()
                     && string_builtin_callee(callee).is_none()
+                    && standard_operation_callee(callee).is_none()
                     && capability_builtin_callee(callee).is_none()
+                    && template_callee(callee).is_none()
                     && tool_callee(callee).is_none()
                 {
                     expression(callee, bound, free);
                 }
                 for argument in arguments {
-                    expression(argument, bound, free);
+                    expression(&argument.value, bound, free);
                 }
             }
             LoweredExprKind::Closure {
@@ -8197,6 +15177,11 @@ pub(super) fn free_variables(
                 let mut nested = bound.clone();
                 nested.extend(parameters.iter().map(|(name, _, _)| name.clone()));
                 body_free_variables(body, &mut nested, free);
+            }
+            LoweredExprKind::ShortClosure { parameters, body } => {
+                let mut nested = bound.clone();
+                nested.extend(parameters.iter().map(|(name, _)| name.clone()));
+                expression(body, &nested, free);
             }
             LoweredExprKind::Unit
             | LoweredExprKind::Int(_)
@@ -8253,10 +15238,6 @@ pub(super) fn free_variables(
                 } => {
                     match source {
                         LoweredForSource::Iterable(value) => expression(value, bound, free),
-                        LoweredForSource::Range { start, end } => {
-                            expression(start, bound, free);
-                            expression(end, bound, free);
-                        }
                     }
                     let mut nested = bound.clone();
                     nested.extend(
@@ -8266,6 +15247,12 @@ pub(super) fn free_variables(
                             .filter_map(|element| element.name.clone()),
                     );
                     body_free_variables(body, &mut nested, free);
+                }
+                LoweredStatement::LocalFunction(function) => {
+                    bound.insert(function.name.clone());
+                    let mut nested = bound.clone();
+                    nested.extend(function.parameters.iter().map(|(name, _, _)| name.clone()));
+                    body_free_variables(&function.body, &mut nested, free);
                 }
                 LoweredStatement::Break(_) | LoweredStatement::Continue(_) => {}
             }
@@ -8290,6 +15277,8 @@ pub(super) fn lower_one_function(
     info: FunctionInfo,
     function_id: FunctionId,
     capture_values: Vec<(String, ValueType, SymbolId)>,
+    local_functions: BTreeMap<String, FunctionInfo>,
+    unavailable_local_functions: BTreeSet<String>,
     substitutions: &BTreeMap<String, ValueType>,
 ) -> Result<(Function, HirFunction, MirFunction), Diagnostic> {
     if info.lowered.is_async {
@@ -8305,6 +15294,9 @@ pub(super) fn lower_one_function(
         parameters: Vec::new(),
         captures: Vec::new(),
         bindings: BTreeMap::new(),
+        local_functions,
+        unavailable_local_functions,
+        local_function_ordinal: 0,
         code: Vec::new(),
         instruction_spans: BTreeMap::new(),
         mir: Vec::new(),
@@ -8324,6 +15316,13 @@ pub(super) fn lower_one_function(
         sub_agent_value_scopes: BTreeMap::new(),
     };
     for ((name, _, span), parameter_type) in info.lowered.parameters.iter().zip(&info.parameters) {
+        if lowering.local_name_conflicts(name) {
+            return Err(Diagnostic::new(
+                "E3005",
+                format!("parameter '{name}' conflicts with a local function"),
+                *span,
+            ));
+        }
         let value_type =
             concrete_type(parameter_type, substitutions, &lowering.global.effect_sets)?;
         let register = lowering.allocate(value_type.clone())?;
@@ -8394,24 +15393,51 @@ pub(super) fn lower_one_function(
     // Bytecode function symbols use the verifier's normalized path grammar.
     // Source, import, and entry metadata retain the exact `pkg://` identity.
     let bytecode_module = bytecode_module_path(&info.module);
+    let bytecode_name =
+        if info.lowered.name.starts_with("$default@") || info.lowered.name.starts_with("$local@") {
+            format!("$closure@{}", info.symbol)
+        } else {
+            info.lowered.name.clone()
+        };
     let symbol_name = if substitutions.is_empty() {
-        format!("{bytecode_module}::{}", info.lowered.name)
+        format!("{bytecode_module}::{bytecode_name}")
     } else {
         let arguments = substitutions
             .iter()
             .map(|(name, value_type)| format!("{name}={value_type}"))
             .collect::<Vec<_>>()
             .join(",");
-        format!("{bytecode_module}::{}<{arguments}>", info.lowered.name)
+        format!("{bytecode_module}::{bytecode_name}<{arguments}>")
     };
-    let stop_reason = match lowering.code.last() {
-        Some(Instruction::Stop { reason }) => Some(*reason),
+    let terminal = match lowering.code.last() {
+        Some(Instruction::Stop { reason }) => Some(MirTerminator::Stop {
+            reason: u32::from(*reason),
+        }),
+        Some(Instruction::Fail { reason }) => Some(MirTerminator::Fail {
+            reason: u32::from(*reason),
+        }),
         _ => None,
     };
     let instruction_spans = std::mem::take(&mut lowering.instruction_spans);
     let function = Function {
         name: symbol_name,
         parameters: lowering.parameters,
+        parameter_names: info
+            .lowered
+            .parameters
+            .iter()
+            .map(|(name, _, _)| name.clone())
+            .collect(),
+        parameter_default_digests: info
+            .lowered
+            .parameter_defaults
+            .iter()
+            .map(|default| {
+                default
+                    .as_ref()
+                    .map(|default| parameter_default_digest(&default.source_text))
+            })
+            .collect(),
         captures: lowering.captures,
         registers: lowering.registers,
         return_type,
@@ -8455,10 +15481,8 @@ pub(super) fn lower_one_function(
     let final_terminator = if let Some(entry) = lowering.mir_entries.first() {
         MirTerminator::Goto { target: *entry }
     } else {
-        match stop_reason {
-            Some(reason) => MirTerminator::Stop {
-                reason: u32::from(reason),
-            },
+        match terminal.clone() {
+            Some(terminal) => terminal,
             _ => MirTerminator::Return {
                 source: u32::from(return_register),
             },
@@ -8472,10 +15496,8 @@ pub(super) fn lower_one_function(
     for continuation in lowering.mir_continuations {
         let block = &mut blocks[continuation as usize];
         if matches!(block.terminator, MirTerminator::Unreachable) {
-            block.terminator = match stop_reason {
-                Some(reason) => MirTerminator::Stop {
-                    reason: u32::from(reason),
-                },
+            block.terminator = match terminal.clone() {
+                Some(terminal) => terminal,
                 _ => MirTerminator::Return {
                     source: u32::from(return_register),
                 },

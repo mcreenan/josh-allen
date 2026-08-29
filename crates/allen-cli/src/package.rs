@@ -33,6 +33,13 @@ pub(crate) fn load_and_compile(root: &Path) -> Result<CompiledPackage, String> {
     compile_loaded(&loaded)
 }
 
+pub(crate) fn load_test_package(root: &Path) -> Result<LoadedPackage, String> {
+    let lock_path = root.join("allen.lock");
+    let lock_text = read_bounded_utf8(&lock_path, 16 * 1024 * 1024)?;
+    load_verified_package(root, &lock_text, &LoadLimits::default())
+        .map_err(|error| error.to_string())
+}
+
 fn read_bounded_utf8(path: &Path, maximum: usize) -> Result<String, String> {
     let mut bytes = Vec::new();
     fs::File::open(path)

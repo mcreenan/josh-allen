@@ -3,12 +3,12 @@ use std::collections::BTreeMap;
 use josh_protocol::{
     AgentAskParams, AgentMessageParams, AgentMessageResult, AgentTranscriptParams,
     AgentTranscriptResult, CatalogSetParams, CatalogSetResult, EventKind, EventSequenceTracker,
-    ExecutionEventParams, FEATURES, FileEncoding, GrantDuration, InitializeParams,
-    InitializeResult, ModelRequestParams, PROTOCOL_VERSION, PeerInfo, PermissionRequestParams,
-    PermissionRequestResult, PermissionRevokeParams, PermissionRight, PermissionTargetKind,
-    ProgramLoadParams, ProtocolError, ProtocolLimits, SourceFile, SubAgentAskParams,
-    SubAgentCreateParams, SubAgentCreateResult, SubAgentMessageParams, SubAgentRunParams,
-    ToolInvokeResult, TranscriptPart, Validate, request_params,
+    ExecutionEventParams, ExecutionStartParams, FEATURES, FileEncoding, GrantDuration,
+    InitializeParams, InitializeResult, ModelRequestParams, PROTOCOL_VERSION, PeerInfo,
+    PermissionRequestParams, PermissionRequestResult, PermissionRevokeParams, PermissionRight,
+    PermissionTargetKind, ProgramLoadParams, ProtocolError, ProtocolLimits, SourceFile,
+    SubAgentAskParams, SubAgentCreateParams, SubAgentCreateResult, SubAgentMessageParams,
+    SubAgentRunParams, ToolInvokeResult, TranscriptPart, Validate, request_params,
 };
 use serde_json::json;
 
@@ -190,7 +190,7 @@ fn initialize_result_features_are_exact() {
             name: "runtime".into(),
             version: "0.1.0".into(),
         },
-        language_version: "0.1.0".into(),
+        language_version: "0.1.1".into(),
         features: FEATURES.iter().map(ToString::to_string).collect(),
         limits: limits(),
     };
@@ -198,6 +198,55 @@ fn initialize_result_features_are_exact() {
     let mut bad = result;
     bad.features.push("unexpected".into());
     assert!(bad.validate().is_err());
+}
+
+#[test]
+fn exec_grants_use_the_strict_josh_1_5_start_contract() {
+    assert_eq!(PROTOCOL_VERSION, "josh/1.5");
+    assert!(FEATURES.contains(&"exec-run"));
+    let value = json!({
+        "execution_id":"exec-1",
+        "program_id":"program-1",
+        "artifact_digest":format!("sha256:{}", "a".repeat(64)),
+        "entry":"main",
+        "input":null,
+        "working_directory":null,
+        "granted_capabilities":[],
+        "granted_tools":[],
+        "allowed_http_origins":[],
+        "granted_exec":["git show --stat", "git status"],
+        "granted_exec_environment":["GIT_CONFIG_NOSYSTEM", "HOME"],
+        "limits":{"wall_ms":5000}
+    });
+    let params: ExecutionStartParams = serde_json::from_value(value.clone()).unwrap();
+    params.validate().unwrap();
+
+    for replacement in [
+        json!(["git status", "git show --stat"]),
+        json!(["git status", "git status"]),
+        json!(["/usr/bin/git status"]),
+        json!(["git 'status'"]),
+    ] {
+        let mut invalid = value.clone();
+        invalid["granted_exec"] = replacement;
+        let params: ExecutionStartParams = serde_json::from_value(invalid).unwrap();
+        assert!(params.validate().is_err());
+    }
+    for replacement in [
+        json!(["HOME", "GIT_CONFIG_NOSYSTEM"]),
+        json!(["HOME", "HOME"]),
+        json!(["TZ"]),
+        json!(["BAD-NAME"]),
+    ] {
+        let mut invalid = value.clone();
+        invalid["granted_exec_environment"] = replacement;
+        let params: ExecutionStartParams = serde_json::from_value(invalid).unwrap();
+        assert!(params.validate().is_err());
+    }
+
+    let mut missing = value;
+    missing.as_object_mut().unwrap().remove("granted_exec");
+    assert!(serde_json::from_value::<ExecutionStartParams>(missing).is_err());
 }
 
 #[test]

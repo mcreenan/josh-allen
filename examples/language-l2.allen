@@ -1,0 +1,28 @@
+record User {
+  name: String
+  active: Bool
+}
+
+fn add(value: Int, amount: Int = 1) returns Int {
+  value + amount
+}
+
+fn twice(value: Int) returns Int {
+  value * 2
+}
+
+export fn main() returns Int {
+  let original = User { name: "Grace", active: true };
+  let renamed = User { ..original, name: "Ada" };
+  let values = [0, ..[1, 2], 3];
+  let settings = map { "x": 1, ..map { "x": 2 }, "y": 3 };
+  let selected = list.filter(values) fn(value) => value > 0;
+  let mapped = selected.map(fn(value: Int) returns Int { value + 1 });
+  let defaulted = add(5);
+  let add_two: fn(Int) returns Int = add(_, 2);
+  let composed = add_two >> twice;
+  let piped = 3 |> add(_, 4) |> twice();
+  let maybe_name: Option<String> = Some(renamed)?.name;
+  let found: Option<Int> = Some("Ada")?.find("d");
+  composed(piped) + defaulted + length(mapped) + length(maybe_name ?? "") + (found ?? 0) + settings["x"]
+}

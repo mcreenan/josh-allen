@@ -9,6 +9,9 @@ use super::{
     record_field_value_type, resolve_import_path, search_match_type, sub_agent_error_type,
     user_error_type,
 };
+use allen_bytecode::{
+    decode_error_type, exec_error_type, format_error_type, parse_error_type, time_error_type,
+};
 
 pub(super) fn resolve_record_layout(
     fields: &[(String, LoweredType, Span)],
@@ -78,6 +81,11 @@ pub(super) fn builtin_semantic_type(name: &str) -> Option<SemanticType> {
         "SubAgentError" => sub_agent_error_type(),
         "ModelError" => model_error_type(),
         "PermissionError" => permission_error_type(),
+        "TimeError" => time_error_type(),
+        "ParseError" => parse_error_type(),
+        "FormatError" => format_error_type(),
+        "DecodeError" => decode_error_type(),
+        "ExecError" => exec_error_type(),
         _ => return None,
     }))
 }
@@ -98,7 +106,9 @@ pub(super) fn resolve_alias_target<'a>(
     {
         return Ok(match declaration {
             LoweredTypeDeclaration::Alias { target, .. } => Some((module.to_owned(), target)),
-            LoweredTypeDeclaration::Record { .. } | LoweredTypeDeclaration::Enum { .. } => None,
+            LoweredTypeDeclaration::Record { .. }
+            | LoweredTypeDeclaration::Enum { .. }
+            | LoweredTypeDeclaration::Newtype { .. } => None,
         });
     }
     for import in &modules[module].imports {
@@ -119,7 +129,11 @@ pub(super) fn resolve_alias_target<'a>(
         }
         return Ok(match declaration {
             Some(LoweredTypeDeclaration::Alias { target, .. }) => Some((target_module, target)),
-            Some(LoweredTypeDeclaration::Record { .. } | LoweredTypeDeclaration::Enum { .. })
+            Some(
+                LoweredTypeDeclaration::Record { .. }
+                | LoweredTypeDeclaration::Enum { .. }
+                | LoweredTypeDeclaration::Newtype { .. },
+            )
             | None => None,
         });
     }
@@ -258,7 +272,9 @@ fn expanded_alias_depth(
         | LoweredType::Option(value, _)
         | LoweredType::Future(value, _)
         | LoweredType::Task(value, _)
-        | LoweredType::Prompt(value, _) => child_depth(value)?.saturating_add(1),
+        | LoweredType::Prompt(value, _)
+        | LoweredType::Range(value, _)
+        | LoweredType::Sequence(value, _) => child_depth(value)?.saturating_add(1),
         LoweredType::Map(key, value, _) | LoweredType::Result(key, value, _) => {
             child_depth(key)?.max(child_depth(value)?).saturating_add(1)
         }
@@ -296,7 +312,9 @@ fn collect_named_type_references<'a>(value_type: &'a LoweredType, names: &mut Ve
         | LoweredType::Option(value, _)
         | LoweredType::Future(value, _)
         | LoweredType::Task(value, _)
-        | LoweredType::Prompt(value, _) => collect_named_type_references(value, names),
+        | LoweredType::Prompt(value, _)
+        | LoweredType::Range(value, _)
+        | LoweredType::Sequence(value, _) => collect_named_type_references(value, names),
         LoweredType::Map(key, value, _) | LoweredType::Result(key, value, _) => {
             collect_named_type_references(key, names);
             collect_named_type_references(value, names);
@@ -323,11 +341,53 @@ pub(super) fn has_pending_alias_dependency(
     let mut names = Vec::new();
     collect_named_type_references(target, &mut names);
     for name in names {
-        if referenced_alias(modules, module, name)?.is_some_and(|key| pending.contains(&key)) {
+        if referenced_pending_type(modules, module, name)?.is_some_and(|key| pending.contains(&key))
+        {
             return Ok(true);
         }
     }
     Ok(false)
+}
+
+fn referenced_pending_type(
+    modules: &BTreeMap<String, LoweredModule>,
+    module: &str,
+    name: &str,
+) -> Result<Option<AliasKey>, Diagnostic> {
+    if builtin_semantic_type(name).is_some() {
+        return Ok(None);
+    }
+    if let Some(declaration) = modules[module]
+        .types
+        .iter()
+        .find(|declaration| declaration.name() == name)
+    {
+        return Ok(matches!(
+            declaration,
+            LoweredTypeDeclaration::Alias { .. } | LoweredTypeDeclaration::Newtype { .. }
+        )
+        .then(|| (module.to_owned(), name.to_owned())));
+    }
+    for import in &modules[module].imports {
+        let Some((imported, _, _)) = import.names.iter().find(|(_, local, _)| local == name) else {
+            continue;
+        };
+        let target = resolve_import_path(module, import)?;
+        let declaration = modules[&target]
+            .types
+            .iter()
+            .find(|declaration| declaration.name() == imported);
+        return Ok(declaration
+            .filter(|declaration| declaration.exported())
+            .filter(|declaration| {
+                matches!(
+                    declaration,
+                    LoweredTypeDeclaration::Alias { .. } | LoweredTypeDeclaration::Newtype { .. }
+                )
+            })
+            .map(|_| (target, imported.clone())));
+    }
+    Ok(None)
 }
 
 fn referenced_alias(

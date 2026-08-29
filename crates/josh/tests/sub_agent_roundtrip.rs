@@ -207,6 +207,8 @@ fn raw_stdio_routes_all_sub_agent_operations_without_an_invoking_session() {
         granted_capabilities: Vec::new(),
         granted_tools: Vec::new(),
         allowed_http_origins: Vec::new(),
+        granted_exec: Vec::new(),
+        granted_exec_environment: Vec::new(),
         limits: BTreeMap::from([("wall_ms".to_owned(), 5_000)]),
     };
     send(&mut stdin, "h-4", "execution/start", &start);

@@ -5,7 +5,7 @@ use std::process::{Command, Stdio};
 use allen_bytecode::{
     Artifact, ArtifactMetadata, EntryContract, EnumPayloadType, EnumType, EnumVariant, Function,
     Instruction, ManifestContract, Module, StrictSchema, ToolContract, ValueType,
-    compute_tool_contract_digest, encode,
+    compute_entry_contract_digest, compute_tool_contract_digest, encode,
 };
 use allen_schema::{ExactVersion, SchemaLimits, ToolName, ToolSchema, generated_tool_effect};
 use base64::Engine as _;
@@ -103,6 +103,8 @@ fn tool_artifact(schema: &ToolSchema) -> Vec<u8> {
             functions: vec![Function {
                 name: "pkg/x74657374/x302e312e30/x737263/x6d61696e.allen::main".to_owned(),
                 parameters: vec![0],
+                parameter_names: vec!["_arg0".to_owned()],
+                parameter_default_digests: vec![None],
                 captures: Vec::new(),
                 registers: vec![
                     ValueType::String,
@@ -127,13 +129,15 @@ fn tool_artifact(schema: &ToolSchema) -> Vec<u8> {
             async_functions: vec![0],
             entry: 0,
         },
+        templates: Vec::new(),
+        record_invariants: Vec::new(),
         debug: None,
         schemas: vec![
             StrictSchema {
                 value_type: ValueType::String,
             },
             StrictSchema {
-                value_type: result_type,
+                value_type: result_type.clone(),
             },
         ],
         entries: vec![EntryContract {
@@ -141,6 +145,24 @@ fn tool_artifact(schema: &ToolSchema) -> Vec<u8> {
             function: 0,
             input_schema: 0,
             output_schema: 1,
+            input_validators: Vec::new(),
+            output_validators: Vec::new(),
+            input_record_provenance: Vec::new(),
+            output_record_provenance: Vec::new(),
+            input_contract_digest: compute_entry_contract_digest(
+                &StrictSchema {
+                    value_type: ValueType::String,
+                },
+                &[],
+                &[],
+            ),
+            output_contract_digest: compute_entry_contract_digest(
+                &StrictSchema {
+                    value_type: result_type,
+                },
+                &[],
+                &[],
+            ),
         }],
         imports: Vec::new(),
         manifest: Some(ManifestContract {
@@ -151,6 +173,8 @@ fn tool_artifact(schema: &ToolSchema) -> Vec<u8> {
             optional_capabilities: Vec::new(),
             limits: Vec::new(),
             https_origins: Vec::new(),
+            exec_commands: Vec::new(),
+            exec_environment: Vec::new(),
             required_tools: vec![contract.clone()],
             tool_contract_digest: compute_tool_contract_digest(&[contract]),
         }),
@@ -299,6 +323,8 @@ fn independent_stdio_host_matches_the_golden_tool_transcript() {
         granted_capabilities: Vec::new(),
         granted_tools: vec!["example.lookup".to_owned()],
         allowed_http_origins: Vec::new(),
+        granted_exec: Vec::new(),
+        granted_exec_environment: Vec::new(),
         limits: BTreeMap::from([("wall_ms".to_owned(), 5_000)]),
     };
     send(&mut input, "h-4", "execution/start", &start);
@@ -425,6 +451,8 @@ fn active_partial_frame_eof_cleans_up_and_reports_only_a_safe_error() {
         granted_capabilities: Vec::new(),
         granted_tools: vec!["example.lookup".to_owned()],
         allowed_http_origins: Vec::new(),
+        granted_exec: Vec::new(),
+        granted_exec_environment: Vec::new(),
         limits: BTreeMap::from([("wall_ms".to_owned(), 5_000)]),
     };
     send(&mut input, "h-4", "execution/start", &start);

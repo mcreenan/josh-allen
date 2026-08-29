@@ -8,12 +8,15 @@
 #![forbid(unsafe_code)]
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::fmt::Write as _;
 use std::rc::Rc;
 
 use allen_bytecode::{
     BYTECODE_VERSION, EffectOperation, EnumPayloadType, EnumType, MAX_VALUE_NESTING, ValueType,
-    canonical_value_type_bytes, effect_result_type,
+    VerifiedArtifact, canonical_value_type_bytes, effect_result_type,
 };
+use allen_exec::CommandPattern;
+use allen_schema::{FrozenCatalog, ToolSchema};
 use allen_vm::{
     CancellationSource, EffectExecutionBinding, EffectExecutionOutcome, EffectPoll, EffectProvider,
     EnumIdentity, EnumPayload, EnumValue, ExecutionCapabilities, PendingEffectId, SubAgentValue,
@@ -168,6 +171,7 @@ pub enum RecordedVmError {
     DivisionByZero,
     IndexOutOfBounds,
     MapKeyNotFound,
+    ListLengthMismatch,
     DuplicateMapKey,
     ResourceLimit { resource: ReplayResource },
     Timeout { resource: ReplayResource },
@@ -195,6 +199,7 @@ pub enum RecordedVmError {
 pub enum ReplayExecutionOutcome {
     Completed,
     Stopped { reason: String },
+    Failed { reason: String },
     Terminal { error: RecordedVmError },
 }
 
@@ -238,6 +243,7 @@ pub enum ReplayResource {
     Handles,
     Instructions,
     MaximumAllocationBytes,
+    FailureReasonBytes,
     PendingEffects,
     PermissionOperations,
     SubAgentContextBytes,
@@ -269,6 +275,7 @@ impl ReplayResource {
             "handles" => Self::Handles,
             "instructions" => Self::Instructions,
             "maximum_allocation_bytes" => Self::MaximumAllocationBytes,
+            "failure_reason_bytes" => Self::FailureReasonBytes,
             "pending_effects" => Self::PendingEffects,
             "permission_operations" => Self::PermissionOperations,
             "sub_agent_context_bytes" => Self::SubAgentContextBytes,
@@ -301,6 +308,7 @@ impl ReplayResource {
             Self::Handles => "handles",
             Self::Instructions => "instructions",
             Self::MaximumAllocationBytes => "maximum_allocation_bytes",
+            Self::FailureReasonBytes => "failure_reason_bytes",
             Self::PendingEffects => "pending_effects",
             Self::PermissionOperations => "permission_operations",
             Self::SubAgentContextBytes => "sub_agent_context_bytes",
@@ -370,6 +378,18 @@ pub struct ReplayHeader {
     /// Canonical sorted unique effective manifest grants frozen before execution.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub effective_manifest_grants: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub requested_exec_commands: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub requested_exec_environment: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub effective_exec_grants: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub effective_exec_environment: Vec<String>,
+    #[serde(default, skip_serializing_if = "is_zero_digest")]
+    pub effective_exec_environment_digest: [u8; 32],
+    #[serde(default, skip_serializing_if = "is_zero_digest")]
+    pub pinned_exec_identity_digest: [u8; 32],
     /// Deterministic completion sequence for this execution.
     pub scheduler_completion_order: Vec<u64>,
 }
@@ -606,6 +626,12 @@ fn test_replay_header() -> ReplayHeader {
         capability_digest: [7; 32],
         error_registry_digest: [8; 32],
         effective_manifest_grants: Vec::new(),
+        requested_exec_commands: Vec::new(),
+        requested_exec_environment: Vec::new(),
+        effective_exec_grants: Vec::new(),
+        effective_exec_environment: Vec::new(),
+        effective_exec_environment_digest: [0; 32],
+        pinned_exec_identity_digest: [0; 32],
         scheduler_completion_order: Vec::new(),
     }
 }
@@ -1408,6 +1434,105 @@ impl ToolResultSchema for NoToolSchemas {
     }
 }
 
+/// Exact replay schema resolver bound to one verified artifact and the frozen
+/// catalog that supplied its manifest-selected tool contracts.
+#[derive(Clone, Debug)]
+pub struct ArtifactToolSchemas {
+    tools: Vec<ArtifactToolSchema>,
+    enum_types: Vec<EnumType>,
+}
+
+#[derive(Clone, Debug)]
+struct ArtifactToolSchema {
+    result_type: ValueType,
+    output: ToolSchema,
+    error: ToolSchema,
+}
+
+impl ArtifactToolSchemas {
+    /// Bind the artifact tool indices to exact catalog schemas.
+    ///
+    /// # Errors
+    ///
+    /// Rejects missing tools or any version/schema digest mismatch.
+    pub fn new(artifact: &VerifiedArtifact, catalog: &FrozenCatalog) -> Result<Self, ReplayError> {
+        let contracts = artifact
+            .manifest()
+            .map(|manifest| manifest.required_tools.as_slice())
+            .unwrap_or_default();
+        let enum_types = artifact.verified_module().module().enum_types.clone();
+        let wrapper_ids = enum_types
+            .iter()
+            .enumerate()
+            .filter(|(_, candidate)| {
+                candidate.name.contains("::_tool_tools_")
+                    && candidate.name.ends_with("_x3A__x3A_Error")
+                    && candidate.variants.len() == 3
+                    && candidate.variants[0].name == "Declared"
+                    && candidate.variants[1].name == "Unavailable"
+                    && candidate.variants[2].name == "Schema"
+            })
+            .map(|(index, _)| index)
+            .collect::<Vec<_>>();
+        if wrapper_ids.len() != contracts.len() {
+            return Err(ReplayError::ReplayDiverged);
+        }
+        let mut tools = Vec::with_capacity(contracts.len());
+        for (contract, error) in contracts.iter().zip(wrapper_ids) {
+            let name = allen_schema::ToolName::parse(&contract.name)
+                .map_err(|_| ReplayError::ReplayDiverged)?;
+            let definition = catalog.get(&name).ok_or(ReplayError::ReplayDiverged)?;
+            if definition.version.to_string() != contract.version
+                || definition.output_schema.digest() != digest_text(&contract.output_digest)
+                || definition.error_schema.digest() != digest_text(&contract.error_digest)
+            {
+                return Err(ReplayError::ReplayDiverged);
+            }
+            let output = artifact
+                .schemas()
+                .get(contract.output_schema as usize)
+                .ok_or(ReplayError::ReplayDiverged)?
+                .value_type
+                .clone();
+            let error = u32::try_from(error).map_err(|_| ReplayError::ReplayDiverged)?;
+            tools.push(ArtifactToolSchema {
+                result_type: ValueType::Result(Box::new(output), Box::new(ValueType::Enum(error))),
+                output: definition.output_schema.clone(),
+                error: definition.error_schema.clone(),
+            });
+        }
+        Ok(Self { tools, enum_types })
+    }
+}
+
+impl ToolResultSchema for ArtifactToolSchemas {
+    fn result_type(&self, tool: u32) -> Option<ValueType> {
+        self.tools
+            .get(tool as usize)
+            .map(|schema| schema.result_type.clone())
+    }
+
+    fn validate_result(&self, tool: u32, value: &Value) -> bool {
+        self.tools.get(tool as usize).is_some_and(|schema| {
+            allen_runtime::validate_replayed_tool_result(
+                value,
+                &schema.result_type,
+                &schema.output,
+                &schema.error,
+                &self.enum_types,
+            )
+        })
+    }
+}
+
+fn digest_text(digest: &[u8; 32]) -> String {
+    let mut text = String::from("sha256:");
+    for byte in digest {
+        write!(&mut text, "{byte:02x}").expect("writing into String cannot fail");
+    }
+    text
+}
+
 /// Record a real public VM provider using canonical byte outcomes.
 pub struct RecordingEffectProvider<P, S, R, C = RefuseAll> {
     live: P,
@@ -1479,15 +1604,21 @@ fn protect_execution_outcome(
     redactor: &dyn Redactor,
     limits: ReplayLimits,
 ) -> Result<ReplayExecutionOutcome, ReplayError> {
-    let ReplayExecutionOutcome::Stopped { reason } = outcome else {
-        return Ok(outcome);
+    let (reason, failed) = match outcome {
+        ReplayExecutionOutcome::Stopped { reason } => (reason, false),
+        ReplayExecutionOutcome::Failed { reason } => (reason, true),
+        outcome => return Ok(outcome),
     };
     let reason = match policy.classify_stopped_reason(&reason) {
         RecordingDisposition::Record => reason,
         RecordingDisposition::Redact => redactor.redact_stopped_reason(&reason, limits)?,
         RecordingDisposition::Refuse => return Err(ReplayError::RefusedValue),
     };
-    Ok(ReplayExecutionOutcome::Stopped { reason })
+    Ok(if failed {
+        ReplayExecutionOutcome::Failed { reason }
+    } else {
+        ReplayExecutionOutcome::Stopped { reason }
+    })
 }
 
 impl<P: EffectProvider, S: ToolResultSchema, R: Redactor, C: ReplayRecordingPolicy>
@@ -1828,6 +1959,9 @@ fn recorded_execution_outcome(
         EffectExecutionOutcome::Stopped { reason } => ReplayExecutionOutcome::Stopped {
             reason: reason.to_owned(),
         },
+        EffectExecutionOutcome::Failed { reason } => ReplayExecutionOutcome::Failed {
+            reason: reason.to_owned(),
+        },
         EffectExecutionOutcome::Terminal { error } => ReplayExecutionOutcome::Terminal {
             error: recorded_vm_error(error).map_err(|_| VmError::ReplayRuntimeDiverged)?,
         },
@@ -2030,6 +2164,12 @@ fn same_execution_binding(left: &ReplayHeader, right: &ReplayHeader) -> bool {
         && left.capability_digest == right.capability_digest
         && left.error_registry_digest == right.error_registry_digest
         && left.effective_manifest_grants == right.effective_manifest_grants
+        && left.requested_exec_commands == right.requested_exec_commands
+        && left.requested_exec_environment == right.requested_exec_environment
+        && left.effective_exec_grants == right.effective_exec_grants
+        && left.effective_exec_environment == right.effective_exec_environment
+        && left.effective_exec_environment_digest == right.effective_exec_environment_digest
+        && left.pinned_exec_identity_digest == right.pinned_exec_identity_digest
 }
 
 fn header_matches_binding(header: &ReplayHeader, binding: &EffectExecutionBinding) -> bool {
@@ -2043,6 +2183,12 @@ fn header_matches_binding(header: &ReplayHeader, binding: &EffectExecutionBindin
         && header.capability_digest == binding.capability_digest
         && header.error_registry_digest == binding.error_registry_digest
         && header.effective_manifest_grants == binding.effective_manifest_grants
+        && header.requested_exec_commands == binding.requested_exec_commands
+        && header.requested_exec_environment == binding.requested_exec_environment
+        && header.effective_exec_grants == binding.effective_exec_grants
+        && header.effective_exec_environment == binding.effective_exec_environment
+        && header.effective_exec_environment_digest == binding.effective_exec_environment_digest
+        && header.pinned_exec_identity_digest == binding.pinned_exec_identity_digest
 }
 
 fn is_zero_digest(value: &[u8; 32]) -> bool {
@@ -2245,6 +2391,7 @@ fn recorded_vm_error(error: &VmError) -> Result<RecordedVmError, ReplayError> {
         VmError::ArithmeticOverflow => RecordedVmError::ArithmeticOverflow,
         VmError::DivisionByZero => RecordedVmError::DivisionByZero,
         VmError::IndexOutOfBounds => RecordedVmError::IndexOutOfBounds,
+        VmError::ListLengthMismatch => RecordedVmError::ListLengthMismatch,
         VmError::MapKeyNotFound => RecordedVmError::MapKeyNotFound,
         VmError::DuplicateMapKey => RecordedVmError::DuplicateMapKey,
         VmError::ResourceLimit { resource } => RecordedVmError::ResourceLimit {
@@ -2269,7 +2416,9 @@ fn recorded_vm_error(error: &VmError) -> Result<RecordedVmError, ReplayError> {
         VmError::ToolUnavailable => RecordedVmError::ToolUnavailable,
         VmError::ToolSchemaError => RecordedVmError::ToolSchemaError,
         VmError::Invariant(_) => RecordedVmError::RuntimePanic,
-        VmError::Stopped { .. } => return Err(ReplayError::RefusedValue),
+        VmError::Stopped { .. } | VmError::ProgramFailed { .. } => {
+            return Err(ReplayError::RefusedValue);
+        }
     })
 }
 
@@ -2279,6 +2428,7 @@ fn vm_error_from_recorded(error: &RecordedVmError) -> VmError {
         RecordedVmError::DivisionByZero => VmError::DivisionByZero,
         RecordedVmError::IndexOutOfBounds => VmError::IndexOutOfBounds,
         RecordedVmError::MapKeyNotFound => VmError::MapKeyNotFound,
+        RecordedVmError::ListLengthMismatch => VmError::ListLengthMismatch,
         RecordedVmError::DuplicateMapKey => VmError::DuplicateMapKey,
         RecordedVmError::ResourceLimit { resource } => VmError::ResourceLimit {
             resource: resource.as_static(),
@@ -2477,6 +2627,17 @@ fn operation_allows_replayed_error_code(operation: EffectOperation, code: &str) 
                 | "net.unsupported_encoding"
                 | "network.unavailable"
         ),
+        EffectOperation::ExecRun => matches!(
+            code,
+            "exec.denied"
+                | "exec.invalid_argv"
+                | "exec.stdin_limit"
+                | "exec.stdout_limit"
+                | "exec.stderr_limit"
+                | "exec.timeout"
+                | "exec.unavailable"
+                | "exec.limit"
+        ),
         EffectOperation::PermissionRequestFile | EffectOperation::PermissionRequestDirectory => {
             matches!(code, "permission.denied" | "permission.unavailable")
         }
@@ -2553,6 +2714,10 @@ fn replay_value_matches_type(
                             depth + 1,
                         )
                 })
+        }
+        (Value::Newtype(value), ValueType::Newtype { name, underlying }) => {
+            value.identity() == name
+                && replay_value_matches_type(value.value(), underlying, enum_types, depth + 1)
         }
         (Value::Enum(value), ValueType::Enum(type_id)) => {
             value.identity == EnumIdentity::User(*type_id)
@@ -2655,12 +2820,15 @@ fn replay_value_is_canonical_data(value: &Value, depth: usize) -> bool {
                 .iter()
                 .all(|(_, value)| replay_value_is_canonical_data(value, depth + 1)),
         },
+        Value::Newtype(value) => replay_value_is_canonical_data(value.value(), depth + 1),
         Value::Unknown(value) => replay_value_is_canonical_data(value, depth + 1),
-        Value::Closure(_)
+        Value::Range(_)
+        | Value::Closure(_)
         | Value::Future(_)
         | Value::Task(_)
         | Value::Workspace(_)
-        | Value::SubAgent(_) => false,
+        | Value::SubAgent(_)
+        | Value::Sequence(_) => false,
     }
 }
 
@@ -2734,6 +2902,7 @@ fn operation_for_effect_kind(effect: &EffectKind, name: &str) -> Option<EffectOp
         (EffectKind::Call(_), "fs.list") => Some(EffectOperation::List),
         (EffectKind::Call(_), "fs.search") => Some(EffectOperation::Search),
         (EffectKind::Call(_), "net.http_get" | "http.get") => Some(EffectOperation::HttpGet),
+        (EffectKind::Call(_), "exec.run") => Some(EffectOperation::ExecRun),
         (EffectKind::Call(_), "permission.request_external_fs" | "permission.request_file") => {
             Some(EffectOperation::PermissionRequestFile)
         }
@@ -2788,7 +2957,8 @@ fn validate_current_operation_raw_error(
         | EffectOperation::WriteBytes
         | EffectOperation::List
         | EffectOperation::Search
-        | EffectOperation::HttpGet => matches!(error, RecordedVmError::CapabilityMissing),
+        | EffectOperation::HttpGet
+        | EffectOperation::ExecRun => matches!(error, RecordedVmError::CapabilityMissing),
         EffectOperation::PermissionRequestFile | EffectOperation::PermissionRequestDirectory => {
             matches!(
                 error,
@@ -2843,14 +3013,65 @@ fn validate_header(header: &ReplayHeader) -> Result<(), ReplayError> {
     {
         return Err(ReplayError::InvalidJournal);
     }
+    for values in [
+        &header.effective_manifest_grants,
+        &header.requested_exec_commands,
+        &header.requested_exec_environment,
+        &header.effective_exec_grants,
+        &header.effective_exec_environment,
+    ] {
+        if !values.windows(2).all(|pair| pair[0] < pair[1]) {
+            return Err(ReplayError::InvalidJournal);
+        }
+    }
+    if header
+        .requested_exec_commands
+        .iter()
+        .chain(&header.effective_exec_grants)
+        .any(|pattern| CommandPattern::parse(pattern).is_err())
+        || header
+            .requested_exec_environment
+            .iter()
+            .chain(&header.effective_exec_environment)
+            .any(|name| !is_exec_environment_name(name))
+    {
+        return Err(ReplayError::InvalidJournal);
+    }
+    let environment_digest_is_zero = is_zero_digest(&header.effective_exec_environment_digest);
+    let pinned_digest_is_zero = is_zero_digest(&header.pinned_exec_identity_digest);
+    if (header.effective_exec_grants.is_empty()
+        && (!environment_digest_is_zero || !pinned_digest_is_zero))
+        || (!header.effective_exec_grants.is_empty()
+            && (environment_digest_is_zero || pinned_digest_is_zero))
+    {
+        return Err(ReplayError::InvalidJournal);
+    }
     Ok(())
+}
+
+fn is_exec_environment_name(name: &str) -> bool {
+    let mut bytes = name.bytes();
+    bytes.next().is_some_and(|first| {
+        (first.is_ascii_alphabetic() || first == b'_')
+            && bytes.all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+            && !name.eq_ignore_ascii_case("LC_ALL")
+            && !name.eq_ignore_ascii_case("TZ")
+    })
 }
 
 fn validate_execution_outcome(
     outcome: Option<&ReplayExecutionOutcome>,
     limits: ReplayLimits,
 ) -> Result<(), ReplayError> {
-    if let Some(ReplayExecutionOutcome::Stopped { reason }) = outcome {
+    if let Some(ReplayExecutionOutcome::Failed { reason }) = outcome {
+        if reason.len() > 2_048 {
+            return Err(ReplayError::LimitExceeded);
+        }
+    }
+    if let Some(
+        ReplayExecutionOutcome::Stopped { reason } | ReplayExecutionOutcome::Failed { reason },
+    ) = outcome
+    {
         if reason.len() > limits.payload_bytes {
             return Err(ReplayError::LimitExceeded);
         }
@@ -2888,7 +3109,7 @@ fn validate_current_terminal_error(error: &RecordedVmError) -> Result<(), Replay
 fn is_manifest_grantable_capability(capability: &str) -> bool {
     matches!(
         capability,
-        "fs.read" | "fs.write" | "net.http_get" | "permission.request_external_fs"
+        "fs.read" | "fs.write" | "net.http_get" | "permission.request_external_fs" | "exec.run"
     )
 }
 
@@ -3025,6 +3246,12 @@ mod tests {
             capability_digest: [7; 32],
             error_registry_digest: [8; 32],
             effective_manifest_grants: Vec::new(),
+            requested_exec_commands: Vec::new(),
+            requested_exec_environment: Vec::new(),
+            effective_exec_grants: Vec::new(),
+            effective_exec_environment: Vec::new(),
+            effective_exec_environment_digest: [0; 32],
+            pinned_exec_identity_digest: [0; 32],
             scheduler_completion_order: Vec::new(),
         }
     }
@@ -3041,6 +3268,12 @@ mod tests {
             capability_digest: header.capability_digest,
             error_registry_digest: header.error_registry_digest,
             effective_manifest_grants: header.effective_manifest_grants.clone(),
+            requested_exec_commands: header.requested_exec_commands.clone(),
+            requested_exec_environment: header.requested_exec_environment.clone(),
+            effective_exec_grants: header.effective_exec_grants.clone(),
+            effective_exec_environment: header.effective_exec_environment.clone(),
+            effective_exec_environment_digest: header.effective_exec_environment_digest,
+            pinned_exec_identity_digest: header.pinned_exec_identity_digest,
         }
     }
 
@@ -3129,6 +3362,18 @@ mod tests {
         let mut wrong_grants = header;
         wrong_grants.effective_manifest_grants = vec!["fs.write".to_owned()];
         mismatches.push(wrong_grants);
+        for mutate in [
+            |value: &mut ReplayHeader| value.requested_exec_commands.push("env *".to_owned()),
+            |value: &mut ReplayHeader| value.requested_exec_environment.push("HOME".to_owned()),
+            |value: &mut ReplayHeader| value.effective_exec_grants.push("env".to_owned()),
+            |value: &mut ReplayHeader| value.effective_exec_environment.push("HOME".to_owned()),
+            |value: &mut ReplayHeader| value.effective_exec_environment_digest[0] ^= 1,
+            |value: &mut ReplayHeader| value.pinned_exec_identity_digest[0] ^= 1,
+        ] {
+            let mut wrong = bound_header();
+            mutate(&mut wrong);
+            mismatches.push(wrong);
+        }
 
         for wrong in mismatches {
             assert!(matches!(
@@ -3190,6 +3435,36 @@ mod tests {
                 binding.effective_manifest_grants.push("fs.read".to_owned());
                 binding
             },
+            {
+                let mut binding = binding_from_header(log.header());
+                binding.requested_exec_commands.push("env *".to_owned());
+                binding
+            },
+            {
+                let mut binding = binding_from_header(log.header());
+                binding.requested_exec_environment.push("HOME".to_owned());
+                binding
+            },
+            {
+                let mut binding = binding_from_header(log.header());
+                binding.effective_exec_grants.push("env".to_owned());
+                binding
+            },
+            {
+                let mut binding = binding_from_header(log.header());
+                binding.effective_exec_environment.push("HOME".to_owned());
+                binding
+            },
+            {
+                let mut binding = binding_from_header(log.header());
+                binding.effective_exec_environment_digest[0] ^= 1;
+                binding
+            },
+            {
+                let mut binding = binding_from_header(log.header());
+                binding.pinned_exec_identity_digest[0] ^= 1;
+                binding
+            },
         ] {
             let mut replay = ReplayingEffectProvider::new(
                 &log,
@@ -3236,6 +3511,30 @@ mod tests {
         ] {
             let mut invalid = bound_header();
             invalid.effective_manifest_grants = grants;
+            assert_eq!(
+                ReplayLog::new(invalid, vec![], ReplayExecutionOutcome::Completed, limits),
+                Err(ReplayError::InvalidJournal)
+            );
+        }
+
+        for mutate in [
+            |value: &mut ReplayHeader| {
+                value.requested_exec_commands = vec!["sh -c 'echo escaped'".to_owned()];
+            },
+            |value: &mut ReplayHeader| {
+                value.requested_exec_environment = vec!["LC_ALL".to_owned()];
+            },
+            |value: &mut ReplayHeader| {
+                value.effective_exec_grants = vec!["env".to_owned()];
+                value.effective_exec_environment_digest = [1; 32];
+            },
+            |value: &mut ReplayHeader| {
+                value.effective_exec_grants = vec!["env".to_owned()];
+                value.pinned_exec_identity_digest = [1; 32];
+            },
+        ] {
+            let mut invalid = bound_header();
+            mutate(&mut invalid);
             assert_eq!(
                 ReplayLog::new(invalid, vec![], ReplayExecutionOutcome::Completed, limits),
                 Err(ReplayError::InvalidJournal)
@@ -3299,6 +3598,14 @@ mod tests {
         assert_eq!(
             Recorder::with_header(limits, bound_header()).finish_with_execution_outcome(
                 ReplayExecutionOutcome::Stopped {
+                    reason: CANARY.to_owned(),
+                }
+            ),
+            Err(ReplayError::RefusedValue)
+        );
+        assert_eq!(
+            Recorder::with_header(limits, bound_header()).finish_with_execution_outcome(
+                ReplayExecutionOutcome::Failed {
                     reason: CANARY.to_owned(),
                 }
             ),
@@ -3422,6 +3729,9 @@ mod tests {
             ReplayExecutionOutcome::Completed,
             ReplayExecutionOutcome::Stopped {
                 reason: "finished by program".to_owned(),
+            },
+            ReplayExecutionOutcome::Failed {
+                reason: "failed by program".to_owned(),
             },
             ReplayExecutionOutcome::terminal(&VmError::ArithmeticOverflow).unwrap(),
             ReplayExecutionOutcome::terminal(&VmError::DivisionByZero).unwrap(),
@@ -3654,6 +3964,78 @@ mod tests {
             outcome(Value::String(Rc::from("result")))
         );
         assert_eq!(calls.get(), 0);
+        assert_eq!(harness.finish(), Ok(None));
+    }
+
+    #[test]
+    fn replay_exec_run_never_invokes_the_spawn_canary() {
+        let stdin = Value::Enum(Rc::new(EnumValue {
+            identity: EnumIdentity::Option,
+            type_name: "Option".into(),
+            variant: 1,
+            variant_name: "Some".into(),
+            payload: EnumPayload::Tuple(vec![Value::Bytes(b"input".to_vec().into())].into()),
+        }));
+        let arguments = Value::Tuple(
+            vec![
+                Value::List(
+                    vec![
+                        Value::String("printf".into()),
+                        Value::String("%s; touch /tmp/replay-must-not-spawn".into()),
+                    ]
+                    .into(),
+                ),
+                stdin,
+            ]
+            .into(),
+        );
+        let result_type = allen_bytecode::effect_result_type(EffectOperation::ExecRun, None)
+            .expect("exec.run has a closed result type");
+        let request = EffectRequest::from_value(
+            EffectKind::Call("exec.run".to_owned()),
+            &arguments,
+            &result_type,
+            ReplayLimits::default(),
+        )
+        .unwrap();
+        let response = Value::Enum(Rc::new(EnumValue {
+            identity: EnumIdentity::Result,
+            type_name: "Result".into(),
+            variant: 0,
+            variant_name: "Ok".into(),
+            payload: EnumPayload::Tuple(
+                vec![Value::Record(
+                    vec![
+                        ("status".into(), Value::Int(7)),
+                        ("stderr".into(), Value::Bytes(Vec::new().into())),
+                        ("stdout".into(), Value::Bytes(b"data".to_vec().into())),
+                    ]
+                    .into(),
+                )]
+                .into(),
+            ),
+        }));
+        let mut recorder = Recorder::new(ReplayLimits::default());
+        recorder
+            .record(
+                request.clone(),
+                outcome(response.clone()),
+                false,
+                &RefuseSensitive,
+            )
+            .unwrap();
+        let mut harness = EffectHarness::Replay(ReplaySession::new(&recorder.finish().unwrap()));
+        let spawn_attempts = std::cell::Cell::new(0_u32);
+        assert_eq!(
+            harness
+                .execute(request, false, &RefuseSensitive, || {
+                    spawn_attempts.set(spawn_attempts.get() + 1);
+                    Ok(outcome(Value::Unit))
+                })
+                .unwrap(),
+            outcome(response)
+        );
+        assert_eq!(spawn_attempts.get(), 0);
         assert_eq!(harness.finish(), Ok(None));
     }
 
@@ -4594,6 +4976,8 @@ mod tests {
             functions: vec![allen_bytecode::Function {
                 name: "main.allen::main".to_owned(),
                 parameters: vec![],
+                parameter_names: Vec::new(),
+                parameter_default_digests: Vec::new(),
                 captures: vec![],
                 registers: vec![
                     ValueType::String,
@@ -4710,6 +5094,8 @@ mod tests {
             functions: vec![allen_bytecode::Function {
                 name: "main.allen::main".to_owned(),
                 parameters: vec![0],
+                parameter_names: vec!["_arg0".to_owned()],
+                parameter_default_digests: vec![None],
                 captures: vec![],
                 registers: vec![
                     prompt_type,

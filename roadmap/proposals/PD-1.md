@@ -31,6 +31,23 @@ The profile has four core functions:
 The profile does not make each workflow durable by default. It does not claim
 exactly-once execution for external tools.
 
+### Current deployment boundary
+
+Current deployments should use cron or Orca to start independent bounded
+`josh run` executions. That is scheduling, not durability. Each start creates a
+new run with no persisted ALLEN workflow state, restart-safe resume position,
+or exactly-once guarantee.
+
+Neither a scheduler nor a new run may automatically retry a headless-tool
+mutation, or a future exec mutation, after an ambiguous result. Until PD-4
+defines authenticated receipts and PD-2 defines accepted idempotency and
+reconciliation semantics, an external system or operator must determine what
+happened before authorizing another mutation.
+
+SHOUT and the durable workflow profile remain a separate future milestone.
+They come after PD-4 receipts and PD-2 effect semantics are accepted; cron or
+Orca does not substitute for them.
+
 The ownership boundary is:
 
 ```text

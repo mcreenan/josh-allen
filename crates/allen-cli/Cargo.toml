@@ -12,11 +12,14 @@ path = "src/main.rs"
 [dependencies]
 allen-bytecode = { path = "../allen-bytecode" }
 allen-compiler = { path = "../allen-compiler" }
+allen-exec = { path = "../allen-exec" }
 allen-package = { path = "../allen-package" }
 allen-runtime = { path = "../allen-runtime" }
 allen-sandbox-fs = { path = "../allen-sandbox-fs" }
 allen-schema = { path = "../allen-schema" }
+allen-testkit = { path = "../allen-testkit" }
 allen-vm = { path = "../allen-vm" }
+josh-protocol = { path = "../josh-protocol" }
 base64 = "0.22"
 rustix = { version = "1.1", features = ["process"] }
 serde = { version = "1.0", features = ["derive"] }

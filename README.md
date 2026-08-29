@@ -42,7 +42,7 @@ still the simpler choice for a direct task.
 
 JOSH/ALLEN is early alpha. During the `0.1.x` series, the repository supports
 one source language, bytecode format, runtime contract, replay format, and
-`josh/1.4` protocol. The current runtime rejects artifacts from older builds.
+`josh/1.5` protocol. The current runtime rejects artifacts from older builds.
 
 A breaking change replaces the previous language and artifacts. The same
 change must update the implementation, specifications, tests, conformance
@@ -123,19 +123,87 @@ allen check examples/answer.allen
 allen run examples/answer.allen
 ```
 
+Run source-level tests in a loose bundle or package:
+
+```sh
+allen test path/to/main.allen
+allen test --filter 'support.allen::"empty input"' path/to/main.allen
+allen test --filter 'src/checks.allen::"recorded lookup"' \
+  --replay lookup.allen-replay.json --catalog tools.catalog.json path/to/package
+```
+
+Pure tests run directly. A test that declares effects requires one exact
+artifact-bound testkit replay journal; `allen test` never supplies it a live
+provider. Package tests use the selected module's defining package and ordinary
+import closure, so private helpers, dependency imports, and package-local
+templates work without granting authority from unrelated dependencies.
+Typed-tool tests also require the complete canonical JOSH `catalog/set`
+parameters document that supplied the package's frozen tool contracts.
+
 Run a source file through JOSH:
 
 ```sh
 josh run examples/josh-answer.allen
 ```
 
-Pass exact JSON input:
+Pass exact typed JSON input and receive typed JSON output:
 
 ```sh
 josh run \
   --input '{"value":41}' \
-  task.allen
+  examples/typed-json.allen
 ```
+
+The command prints:
+
+```json
+{"outcome":"completed","output":{"incremented":42,"original":41}}
+```
+
+Entry input and output default to a 1 MiB limit. A package can request a lower
+or equal output limit with `output_bytes` in its `[limits]` table. The host may
+lower any requested limit. Loose source files use the host default.
+
+Check and run a filesystem package that embeds a typed template resource:
+
+```sh
+allen check examples/template-package
+allen run examples/template-package
+```
+
+Run one typed tool through an installed [Executor](roadmap/proposals/PD-10.md)
+CLI, given a complete catalog and a program that declares the same tool:
+
+```sh
+josh run \
+  --executor \
+  --catalog executor-tools.json \
+  --grant-tool github.org.main.issues.get \
+  --input @issue-input.json \
+  issue-report.allen
+```
+
+`--grant-tool` is an exact-name grant and requires `--executor`. The runner
+checks the grant against the frozen catalog and the selected program before it
+starts the entry. It invokes `executor call` with an argument vector, never a
+shell, and fails closed on missing grants, invalid results, timeouts, approval
+or authentication pauses, and provider failures. It does not retry, resume, or
+fall back to an agent or model.
+
+Run a package that requests a narrow argv-only command with either host:
+
+```sh
+allen run --grant-exec 'git status' path/to/package
+josh run --grant-exec 'git status' path/to/package
+```
+
+Packages declare command patterns and optional environment names in `[exec]`.
+Each `--grant-exec` must be exact or narrower than a request and implies the
+`exec.run` capability. Add `--grant-exec-env NAME` only for a name the package
+requests; values are copied from the launch snapshot but never displayed.
+Commands receive argv directly, never through a shell. Live execution uses
+preflight-pinned executable bytes on Linux and fails closed on macOS; replay
+never starts a subprocess.
 
 Build, inspect, and run a verified bytecode artifact:
 
@@ -153,8 +221,10 @@ Use `josh run --help` and `allen --help` for the full command lists.
 grant local capabilities.
 
 `josh run` runs source files, packages, or `.allenb` artifacts through JOSH. It
-can grant bounded filesystem access and restricted HTTPS GET access. Another
-host can also supply providers for an unattended run.
+can grant bounded filesystem access, restricted HTTPS GET access, and narrow
+argv-only subprocess patterns. Its
+opt-in Executor adapter can service explicitly granted typed tools without an
+agent turn. Another host can also supply providers for an unattended run.
 
 The `josh_allen` MCP server connects a running ALLEN program to the current
 Codex or Claude task. It handles typed callbacks, but it does not grant
@@ -171,7 +241,7 @@ bytecode.
 
 ALLEN provides deterministic scheduling, task scopes, cancellation, and
 resource budgets. It also supports record and replay, exact JSON boundaries,
-package locks, filesystem brokers, restricted HTTPS GET, typed prompts, and
+package locks, filesystem and subprocess brokers, restricted HTTPS GET, typed prompts, and
 terminal stopped outcomes. The language reference documents only the current
 syntax and runtime contract.
 

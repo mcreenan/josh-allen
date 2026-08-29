@@ -2,13 +2,22 @@
 
 use super::{SymbolId, TypeId};
 use allen_bytecode::{
-    CapabilityOperation, CheckedIntOperation, FsOperation, SafeCollectionOperation, StringOperation,
+    CapabilityOperation, CheckedIntOperation, CollectionOperation, FsOperation, ListCombinator,
+    SafeCollectionOperation, StandardOperation, StringOperation,
 };
 use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MirBundle {
+    pub constants: Vec<MirConstant>,
     pub functions: Vec<MirFunction>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MirConstant {
+    pub symbol: SymbolId,
+    pub name: String,
+    pub value_type: TypeId,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -77,6 +86,18 @@ pub struct MirBlock {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub enum MirListItem {
+    Element(u32),
+    Spread(u32),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum MirMapItem {
+    Entry { key: u32, value: u32 },
+    Spread(u32),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum MirOperation {
     Constant {
         destination: u32,
@@ -89,14 +110,81 @@ pub enum MirOperation {
     },
     List {
         destination: u32,
+        items: Vec<MirListItem>,
     },
     Length {
         destination: u32,
         collection: u32,
     },
+    Range {
+        destination: u32,
+        start: u32,
+        end: u32,
+        inclusive: bool,
+    },
+    Slice {
+        destination: u32,
+        collection: u32,
+        start: u32,
+        end: u32,
+    },
+    SequenceFromList {
+        destination: u32,
+        values: u32,
+    },
+    SequenceMap {
+        destination: u32,
+        sequence: u32,
+        callback: u32,
+    },
+    SequenceFilter {
+        destination: u32,
+        sequence: u32,
+        callback: u32,
+    },
+    SequenceTake {
+        destination: u32,
+        sequence: u32,
+        count: u32,
+    },
+    SequenceFind {
+        destination: u32,
+        sequence: u32,
+        callback: u32,
+    },
+    SequenceAny {
+        destination: u32,
+        sequence: u32,
+        callback: u32,
+    },
+    SequenceAll {
+        destination: u32,
+        sequence: u32,
+        callback: u32,
+    },
+    SequenceFold {
+        destination: u32,
+        sequence: u32,
+        initial: u32,
+        callback: u32,
+    },
+    SequenceToList {
+        destination: u32,
+        sequence: u32,
+    },
     StringOperation {
         destination: u32,
         operation: StringOperation,
+        arguments: Vec<u32>,
+    },
+    TemplateRender {
+        destination: u32,
+        template: u32,
+        arguments: Vec<u32>,
+    },
+    StandardOperation {
+        destination: u32,
+        operation: StandardOperation,
         arguments: Vec<u32>,
     },
     CapabilityInspect {
@@ -114,6 +202,25 @@ pub enum MirOperation {
         operation: CheckedIntOperation,
         arguments: Vec<u32>,
     },
+    CollectionOperation {
+        destination: u32,
+        operation: CollectionOperation,
+        arguments: Vec<u32>,
+    },
+    ListFold {
+        destination: u32,
+        values: u32,
+        initial: u32,
+        callback: u32,
+    },
+    ListCombinator {
+        destination: u32,
+        operation: ListCombinator,
+        values: u32,
+        initial: Option<u32>,
+        callback: u32,
+        callback_result: u32,
+    },
     ListAppend {
         destination: u32,
         values: u32,
@@ -127,6 +234,7 @@ pub enum MirOperation {
     },
     Map {
         destination: u32,
+        items: Vec<MirMapItem>,
     },
     MapEntryAt {
         destination: u32,
@@ -138,6 +246,14 @@ pub enum MirOperation {
     },
     Enum {
         destination: u32,
+    },
+    NewtypeWrap {
+        destination: u32,
+        source: u32,
+    },
+    NewtypeUnwrap {
+        destination: u32,
+        source: u32,
     },
     FieldGet {
         destination: u32,
@@ -221,6 +337,10 @@ pub enum MirTerminator {
         success: u32,
         error: u32,
     },
+    TryOption {
+        some: u32,
+        none: u32,
+    },
     Return {
         source: u32,
     },
@@ -242,6 +362,9 @@ pub enum MirTerminator {
         permanent_stop: u32,
     },
     Stop {
+        reason: u32,
+    },
+    Fail {
         reason: u32,
     },
     Unreachable,
@@ -269,6 +392,7 @@ impl MirFunction {
                 } => vec![*false_target, *true_target],
                 MirTerminator::SwitchEnum { targets } => targets.clone(),
                 MirTerminator::TryResult { success, error } => vec![*success, *error],
+                MirTerminator::TryOption { some, none } => vec![*some, *none],
                 MirTerminator::Suspend {
                     resume,
                     exceptional_cancel,
@@ -299,6 +423,7 @@ impl MirFunction {
                 ],
                 MirTerminator::Return { .. }
                 | MirTerminator::Stop { .. }
+                | MirTerminator::Fail { .. }
                 | MirTerminator::Unreachable => Vec::new(),
             }
         };
@@ -309,8 +434,8 @@ impl MirFunction {
                     MirOperation::Constant { destination }
                     | MirOperation::Binary { destination }
                     | MirOperation::Tuple { destination }
-                    | MirOperation::List { destination }
-                    | MirOperation::Map { destination }
+                    | MirOperation::List { destination, .. }
+                    | MirOperation::Map { destination, .. }
                     | MirOperation::Record { destination }
                     | MirOperation::Enum { destination }
                     | MirOperation::WorkspaceGet { destination } => temporaries.push(*destination),
@@ -318,6 +443,64 @@ impl MirFunction {
                         destination,
                         collection,
                     } => temporaries.extend([*destination, *collection]),
+                    MirOperation::Range {
+                        destination,
+                        start,
+                        end,
+                        ..
+                    } => temporaries.extend([*destination, *start, *end]),
+                    MirOperation::Slice {
+                        destination,
+                        collection,
+                        start,
+                        end,
+                    } => temporaries.extend([*destination, *collection, *start, *end]),
+                    MirOperation::SequenceFromList {
+                        destination,
+                        values,
+                    } => temporaries.extend([*destination, *values]),
+                    MirOperation::SequenceMap {
+                        destination,
+                        sequence,
+                        callback,
+                    }
+                    | MirOperation::SequenceFilter {
+                        destination,
+                        sequence,
+                        callback,
+                    }
+                    | MirOperation::SequenceFind {
+                        destination,
+                        sequence,
+                        callback,
+                    }
+                    | MirOperation::SequenceAny {
+                        destination,
+                        sequence,
+                        callback,
+                    }
+                    | MirOperation::SequenceAll {
+                        destination,
+                        sequence,
+                        callback,
+                    } => temporaries.extend([*destination, *sequence, *callback]),
+                    MirOperation::SequenceTake {
+                        destination,
+                        sequence,
+                        count,
+                    } => temporaries.extend([*destination, *sequence, *count]),
+                    MirOperation::SequenceFold {
+                        destination,
+                        sequence,
+                        initial,
+                        callback,
+                    } => {
+                        temporaries.extend([*destination, *sequence, *initial, *callback]);
+                    }
+                    MirOperation::SequenceToList {
+                        destination,
+                        sequence,
+                    } => temporaries.extend([*destination, *sequence]),
                     MirOperation::MapEntryAt {
                         destination,
                         map,
@@ -343,6 +526,16 @@ impl MirFunction {
                         arguments,
                         ..
                     }
+                    | MirOperation::TemplateRender {
+                        destination,
+                        arguments,
+                        ..
+                    }
+                    | MirOperation::StandardOperation {
+                        destination,
+                        arguments,
+                        ..
+                    }
                     | MirOperation::CapabilityInspect {
                         destination,
                         arguments,
@@ -354,6 +547,11 @@ impl MirFunction {
                         ..
                     }
                     | MirOperation::CheckedIntOperation {
+                        destination,
+                        arguments,
+                        ..
+                    }
+                    | MirOperation::CollectionOperation {
                         destination,
                         arguments,
                         ..
@@ -393,6 +591,14 @@ impl MirFunction {
                         destination,
                         source: future,
                     }
+                    | MirOperation::NewtypeWrap {
+                        destination,
+                        source: future,
+                    }
+                    | MirOperation::NewtypeUnwrap {
+                        destination,
+                        source: future,
+                    }
                     | MirOperation::ToolCall {
                         destination,
                         input: future,
@@ -414,6 +620,25 @@ impl MirFunction {
                         temporaries.extend([*destination, *closure]);
                         temporaries.extend(arguments);
                     }
+                    MirOperation::ListFold {
+                        destination,
+                        values,
+                        initial,
+                        callback,
+                    } => {
+                        temporaries.extend([*destination, *values, *initial, *callback]);
+                    }
+                    MirOperation::ListCombinator {
+                        destination,
+                        values,
+                        initial,
+                        callback,
+                        callback_result,
+                        ..
+                    } => {
+                        temporaries.extend([*destination, *values, *callback, *callback_result]);
+                        temporaries.extend(initial);
+                    }
                     MirOperation::TaskScopeEnter { .. }
                     | MirOperation::TaskScopeExit { .. }
                     | MirOperation::TaskScopeCleanup { .. } => {}
@@ -426,7 +651,9 @@ impl MirFunction {
                     source,
                     ..
                 } => temporaries.extend([*destination, *source]),
-                MirTerminator::Stop { reason } => temporaries.push(*reason),
+                MirTerminator::Stop { reason } | MirTerminator::Fail { reason } => {
+                    temporaries.push(*reason);
+                }
                 _ => {}
             }
             if temporaries
@@ -478,7 +705,7 @@ impl MirFunction {
                     )
                 }) && !matches!(
                     self.blocks[*permanent_stop as usize].terminator,
-                    MirTerminator::Stop { .. }
+                    MirTerminator::Stop { .. } | MirTerminator::Fail { .. }
                 ) =>
                 {
                     return Err("MIR scope-exit block does not contain its exit operation");

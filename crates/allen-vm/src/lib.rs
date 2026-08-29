@@ -1,18 +1,22 @@
 #![forbid(unsafe_code)]
 
 mod canonical;
+mod json;
 
 pub use canonical::{
     CanonicalDecodeError, CanonicalEncodeError, decode_canonical, decode_canonical_with_limit,
     encode_canonical, encode_canonical_with_limit,
 };
+pub use json::{JsonDecodeError, JsonDecodeErrorKind, decode_json, project_json_value};
 
 use allen_bytecode::{
-    BoolBinaryOp, CapabilityOperation, CheckedIntOperation, CompareOp, Constant, Conversion,
-    DebugInfo, EnumPayloadType, EnumTypeId, ExternalFsAccess, FsOperation, FunctionId, Instruction,
-    MAX_VALUE_NESTING, NumericBinaryOp, Register, SafeCollectionOperation, StringOperation,
-    ValueType, VerifiedArtifact, VerifiedModule, canonical_float_bits,
+    BoolBinaryOp, CapabilityOperation, CheckedIntOperation, CollectionOperation, CompareOp,
+    Constant, Conversion, DebugInfo, EnumPayloadType, EnumTypeId, ExternalFsAccess, FsOperation,
+    FunctionId, Instruction, ListCombinator, MAX_VALUE_NESTING, NumericBinaryOp, Register,
+    SafeCollectionOperation, StandardOperation, StringOperation, TemplateResource, ValueType,
+    VerifiedArtifact, VerifiedModule, canonical_float_bits,
 };
+use std::cell::RefCell;
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt::{self, Write as _};
@@ -44,6 +48,16 @@ pub const RESOURCE_TASKS: &str = "tasks";
 pub const RESOURCE_CONCURRENT_EFFECTS: &str = "concurrent_effects";
 /// Stable resource name for cleanup instructions.
 pub const RESOURCE_CLEANUP_INSTRUCTIONS: &str = "cleanup_instructions";
+/// Stable resource name for the cumulative JSON decode input limit.
+pub const RESOURCE_DECODE_BYTES: &str = "decode_bytes";
+/// Stable resource name for the JSON decode nesting limit.
+pub const RESOURCE_DECODE_DEPTH: &str = "decode_depth";
+/// Stable resource name for the one MiB rendered-template terminal limit.
+pub const RESOURCE_TEMPLATE_OUTPUT_BYTES: &str = "template_output_bytes";
+
+const MAXIMUM_DECODE_BYTES: u64 = 1_048_576;
+const MAXIMUM_TEMPLATE_OUTPUT_BYTES: usize = 1_048_576;
+const MAXIMUM_DECODE_DEPTH: usize = 128;
 
 #[derive(Clone, Copy, Debug)]
 pub struct FloatValue(u64);
@@ -83,6 +97,7 @@ pub enum Value {
     Float(FloatValue),
     String(Rc<str>),
     Bytes(Rc<[u8]>),
+    Range(Rc<RangeValue>),
     ExternalFsAccess(ExternalFsAccess),
     Unit,
     List(Rc<[Value]>),
@@ -90,12 +105,196 @@ pub enum Value {
     Tuple(Rc<[Value]>),
     Record(Rc<[(Rc<str>, Value)]>),
     Enum(Rc<EnumValue>),
+    Newtype(Rc<NewtypeValue>),
     Closure(Rc<ClosureValue>),
     Future(Rc<FutureValue>),
     Task(TaskValue),
     Workspace(WorkspaceValue),
     SubAgent(SubAgentValue),
+    Sequence(Rc<SequenceValue>),
     Unknown(Rc<Value>),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RangeValue {
+    pub start: i64,
+    pub end: i64,
+    pub inclusive: bool,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct SequenceValue {
+    state: Rc<RefCell<SequenceCell>>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct SequenceCell {
+    consumed: bool,
+    plan: SequencePlan,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+enum SequencePlan {
+    List {
+        values: Rc<[Value]>,
+        index: usize,
+    },
+    Take {
+        upstream: Rc<SequenceValue>,
+        remaining: usize,
+    },
+    Map {
+        upstream: Rc<SequenceValue>,
+        callback: Rc<ClosureValue>,
+    },
+    Filter {
+        upstream: Rc<SequenceValue>,
+        callback: Rc<ClosureValue>,
+    },
+}
+
+#[derive(Clone, Debug)]
+enum SequenceAdapter {
+    Map(Rc<ClosureValue>),
+    Filter(Rc<ClosureValue>),
+    Take(Rc<SequenceValue>),
+}
+
+impl SequenceValue {
+    fn from_list(values: Rc<[Value]>) -> Self {
+        Self {
+            state: Rc::new(RefCell::new(SequenceCell {
+                consumed: false,
+                plan: SequencePlan::List { values, index: 0 },
+            })),
+        }
+    }
+
+    fn take(upstream: Rc<Self>, remaining: usize) -> Self {
+        Self {
+            state: Rc::new(RefCell::new(SequenceCell {
+                consumed: false,
+                plan: SequencePlan::Take {
+                    upstream,
+                    remaining,
+                },
+            })),
+        }
+    }
+
+    fn map(upstream: Rc<Self>, callback: Rc<ClosureValue>) -> Self {
+        Self {
+            state: Rc::new(RefCell::new(SequenceCell {
+                consumed: false,
+                plan: SequencePlan::Map { upstream, callback },
+            })),
+        }
+    }
+
+    fn filter(upstream: Rc<Self>, callback: Rc<ClosureValue>) -> Self {
+        Self {
+            state: Rc::new(RefCell::new(SequenceCell {
+                consumed: false,
+                plan: SequencePlan::Filter { upstream, callback },
+            })),
+        }
+    }
+
+    fn consume(&self) -> Result<(), VmError> {
+        let mut state = self.state.borrow_mut();
+        if state.consumed {
+            return Err(VmError::Invariant(
+                "sequence handle has already been consumed",
+            ));
+        }
+        state.consumed = true;
+        Ok(())
+    }
+
+    fn next_pipeline(&self) -> Option<(Value, Vec<SequenceAdapter>)> {
+        let mut adapters = Vec::new();
+        self.next_plan(&mut adapters).map(|value| (value, adapters))
+    }
+
+    fn next_plan(&self, adapters: &mut Vec<SequenceAdapter>) -> Option<Value> {
+        let action = {
+            let mut state = self.state.borrow_mut();
+            match &mut state.plan {
+                SequencePlan::List { values, index } => {
+                    let value = values.get(*index).cloned();
+                    if value.is_some() {
+                        *index += 1;
+                    }
+                    return value;
+                }
+                SequencePlan::Take {
+                    upstream,
+                    remaining,
+                } => {
+                    if *remaining == 0 {
+                        return None;
+                    }
+                    (
+                        Rc::clone(upstream),
+                        Some(SequenceAdapter::Take(Rc::new(self.clone()))),
+                    )
+                }
+                SequencePlan::Map { upstream, callback } => (
+                    Rc::clone(upstream),
+                    Some(SequenceAdapter::Map(Rc::clone(callback))),
+                ),
+                SequencePlan::Filter { upstream, callback } => (
+                    Rc::clone(upstream),
+                    Some(SequenceAdapter::Filter(Rc::clone(callback))),
+                ),
+            }
+        };
+        let (upstream, adapter) = action;
+        let value = upstream.next_plan(adapters)?;
+        if let Some(adapter) = adapter {
+            adapters.push(adapter);
+        }
+        Some(value)
+    }
+
+    fn take_one(&self) -> bool {
+        let mut state = self.state.borrow_mut();
+        let SequencePlan::Take { remaining, .. } = &mut state.plan else {
+            return false;
+        };
+        if *remaining == 0 {
+            return false;
+        }
+        *remaining -= 1;
+        true
+    }
+}
+
+/// A nominal value whose identity remains distinct from its wire representation.
+#[derive(Clone, Debug, PartialEq)]
+pub struct NewtypeValue {
+    identity: Rc<str>,
+    value: Value,
+}
+
+impl NewtypeValue {
+    #[must_use]
+    pub fn new(identity: impl Into<Rc<str>>, value: Value) -> Self {
+        Self {
+            identity: identity.into(),
+            value,
+        }
+    }
+
+    #[must_use]
+    pub fn identity(&self) -> &str {
+        &self.identity
+    }
+
+    #[must_use]
+    pub const fn value(&self) -> &Value {
+        &self.value
+    }
 }
 
 type RecordValues = Rc<[(Rc<str>, Value)]>;
@@ -298,6 +497,13 @@ impl fmt::Display for Value {
             Self::Float(value) => write_float(formatter, *value),
             Self::String(value) => write_quoted_string(formatter, value),
             Self::Bytes(value) => write_bytes(formatter, value),
+            Self::Range(value) => write!(
+                formatter,
+                "{}{}{}",
+                value.start,
+                if value.inclusive { "..=" } else { ".." },
+                value.end
+            ),
             Self::ExternalFsAccess(value) => write!(formatter, "ExternalFsAccess.{value:?}"),
             Self::Unit => formatter.write_str("()"),
             Self::List(values) => write_sequence(formatter, "[", "]", values, false),
@@ -314,11 +520,19 @@ impl fmt::Display for Value {
             Self::Tuple(values) => write_sequence(formatter, "(", ")", values, true),
             Self::Record(fields) => write_record(formatter, fields),
             Self::Enum(value) => write_enum(formatter, value),
+            Self::Newtype(value) => {
+                let name = value
+                    .identity()
+                    .rsplit_once("::")
+                    .map_or(value.identity(), |(_, name)| name);
+                write!(formatter, "{name}({})", value.value())
+            }
             Self::Closure(_) => formatter.write_str("<function>"),
             Self::Future(_) => formatter.write_str("<future>"),
             Self::Task(task) => write!(formatter, "<task:{}>", task.id),
             Self::Workspace(_) => formatter.write_str("<workspace>"),
             Self::SubAgent(_) => formatter.write_str("<sub-agent>"),
+            Self::Sequence(_) => formatter.write_str("<sequence>"),
             Self::Unknown(value) => write!(formatter, "unknown({value})"),
         }
     }
@@ -494,7 +708,7 @@ impl ExecutionCapabilities {
 fn is_manifest_grantable_capability(name: &str) -> bool {
     matches!(
         name,
-        "fs.read" | "fs.write" | "net.http_get" | "permission.request_external_fs"
+        "fs.read" | "fs.write" | "net.http_get" | "permission.request_external_fs" | "exec.run"
     )
 }
 
@@ -518,6 +732,7 @@ pub enum ExecutionOutcome {
 pub enum EffectExecutionOutcome<'outcome> {
     Completed,
     Stopped { reason: &'outcome str },
+    Failed { reason: &'outcome str },
     Terminal { error: &'outcome VmError },
     RuntimePanic,
 }
@@ -535,6 +750,12 @@ pub struct EffectExecutionBinding {
     pub capability_digest: [u8; 32],
     pub error_registry_digest: [u8; 32],
     pub effective_manifest_grants: Vec<String>,
+    pub requested_exec_commands: Vec<String>,
+    pub requested_exec_environment: Vec<String>,
+    pub effective_exec_grants: Vec<String>,
+    pub effective_exec_environment: Vec<String>,
+    pub effective_exec_environment_digest: [u8; 32],
+    pub pinned_exec_identity_digest: [u8; 32],
 }
 
 /// Supplies cooperative external cancellation at instruction boundaries.
@@ -1001,6 +1222,134 @@ struct MachineFrame {
     activation: u32,
     active_scopes: Vec<u32>,
     continuation: Option<u16>,
+    fold: Option<PendingFold>,
+    combinator: Option<PendingListCombinator>,
+    sequence: Option<PendingSequence>,
+}
+
+#[derive(Clone, Debug)]
+struct PendingFold {
+    instruction: usize,
+    destination: Register,
+    values: Rc<[Value]>,
+    callback: Rc<ClosureValue>,
+    index: usize,
+}
+
+#[derive(Clone, Debug)]
+struct PendingListCombinator {
+    instruction: usize,
+    operation: ListCombinator,
+    values: Rc<[Value]>,
+    callback: Rc<ClosureValue>,
+    callback_result: Register,
+    index: usize,
+    current: Option<Value>,
+    accumulator: Option<Value>,
+    output: Vec<Value>,
+    rest: Vec<Value>,
+    answer: Option<bool>,
+    waiting: bool,
+}
+
+#[derive(Clone, Debug)]
+struct PendingSequence {
+    instruction: usize,
+    destination: Register,
+    sequence: Rc<SequenceValue>,
+    terminal: SequenceTerminal,
+    callback: Option<Rc<ClosureValue>>,
+    adapters: Vec<SequenceAdapter>,
+    adapter_index: usize,
+    current: Option<Value>,
+    output: Vec<Value>,
+    answer: Option<bool>,
+    accumulator: Option<Value>,
+    waiting: Option<SequenceWaiting>,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum SequenceTerminal {
+    ToList,
+    Find,
+    Any,
+    All,
+    Fold,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum SequenceWaiting {
+    Adapter,
+    Terminal,
+}
+
+struct SequenceTerminalRequest {
+    destination: Register,
+    sequence: Register,
+    terminal: SequenceTerminal,
+    callback: Option<Register>,
+    initial: Option<Register>,
+}
+
+fn sequence_terminal_parts(instruction: &Instruction) -> Option<SequenceTerminalRequest> {
+    match instruction {
+        Instruction::SequenceToList {
+            destination,
+            sequence,
+        } => Some(SequenceTerminalRequest {
+            destination: *destination,
+            sequence: *sequence,
+            terminal: SequenceTerminal::ToList,
+            callback: None,
+            initial: None,
+        }),
+        Instruction::SequenceFind {
+            destination,
+            sequence,
+            callback,
+        } => Some(SequenceTerminalRequest {
+            destination: *destination,
+            sequence: *sequence,
+            terminal: SequenceTerminal::Find,
+            callback: Some(*callback),
+            initial: None,
+        }),
+        Instruction::SequenceAny {
+            destination,
+            sequence,
+            callback,
+        } => Some(SequenceTerminalRequest {
+            destination: *destination,
+            sequence: *sequence,
+            terminal: SequenceTerminal::Any,
+            callback: Some(*callback),
+            initial: None,
+        }),
+        Instruction::SequenceAll {
+            destination,
+            sequence,
+            callback,
+        } => Some(SequenceTerminalRequest {
+            destination: *destination,
+            sequence: *sequence,
+            terminal: SequenceTerminal::All,
+            callback: Some(*callback),
+            initial: None,
+        }),
+        Instruction::SequenceFold {
+            destination,
+            sequence,
+            initial,
+            callback,
+        } => Some(SequenceTerminalRequest {
+            destination: *destination,
+            sequence: *sequence,
+            terminal: SequenceTerminal::Fold,
+            callback: Some(*callback),
+            initial: Some(*initial),
+        }),
+        _ => None,
+    }
 }
 
 impl MachineFrame {
@@ -1086,6 +1435,7 @@ pub enum VmError {
     ArithmeticOverflow,
     DivisionByZero,
     IndexOutOfBounds,
+    ListLengthMismatch,
     MapKeyNotFound,
     DuplicateMapKey,
     ResourceLimit { resource: &'static str },
@@ -1105,6 +1455,7 @@ pub enum VmError {
     ToolUnavailable,
     ToolSchemaError,
     ProtocolViolation,
+    ProgramFailed { reason: String },
     Stopped { reason: String },
     Invariant(&'static str),
 }
@@ -1116,6 +1467,7 @@ impl VmError {
             Self::ArithmeticOverflow => "arithmetic.overflow",
             Self::DivisionByZero => "arithmetic.division_by_zero",
             Self::IndexOutOfBounds => "index.out_of_bounds",
+            Self::ListLengthMismatch => "list.length_mismatch",
             Self::MapKeyNotFound => "map.key_not_found",
             Self::DuplicateMapKey => "map.duplicate_key",
             Self::ResourceLimit { .. } => "resource.limit",
@@ -1134,6 +1486,7 @@ impl VmError {
             Self::ResponseValidationError => "user.validation_failed",
             Self::ToolUnavailable => "tool.unavailable",
             Self::ToolSchemaError => "tool.schema",
+            Self::ProgramFailed { .. } => "program.failed",
             Self::Stopped { .. } => "stopped",
             Self::Invariant(_) => "runtime.panic",
         }
@@ -1146,6 +1499,7 @@ impl fmt::Display for VmError {
             Self::ArithmeticOverflow => formatter.write_str("integer arithmetic overflowed"),
             Self::DivisionByZero => formatter.write_str("integer division by zero"),
             Self::IndexOutOfBounds => formatter.write_str("index is out of bounds"),
+            Self::ListLengthMismatch => formatter.write_str("list lengths do not match"),
             Self::MapKeyNotFound => formatter.write_str("map key was not found"),
             Self::DuplicateMapKey => formatter.write_str("map contains a duplicate key"),
             Self::ResourceLimit { resource } => {
@@ -1185,6 +1539,10 @@ impl fmt::Display for VmError {
             Self::ProtocolViolation => {
                 formatter.write_str("the external provider violated the execution protocol")
             }
+            Self::ProgramFailed { reason } if reason.is_empty() => {
+                formatter.write_str("program failed")
+            }
+            Self::ProgramFailed { reason } => formatter.write_str(reason),
             Self::Stopped { reason } => write!(formatter, "execution stopped: {reason}"),
             Self::Invariant(message) => {
                 write!(formatter, "verified bytecode invariant failed: {message}")
@@ -1459,6 +1817,7 @@ pub fn execute_entry_with_capabilities_and_runtime_context(
     let mut budget = Budget::new(limits, clock, observer, cancellation);
     execute_task_machine(
         raw_module,
+        module.templates(),
         debug,
         entry,
         arguments,
@@ -1501,6 +1860,9 @@ fn new_machine_frame(
         activation: depth,
         active_scopes: Vec::new(),
         continuation,
+        fold: None,
+        combinator: None,
+        sequence: None,
     })
 }
 
@@ -1514,6 +1876,7 @@ fn machine_failure(task: &MachineTask, error: VmError) -> TaskFailure {
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 fn execute_task_machine(
     raw_module: &allen_bytecode::Module,
+    templates: &[TemplateResource],
     debug: Option<&dyn DebugSourceMap>,
     entry: FunctionId,
     arguments: &[Value],
@@ -1676,7 +2039,15 @@ fn execute_task_machine(
                 instruction: u32::try_from(frame.program_counter).unwrap_or(u32::MAX),
             })
         });
-        let result = machine.step(raw_module, debug, budget, effects, capabilities, task_id);
+        let result = machine.step(
+            raw_module,
+            templates,
+            debug,
+            budget,
+            effects,
+            capabilities,
+            task_id,
+        );
         if let Err(error) = result {
             let task = machine.tasks.get(&task_id).expect("scheduled task exists");
             let owner_id = task.owner;
@@ -1688,7 +2059,10 @@ fn execute_task_machine(
             }
             if matches!(
                 failure.error,
-                VmError::Timeout { .. } | VmError::Cancelled | VmError::Stopped { .. }
+                VmError::Timeout { .. }
+                    | VmError::Cancelled
+                    | VmError::Stopped { .. }
+                    | VmError::ProgramFailed { .. }
             ) {
                 machine.cancel_pending_effects(budget, effects);
                 machine.cancel_effects(effects);
@@ -2278,10 +2652,11 @@ impl TaskMachine {
         }
     }
 
-    #[allow(clippy::too_many_lines)]
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
     fn step(
         &mut self,
         raw_module: &allen_bytecode::Module,
+        templates: &[TemplateResource],
         debug: Option<&dyn DebugSourceMap>,
         budget: &mut Budget<'_>,
         effects: &mut dyn EffectProvider,
@@ -2320,6 +2695,7 @@ impl TaskMachine {
             .program_counter
             .checked_add(1)
             .ok_or(VmError::Invariant("program counter overflowed"))?;
+        let sequence_request = sequence_terminal_parts(&instruction);
 
         match instruction {
             Instruction::Const {
@@ -2450,6 +2826,93 @@ impl TaskMachine {
                     Value::List(values.into()),
                 )?;
             }
+            Instruction::ListLiteralBuild { destination, items } => {
+                let function = &raw_module.functions[function_id as usize];
+                let ValueType::List(element_type) = register_type(function, destination)? else {
+                    return Err(VmError::Invariant(
+                        "list literal build destination contains another type",
+                    ));
+                };
+                let mut cache = HashMap::new();
+                let mut values = Vec::new();
+                for item in items {
+                    match item {
+                        allen_bytecode::ListLiteralItem::Element(source) => {
+                            let value = read_register(&frame.registers, source)?;
+                            if !value_matches_type(value, element_type, raw_module, 0, &mut cache)?
+                            {
+                                return Err(VmError::Invariant(
+                                    "list literal element has another type",
+                                ));
+                            }
+                            values.push(value);
+                        }
+                        allen_bytecode::ListLiteralItem::Spread(source) => {
+                            let spread = read_register(&frame.registers, source)?;
+                            let spread_type = ValueType::List(element_type.clone());
+                            if !value_matches_type(spread, &spread_type, raw_module, 0, &mut cache)?
+                            {
+                                return Err(VmError::Invariant(
+                                    "list literal spread contains another type",
+                                ));
+                            }
+                            let Value::List(spread) = spread else {
+                                return Err(VmError::Invariant(
+                                    "list literal spread contains another type",
+                                ));
+                            };
+                            values.extend(spread.iter());
+                        }
+                    }
+                }
+                budget.charge_allocation(collection_size(values.len(), VALUE_SLOT_BYTES)?)?;
+                let values = values.into_iter().cloned().collect::<Vec<_>>();
+                write_register(
+                    &mut frame.registers,
+                    destination,
+                    Value::List(values.into()),
+                )?;
+            }
+            Instruction::RangeNew {
+                destination,
+                start,
+                end,
+                inclusive,
+            } => {
+                let start = read_int(&frame.registers, start)?;
+                let end = read_int(&frame.registers, end)?;
+                write_register(
+                    &mut frame.registers,
+                    destination,
+                    Value::Range(Rc::new(RangeValue {
+                        start,
+                        end,
+                        inclusive,
+                    })),
+                )?;
+            }
+            Instruction::RangeStart { destination, range } => {
+                let Value::Range(range) = read_register(&frame.registers, range)?.clone() else {
+                    return Err(VmError::Invariant("range projection source is not Range"));
+                };
+                write_register(&mut frame.registers, destination, Value::Int(range.start))?;
+            }
+            Instruction::RangeEnd { destination, range } => {
+                let Value::Range(range) = read_register(&frame.registers, range)?.clone() else {
+                    return Err(VmError::Invariant("range projection source is not Range"));
+                };
+                write_register(&mut frame.registers, destination, Value::Int(range.end))?;
+            }
+            Instruction::RangeInclusive { destination, range } => {
+                let Value::Range(range) = read_register(&frame.registers, range)?.clone() else {
+                    return Err(VmError::Invariant("range projection source is not Range"));
+                };
+                write_register(
+                    &mut frame.registers,
+                    destination,
+                    Value::Bool(range.inclusive),
+                )?;
+            }
             Instruction::MapNew {
                 destination,
                 entries,
@@ -2470,6 +2933,69 @@ impl TaskMachine {
                     return Err(VmError::DuplicateMapKey);
                 }
                 write_register(&mut frame.registers, destination, Value::Map(values.into()))?;
+            }
+            Instruction::MapLiteralBuild { destination, items } => {
+                let function = &raw_module.functions[function_id as usize];
+                let ValueType::Map(key_type, value_type) = register_type(function, destination)?
+                else {
+                    return Err(VmError::Invariant(
+                        "map literal build destination contains another type",
+                    ));
+                };
+                let expected_type = ValueType::Map(key_type.clone(), value_type.clone());
+                let mut cache = HashMap::new();
+                let mut entries = Vec::<(&Value, &Value)>::new();
+                for item in items {
+                    match item {
+                        allen_bytecode::MapLiteralItem::Entry { key, value } => {
+                            let key = read_register(&frame.registers, key)?;
+                            let value = read_register(&frame.registers, value)?;
+                            if !value_matches_type(key, key_type, raw_module, 0, &mut cache)?
+                                || !value_matches_type(
+                                    value, value_type, raw_module, 0, &mut cache,
+                                )?
+                            {
+                                return Err(VmError::Invariant(
+                                    "map literal entry has another type",
+                                ));
+                            }
+                            map_literal_insert(&mut entries, key, value);
+                        }
+                        allen_bytecode::MapLiteralItem::Spread(source) => {
+                            let spread = read_register(&frame.registers, source)?;
+                            if !value_matches_type(
+                                spread,
+                                &expected_type,
+                                raw_module,
+                                0,
+                                &mut cache,
+                            )? {
+                                return Err(VmError::Invariant(
+                                    "map literal spread contains another type",
+                                ));
+                            }
+                            let Value::Map(spread) = spread else {
+                                return Err(VmError::Invariant(
+                                    "map literal spread contains another type",
+                                ));
+                            };
+                            for (key, value) in spread.iter() {
+                                map_literal_insert(&mut entries, key, value);
+                            }
+                        }
+                    }
+                }
+                budget.charge_allocation(collection_size(entries.len(), MAP_ENTRY_BYTES)?)?;
+                let mut entries = entries
+                    .into_iter()
+                    .map(|(key, value)| (key.clone(), value.clone()))
+                    .collect::<Vec<_>>();
+                entries.sort_by(|(left, _), (right, _)| compare_map_keys(left, right));
+                write_register(
+                    &mut frame.registers,
+                    destination,
+                    Value::Map(entries.into()),
+                )?;
             }
             Instruction::TupleNew {
                 destination,
@@ -2494,6 +3020,22 @@ impl TaskMachine {
                 )?;
                 write_register(&mut frame.registers, destination, value)?;
             }
+            Instruction::SliceGet {
+                destination,
+                collection,
+                start,
+                end,
+            } => {
+                let start = read_int(&frame.registers, start)?;
+                let end = read_int(&frame.registers, end)?;
+                let value = slice_get(
+                    read_register(&frame.registers, collection)?,
+                    start,
+                    end,
+                    budget,
+                )?;
+                write_register(&mut frame.registers, destination, value)?;
+            }
             Instruction::MapEntryAt {
                 destination,
                 map,
@@ -2515,6 +3057,25 @@ impl TaskMachine {
                 arguments,
             } => {
                 let value = string_call(&frame.registers, operation, &arguments, budget)?;
+                write_register(&mut frame.registers, destination, value)?;
+            }
+            Instruction::TemplateRender {
+                destination,
+                template,
+                arguments,
+            } => {
+                let resource = templates
+                    .get(template as usize)
+                    .ok_or(VmError::Invariant("template resource is missing"))?;
+                let value = render_template(resource, &frame.registers, &arguments, budget)?;
+                write_register(&mut frame.registers, destination, value)?;
+            }
+            Instruction::StandardCall {
+                destination,
+                operation,
+                arguments,
+            } => {
+                let value = standard_call(&frame.registers, operation, &arguments, budget)?;
                 write_register(&mut frame.registers, destination, value)?;
             }
             Instruction::ListAppend {
@@ -2573,6 +3134,43 @@ impl TaskMachine {
                     destination,
                     Value::Record(value.into()),
                 )?;
+            }
+            Instruction::NewtypeWrap {
+                destination,
+                source,
+            } => {
+                let function = &raw_module.functions[function_id as usize];
+                let ValueType::Newtype { name, .. } = register_type(function, destination)? else {
+                    return Err(VmError::Invariant(
+                        "newtype destination contains another type",
+                    ));
+                };
+                budget.charge_allocation(newtype_size(name.len())?)?;
+                let value = read_register(&frame.registers, source)?.clone();
+                write_register(
+                    &mut frame.registers,
+                    destination,
+                    Value::Newtype(Rc::new(NewtypeValue::new(name.as_str(), value))),
+                )?;
+            }
+            Instruction::NewtypeUnwrap {
+                destination,
+                source,
+            } => {
+                let Value::Newtype(value) = read_register(&frame.registers, source)? else {
+                    return Err(VmError::Invariant("newtype source contains another type"));
+                };
+                let function = &raw_module.functions[function_id as usize];
+                let ValueType::Newtype { name, .. } = register_type(function, source)? else {
+                    return Err(VmError::Invariant(
+                        "newtype source has another register type",
+                    ));
+                };
+                if value.identity() != name {
+                    return Err(VmError::Invariant("newtype source has another identity"));
+                }
+                let value = value.value().clone();
+                write_register(&mut frame.registers, destination, value)?;
             }
             Instruction::FieldGet {
                 destination,
@@ -2681,6 +3279,51 @@ impl TaskMachine {
                     _ => return Err(VmError::Invariant("Result has an invalid payload")),
                 }
             }
+            Instruction::TryOption {
+                destination,
+                source,
+            } => {
+                let source_value = read_register(&frame.registers, source)?.clone();
+                let Value::Enum(option) = &source_value else {
+                    return Err(VmError::Invariant(
+                        "TryOption operand contains another type",
+                    ));
+                };
+                if option.identity != EnumIdentity::Option {
+                    return Err(VmError::Invariant("TryOption operand is not Option"));
+                }
+                match (option.variant, &option.payload) {
+                    (1, EnumPayload::Tuple(payload)) => write_register(
+                        &mut frame.registers,
+                        destination,
+                        payload
+                            .first()
+                            .cloned()
+                            .ok_or(VmError::Invariant("Some has no payload"))?,
+                    )?,
+                    (0, EnumPayload::Unit) => {
+                        if let Some(scope) = frame.active_scopes.pop() {
+                            task.state = MachineTaskState::Waiting(WaitState::Return {
+                                scope: ScopeKey {
+                                    activation: frame.activation,
+                                    lexical: scope,
+                                },
+                                value: source_value,
+                            });
+                            let owner = task.owner;
+                            self.emit_event(
+                                budget.observer,
+                                task_id,
+                                owner,
+                                TaskEventKind::Waiting,
+                            );
+                        } else {
+                            self.return_value(task_id, source_value, budget.observer)?;
+                        }
+                    }
+                    _ => return Err(VmError::Invariant("Option has an invalid payload")),
+                }
+            }
             Instruction::ToUnknown {
                 destination,
                 source,
@@ -2718,6 +3361,43 @@ impl TaskMachine {
                         payload,
                     ))),
                 )?;
+            }
+            Instruction::Decode {
+                destination,
+                source,
+                target,
+            } => {
+                let Value::Bytes(bytes) = read_register(&frame.registers, source)? else {
+                    return Err(VmError::Invariant("Decode operand is not Bytes"));
+                };
+                let input_bytes =
+                    u64::try_from(bytes.len()).map_err(|_| VmError::ResourceLimit {
+                        resource: RESOURCE_DECODE_BYTES,
+                    })?;
+                budget.decode_input_bytes = budget
+                    .decode_input_bytes
+                    .checked_add(input_bytes)
+                    .ok_or(VmError::ResourceLimit {
+                        resource: RESOURCE_DECODE_BYTES,
+                    })?;
+                if budget.decode_input_bytes > MAXIMUM_DECODE_BYTES {
+                    return Err(VmError::ResourceLimit {
+                        resource: RESOURCE_DECODE_BYTES,
+                    });
+                }
+                let decoded = match decode_json(bytes, &target, &raw_module.enum_types) {
+                    Ok(value) => {
+                        charge_external_value(&value, budget, 0)?;
+                        standard_result_ok(value, budget)?
+                    }
+                    Err(error) if error.kind() == JsonDecodeErrorKind::ResourceDepth => {
+                        return Err(VmError::ResourceLimit {
+                            resource: RESOURCE_DECODE_DEPTH,
+                        });
+                    }
+                    Err(error) => standard_result_error(error.code(), error.message(), budget)?,
+                };
+                write_register(&mut frame.registers, destination, decoded)?;
             }
             Instruction::DirectCall {
                 destination,
@@ -3041,6 +3721,580 @@ impl TaskMachine {
                 let value = checked_int_call(&frame.registers, operation, &arguments, budget)?;
                 write_register(&mut frame.registers, destination, value)?;
             }
+            Instruction::CollectionCall {
+                destination,
+                operation,
+                arguments,
+            } => {
+                let value = collection_call(&frame.registers, operation, &arguments, budget)?;
+                write_register(&mut frame.registers, destination, value)?;
+            }
+            Instruction::ListFold {
+                destination,
+                values,
+                initial,
+                callback,
+            } => {
+                let pc = usize::try_from(instruction_index).expect("instruction index fits");
+                if frame
+                    .fold
+                    .as_ref()
+                    .is_none_or(|fold| fold.instruction != pc)
+                {
+                    let input = match read_register(&frame.registers, values)? {
+                        Value::List(input) => Rc::clone(input),
+                        _ => return Err(VmError::Invariant("list fold values are not List")),
+                    };
+                    let closure = match read_register(&frame.registers, callback)? {
+                        Value::Closure(closure) => Rc::clone(closure),
+                        _ => return Err(VmError::Invariant("list fold callback is not Closure")),
+                    };
+                    let initial = read_register(&frame.registers, initial)?.clone();
+                    write_register(&mut frame.registers, destination, initial)?;
+                    frame.fold = Some(PendingFold {
+                        instruction: pc,
+                        destination,
+                        values: input,
+                        callback: closure,
+                        index: 0,
+                    });
+                }
+                let (input, closure, accumulator, next) = {
+                    let fold = frame.fold.as_mut().expect("fold state exists");
+                    if fold.index == fold.values.len() {
+                        frame.fold = None;
+                        return Ok(());
+                    }
+                    let item = fold.values[fold.index].clone();
+                    fold.index += 1;
+                    frame.program_counter = pc;
+                    (
+                        item,
+                        Rc::clone(&fold.callback),
+                        read_register(&frame.registers, fold.destination)?.clone(),
+                        fold.destination,
+                    )
+                };
+                let depth =
+                    u32::try_from(task.frames.len() + 1).map_err(|_| VmError::ResourceLimit {
+                        resource: RESOURCE_CALL_DEPTH,
+                    })?;
+                let child = new_machine_frame(
+                    raw_module,
+                    closure.function,
+                    &[accumulator, input],
+                    &closure.captures,
+                    Some(next),
+                    depth,
+                    budget,
+                )?;
+                task.frames.push(child);
+            }
+            Instruction::ListCombinator {
+                destination,
+                operation,
+                values,
+                initial,
+                callback,
+                callback_result,
+            } => {
+                let pc = usize::try_from(instruction_index).expect("instruction index fits");
+                if frame
+                    .combinator
+                    .as_ref()
+                    .is_none_or(|pending| pending.instruction != pc)
+                {
+                    let input = match read_register(&frame.registers, values)? {
+                        Value::List(input) => Rc::clone(input),
+                        _ => return Err(VmError::Invariant("list combinator values are not List")),
+                    };
+                    let closure = match read_register(&frame.registers, callback)? {
+                        Value::Closure(closure) => Rc::clone(closure),
+                        _ => {
+                            return Err(VmError::Invariant(
+                                "list combinator callback is not Closure",
+                            ));
+                        }
+                    };
+                    let accumulator = initial
+                        .map(|register| read_register(&frame.registers, register).cloned())
+                        .transpose()?;
+                    frame.combinator = Some(PendingListCombinator {
+                        instruction: pc,
+                        operation,
+                        values: input,
+                        callback: closure,
+                        callback_result,
+                        index: 0,
+                        current: None,
+                        accumulator,
+                        output: Vec::new(),
+                        rest: Vec::new(),
+                        answer: None,
+                        waiting: false,
+                    });
+                }
+                let mut call = None;
+                let mut complete = false;
+                {
+                    let pending = frame.combinator.as_mut().expect("combinator state exists");
+                    if pending.waiting {
+                        let result =
+                            read_register(&frame.registers, pending.callback_result)?.clone();
+                        let current = pending.current.take().expect("callback has an item");
+                        pending.waiting = false;
+                        match pending.operation {
+                            ListCombinator::Map => pending.output.push(result),
+                            ListCombinator::Filter => {
+                                let Value::Bool(matches) = result else {
+                                    return Err(VmError::Invariant(
+                                        "list filter callback result is not Bool",
+                                    ));
+                                };
+                                if matches {
+                                    pending.output.push(current);
+                                }
+                            }
+                            ListCombinator::FlatMap => {
+                                let Value::List(values) = result else {
+                                    return Err(VmError::Invariant(
+                                        "list flat_map callback result is not List",
+                                    ));
+                                };
+                                pending.output.extend(values.iter().cloned());
+                            }
+                            ListCombinator::FilterMap => {
+                                let Value::Enum(option) = result else {
+                                    return Err(VmError::Invariant(
+                                        "list filter_map callback result is not Option",
+                                    ));
+                                };
+                                if option.identity != EnumIdentity::Option {
+                                    return Err(VmError::Invariant(
+                                        "list filter_map callback result is not Option",
+                                    ));
+                                }
+                                match (&option.variant, &option.payload) {
+                                    (0, EnumPayload::Unit) => {}
+                                    (1, EnumPayload::Tuple(values)) if values.len() == 1 => {
+                                        pending.output.push(values[0].clone());
+                                    }
+                                    _ => {
+                                        return Err(VmError::Invariant(
+                                            "list filter_map callback Option is malformed",
+                                        ));
+                                    }
+                                }
+                            }
+                            ListCombinator::Find => {
+                                let Value::Bool(matches) = result else {
+                                    return Err(VmError::Invariant(
+                                        "list find callback result is not Bool",
+                                    ));
+                                };
+                                if matches {
+                                    pending.output.push(current);
+                                    complete = true;
+                                }
+                            }
+                            ListCombinator::Any => {
+                                let Value::Bool(matches) = result else {
+                                    return Err(VmError::Invariant(
+                                        "list any callback result is not Bool",
+                                    ));
+                                };
+                                if matches {
+                                    pending.answer = Some(true);
+                                    complete = true;
+                                }
+                            }
+                            ListCombinator::All => {
+                                let Value::Bool(matches) = result else {
+                                    return Err(VmError::Invariant(
+                                        "list all callback result is not Bool",
+                                    ));
+                                };
+                                if !matches {
+                                    pending.answer = Some(false);
+                                    complete = true;
+                                }
+                            }
+                            ListCombinator::Partition => {
+                                let Value::Bool(matches) = result else {
+                                    return Err(VmError::Invariant(
+                                        "list partition callback result is not Bool",
+                                    ));
+                                };
+                                if matches {
+                                    pending.output.push(current);
+                                } else {
+                                    pending.rest.push(current);
+                                }
+                            }
+                            ListCombinator::Scan => {
+                                pending.accumulator = Some(result.clone());
+                                pending.output.push(result);
+                            }
+                        }
+                    }
+                    if !complete && pending.index == pending.values.len() {
+                        complete = true;
+                    }
+                    if !complete {
+                        let current = pending.values[pending.index].clone();
+                        pending.index += 1;
+                        pending.current = Some(current.clone());
+                        pending.waiting = true;
+                        let arguments = match pending.operation {
+                            ListCombinator::Scan => vec![
+                                pending.accumulator.clone().expect("scan accumulator"),
+                                current,
+                            ],
+                            _ => vec![current],
+                        };
+                        call = Some((
+                            Rc::clone(&pending.callback),
+                            arguments,
+                            pending.callback_result,
+                        ));
+                        frame.program_counter = pc;
+                    }
+                }
+                if complete {
+                    let pending = frame.combinator.take().expect("combinator state exists");
+                    let value = finish_list_combinator(pending, budget)?;
+                    write_register(&mut frame.registers, destination, value)?;
+                } else if let Some((closure, arguments, result)) = call {
+                    let depth = u32::try_from(task.frames.len() + 1).map_err(|_| {
+                        VmError::ResourceLimit {
+                            resource: RESOURCE_CALL_DEPTH,
+                        }
+                    })?;
+                    let child = new_machine_frame(
+                        raw_module,
+                        closure.function,
+                        &arguments,
+                        &closure.captures,
+                        Some(result),
+                        depth,
+                        budget,
+                    )?;
+                    task.frames.push(child);
+                }
+            }
+            Instruction::SequenceFromList {
+                destination,
+                values,
+            } => {
+                let Value::List(values) = read_register(&frame.registers, values)?.clone() else {
+                    return Err(VmError::Invariant("sequence source is not List"));
+                };
+                budget.charge_allocation(VALUE_SLOT_BYTES)?;
+                write_register(
+                    &mut frame.registers,
+                    destination,
+                    Value::Sequence(Rc::new(SequenceValue::from_list(values))),
+                )?;
+            }
+            Instruction::SequenceTake {
+                destination,
+                sequence,
+                count,
+            } => {
+                let Value::Sequence(sequence) = read_register(&frame.registers, sequence)?.clone()
+                else {
+                    return Err(VmError::Invariant("sequence source is not Sequence"));
+                };
+                sequence.consume()?;
+                let count = usize::try_from(read_int(&frame.registers, count)?).unwrap_or(0);
+                budget.charge_allocation(VALUE_SLOT_BYTES)?;
+                write_register(
+                    &mut frame.registers,
+                    destination,
+                    Value::Sequence(Rc::new(SequenceValue::take(sequence, count))),
+                )?;
+            }
+            Instruction::SequenceMap {
+                destination,
+                sequence,
+                callback,
+            } => {
+                let Value::Sequence(sequence) = read_register(&frame.registers, sequence)?.clone()
+                else {
+                    return Err(VmError::Invariant("sequence source is not Sequence"));
+                };
+                let Value::Closure(callback) = read_register(&frame.registers, callback)?.clone()
+                else {
+                    return Err(VmError::Invariant("sequence callback is not Closure"));
+                };
+                sequence.consume()?;
+                budget.charge_allocation(VALUE_SLOT_BYTES)?;
+                write_register(
+                    &mut frame.registers,
+                    destination,
+                    Value::Sequence(Rc::new(SequenceValue::map(sequence, callback))),
+                )?;
+            }
+            Instruction::SequenceFilter {
+                destination,
+                sequence,
+                callback,
+            } => {
+                let Value::Sequence(sequence) = read_register(&frame.registers, sequence)?.clone()
+                else {
+                    return Err(VmError::Invariant("sequence source is not Sequence"));
+                };
+                let Value::Closure(callback) = read_register(&frame.registers, callback)?.clone()
+                else {
+                    return Err(VmError::Invariant("sequence callback is not Closure"));
+                };
+                sequence.consume()?;
+                budget.charge_allocation(VALUE_SLOT_BYTES)?;
+                write_register(
+                    &mut frame.registers,
+                    destination,
+                    Value::Sequence(Rc::new(SequenceValue::filter(sequence, callback))),
+                )?;
+            }
+            Instruction::SequenceToList { .. }
+            | Instruction::SequenceFind { .. }
+            | Instruction::SequenceAny { .. }
+            | Instruction::SequenceAll { .. }
+            | Instruction::SequenceFold { .. } => {
+                let request = sequence_request.expect("sequence terminal request");
+                let destination = request.destination;
+                let sequence_register = request.sequence;
+                let terminal = request.terminal;
+                let callback_register = request.callback;
+                let initial_register = request.initial;
+                if frame.sequence.as_ref().is_none_or(|pending| {
+                    pending.instruction
+                        != usize::try_from(instruction_index).expect("instruction index fits")
+                }) {
+                    let Value::Sequence(sequence) =
+                        read_register(&frame.registers, sequence_register)?.clone()
+                    else {
+                        return Err(VmError::Invariant("sequence source is not Sequence"));
+                    };
+                    sequence.consume()?;
+                    let callback = callback_register
+                        .map(|register| {
+                            let Value::Closure(callback) =
+                                read_register(&frame.registers, register)?.clone()
+                            else {
+                                return Err(VmError::Invariant("sequence callback is not Closure"));
+                            };
+                            Ok(callback)
+                        })
+                        .transpose()?;
+                    let accumulator = initial_register
+                        .map(|register| read_register(&frame.registers, register).cloned())
+                        .transpose()?;
+                    frame.sequence = Some(PendingSequence {
+                        instruction: usize::try_from(instruction_index)
+                            .expect("instruction index fits"),
+                        destination,
+                        sequence,
+                        terminal,
+                        callback,
+                        adapters: Vec::new(),
+                        adapter_index: 0,
+                        current: None,
+                        output: Vec::new(),
+                        answer: None,
+                        accumulator,
+                        waiting: None,
+                    });
+                }
+                let mut call = None;
+                let mut complete = false;
+                loop {
+                    let pending = frame.sequence.as_mut().expect("sequence state exists");
+                    if let Some(waiting) = pending.waiting.take() {
+                        let result = read_register(&frame.registers, pending.destination)?.clone();
+                        let current = pending.current.take().expect("sequence callback item");
+                        match waiting {
+                            SequenceWaiting::Adapter => match pending
+                                .adapters
+                                .get(pending.adapter_index)
+                                .expect("adapter exists")
+                            {
+                                SequenceAdapter::Map(_) => {
+                                    pending.current = Some(result);
+                                    pending.adapter_index += 1;
+                                }
+                                SequenceAdapter::Filter(_) => {
+                                    let Value::Bool(matches) = result else {
+                                        return Err(VmError::Invariant(
+                                            "sequence filter callback result is not Bool",
+                                        ));
+                                    };
+                                    pending.adapter_index += 1;
+                                    if matches {
+                                        pending.current = Some(current);
+                                    } else {
+                                        pending.adapters.clear();
+                                        pending.adapter_index = 0;
+                                    }
+                                }
+                                SequenceAdapter::Take(_) => {
+                                    return Err(VmError::Invariant(
+                                        "sequence take adapter cannot await a callback",
+                                    ));
+                                }
+                            },
+                            SequenceWaiting::Terminal => match pending.terminal {
+                                SequenceTerminal::Find => {
+                                    let Value::Bool(matches) = result else {
+                                        return Err(VmError::Invariant(
+                                            "sequence find callback result is not Bool",
+                                        ));
+                                    };
+                                    if matches {
+                                        pending.output.push(current);
+                                        complete = true;
+                                    }
+                                }
+                                SequenceTerminal::Any => {
+                                    let Value::Bool(matches) = result else {
+                                        return Err(VmError::Invariant(
+                                            "sequence any callback result is not Bool",
+                                        ));
+                                    };
+                                    if matches {
+                                        pending.answer = Some(true);
+                                        complete = true;
+                                    }
+                                }
+                                SequenceTerminal::All => {
+                                    let Value::Bool(matches) = result else {
+                                        return Err(VmError::Invariant(
+                                            "sequence all callback result is not Bool",
+                                        ));
+                                    };
+                                    if !matches {
+                                        pending.answer = Some(false);
+                                        complete = true;
+                                    }
+                                }
+                                SequenceTerminal::Fold => pending.accumulator = Some(result),
+                                SequenceTerminal::ToList => {
+                                    return Err(VmError::Invariant(
+                                        "list terminal callback is invalid",
+                                    ));
+                                }
+                            },
+                        }
+                    }
+                    if complete {
+                        break;
+                    }
+                    let needs_item = pending.current.is_none();
+                    if needs_item {
+                        let Some((value, adapters)) = pending.sequence.next_pipeline() else {
+                            complete = true;
+                            break;
+                        };
+                        budget.charge_allocation(VALUE_SLOT_BYTES)?;
+                        pending.current = Some(value);
+                        pending.adapters = adapters;
+                        pending.adapter_index = 0;
+                    }
+                    if pending.adapter_index < pending.adapters.len() {
+                        let adapter = pending.adapters[pending.adapter_index].clone();
+                        let callback = match adapter {
+                            SequenceAdapter::Take(take) => {
+                                if !take.take_one() {
+                                    complete = true;
+                                    break;
+                                }
+                                pending.adapter_index += 1;
+                                continue;
+                            }
+                            SequenceAdapter::Map(callback) | SequenceAdapter::Filter(callback) => {
+                                callback
+                            }
+                        };
+                        pending.waiting = Some(SequenceWaiting::Adapter);
+                        frame.program_counter =
+                            usize::try_from(instruction_index).expect("instruction index fits");
+                        call = Some((
+                            callback,
+                            vec![pending.current.clone().expect("sequence item")],
+                            pending.destination,
+                        ));
+                        break;
+                    }
+                    let current = pending.current.take().expect("sequence item");
+                    match pending.terminal {
+                        SequenceTerminal::ToList => pending.output.push(current),
+                        SequenceTerminal::Find
+                        | SequenceTerminal::Any
+                        | SequenceTerminal::All
+                        | SequenceTerminal::Fold => {
+                            let callback = pending.callback.clone().expect("terminal callback");
+                            let arguments = if matches!(pending.terminal, SequenceTerminal::Fold) {
+                                vec![
+                                    pending.accumulator.clone().expect("fold accumulator"),
+                                    current.clone(),
+                                ]
+                            } else {
+                                vec![current.clone()]
+                            };
+                            pending.current = Some(current);
+                            pending.waiting = Some(SequenceWaiting::Terminal);
+                            frame.program_counter =
+                                usize::try_from(instruction_index).expect("instruction index fits");
+                            call = Some((callback, arguments, pending.destination));
+                        }
+                    }
+                    if call.is_some() {
+                        break;
+                    }
+                }
+                if complete {
+                    let pending = frame.sequence.take().expect("sequence state exists");
+                    let value = match pending.terminal {
+                        SequenceTerminal::ToList => {
+                            budget.charge_allocation(collection_size(
+                                pending.output.len(),
+                                VALUE_SLOT_BYTES,
+                            )?)?;
+                            Value::List(pending.output.into())
+                        }
+                        SequenceTerminal::Find => {
+                            budget.charge_allocation(enum_size(usize::from(
+                                !pending.output.is_empty(),
+                            ))?)?;
+                            pending
+                                .output
+                                .into_iter()
+                                .next()
+                                .map_or_else(option_none, option_some)
+                        }
+                        SequenceTerminal::Any => Value::Bool(pending.answer.unwrap_or(false)),
+                        SequenceTerminal::All => Value::Bool(pending.answer.unwrap_or(true)),
+                        SequenceTerminal::Fold => pending.accumulator.expect("fold accumulator"),
+                    };
+                    write_register(&mut frame.registers, destination, value)?;
+                } else if let Some((closure, arguments, result)) = call {
+                    let depth = u32::try_from(task.frames.len() + 1).map_err(|_| {
+                        VmError::ResourceLimit {
+                            resource: RESOURCE_CALL_DEPTH,
+                        }
+                    })?;
+                    let child = new_machine_frame(
+                        raw_module,
+                        closure.function,
+                        &arguments,
+                        &closure.captures,
+                        Some(result),
+                        depth,
+                        budget,
+                    )?;
+                    task.frames.push(child);
+                }
+            }
             Instruction::ToolInvoke {
                 destination,
                 tool,
@@ -3090,6 +4344,19 @@ impl TaskMachine {
                     return Err(VmError::Invariant("stop reason contains another type"));
                 };
                 return Err(VmError::Stopped {
+                    reason: reason.to_string(),
+                });
+            }
+            Instruction::Fail { reason } => {
+                let Value::String(reason) = read_register(&frame.registers, reason)? else {
+                    return Err(VmError::Invariant("fail reason contains another type"));
+                };
+                if reason.len() > 2_048 {
+                    return Err(VmError::ResourceLimit {
+                        resource: "failure_reason_bytes",
+                    });
+                }
+                return Err(VmError::ProgramFailed {
                     reason: reason.to_string(),
                 });
             }
@@ -3345,8 +4612,50 @@ fn collection_size(length: usize, slot_bytes: u64) -> Result<u64, VmError> {
     logical_size(COLLECTION_BASE_BYTES, length, slot_bytes)
 }
 
+fn finish_list_combinator(
+    pending: PendingListCombinator,
+    budget: &mut Budget<'_>,
+) -> Result<Value, VmError> {
+    match pending.operation {
+        ListCombinator::Map
+        | ListCombinator::Filter
+        | ListCombinator::FlatMap
+        | ListCombinator::FilterMap
+        | ListCombinator::Scan => {
+            budget.charge_allocation(collection_size(pending.output.len(), VALUE_SLOT_BYTES)?)?;
+            Ok(Value::List(pending.output.into()))
+        }
+        ListCombinator::Find => {
+            budget.charge_allocation(enum_size(usize::from(!pending.output.is_empty()))?)?;
+            Ok(pending
+                .output
+                .into_iter()
+                .next()
+                .map_or_else(option_none, option_some))
+        }
+        ListCombinator::Any => Ok(Value::Bool(pending.answer.unwrap_or(false))),
+        ListCombinator::All => Ok(Value::Bool(pending.answer.unwrap_or(true))),
+        ListCombinator::Partition => {
+            budget.charge_allocation(collection_size(pending.output.len(), VALUE_SLOT_BYTES)?)?;
+            budget.charge_allocation(collection_size(pending.rest.len(), VALUE_SLOT_BYTES)?)?;
+            budget.charge_allocation(record_size(2)?)?;
+            Ok(Value::Record(
+                vec![
+                    (Rc::from("matched"), Value::List(pending.output.into())),
+                    (Rc::from("rest"), Value::List(pending.rest.into())),
+                ]
+                .into(),
+            ))
+        }
+    }
+}
+
 fn record_size(length: usize) -> Result<u64, VmError> {
     logical_size(COLLECTION_BASE_BYTES, length, VALUE_SLOT_BYTES)
+}
+
+fn newtype_size(identity_bytes: usize) -> Result<u64, VmError> {
+    logical_size(VALUE_SLOT_BYTES, identity_bytes, 1)
 }
 
 fn allocated_string(value: String, budget: &mut Budget<'_>) -> Result<Value, VmError> {
@@ -3401,6 +4710,10 @@ fn charge_external_value(
                 }
             }
         },
+        Value::Newtype(value) => {
+            budget.charge_allocation(newtype_size(value.identity().len())?)?;
+            charge_external_value(value.value(), budget, depth + 1)?;
+        }
         Value::Unknown(value) => {
             budget.charge_allocation(VALUE_SLOT_BYTES)?;
             charge_external_value(value, budget, depth + 1)?;
@@ -3411,8 +4724,9 @@ fn charge_external_value(
         | Value::ExternalFsAccess(_)
         | Value::Unit
         | Value::Workspace(_)
-        | Value::SubAgent(_) => {}
-        Value::Closure(_) | Value::Future(_) | Value::Task(_) => {
+        | Value::SubAgent(_)
+        | Value::Range(_) => {}
+        Value::Sequence(_) | Value::Closure(_) | Value::Future(_) | Value::Task(_) => {
             return Err(VmError::Invariant("effect result contains an affine value"));
         }
     }
@@ -3583,6 +4897,17 @@ fn operation_allows_error_code(operation: FsOperation, code: &str) -> bool {
                 | "net.unsupported_encoding"
                 | "network.unavailable"
         ),
+        FsOperation::ExecRun => matches!(
+            code,
+            "exec.denied"
+                | "exec.invalid_argv"
+                | "exec.stdin_limit"
+                | "exec.stdout_limit"
+                | "exec.stderr_limit"
+                | "exec.timeout"
+                | "exec.unavailable"
+                | "exec.limit"
+        ),
         FsOperation::PermissionRequestFile | FsOperation::PermissionRequestDirectory => {
             matches!(code, "permission.denied" | "permission.unavailable")
         }
@@ -3635,6 +4960,9 @@ fn close_provider_error(
         ) => (1, "fs.unavailable", "filesystem provider is unavailable"),
         (EffectFailureFamily::Operation(FsOperation::HttpGet), VmError::CapabilityMissing) => {
             (1, "network.unavailable", "network provider is unavailable")
+        }
+        (EffectFailureFamily::Operation(FsOperation::ExecRun), VmError::CapabilityMissing) => {
+            (1, "exec.unavailable", "subprocess provider is unavailable")
         }
         (
             EffectFailureFamily::Operation(
@@ -3825,6 +5153,7 @@ struct Budget<'a> {
     cancellation: &'a mut dyn CancellationSource,
     effects: ConcurrentEffectCounter,
     warned_resources: u8,
+    decode_input_bytes: u64,
 }
 
 const WARNING_INSTRUCTIONS: u8 = 1 << 0;
@@ -3863,6 +5192,7 @@ impl<'a> Budget<'a> {
             cancellation,
             effects: ConcurrentEffectCounter::new(limits.concurrent_effects),
             warned_resources: 0,
+            decode_input_bytes: 0,
         }
     }
 
@@ -4031,6 +5361,21 @@ fn clone_registers(registers: &[Option<Value>], sources: &[u16]) -> Result<Vec<V
         .iter()
         .map(|source| read_register(registers, *source).cloned())
         .collect()
+}
+
+fn map_literal_insert<'a>(
+    entries: &mut Vec<(&'a Value, &'a Value)>,
+    key: &'a Value,
+    value: &'a Value,
+) {
+    if let Some(existing) = entries
+        .iter_mut()
+        .find(|(existing_key, _)| language_equal(existing_key, key))
+    {
+        *existing = (key, value);
+    } else {
+        entries.push((key, value));
+    }
 }
 
 fn register_type(
@@ -4301,6 +5646,7 @@ fn language_equal_with_cache(
         (Value::Float(left), Value::Float(right)) => left == right,
         (Value::String(left), Value::String(right)) => left == right,
         (Value::Bytes(left), Value::Bytes(right)) => left == right,
+        (Value::Range(left), Value::Range(right)) => left == right,
         (Value::ExternalFsAccess(left), Value::ExternalFsAccess(right)) => left == right,
         (Value::Unit, Value::Unit) => true,
         (Value::List(left), Value::List(right)) | (Value::Tuple(left), Value::Tuple(right)) => {
@@ -4332,6 +5678,10 @@ fn language_equal_with_cache(
             left.identity == right.identity
                 && left.variant == right.variant
                 && payload_equal(&left.payload, &right.payload, cache)
+        }
+        (Value::Newtype(left), Value::Newtype(right)) => {
+            left.identity() == right.identity()
+                && language_equal_with_cache(left.value(), right.value(), cache)
         }
         (Value::Unknown(left), Value::Unknown(right)) => {
             language_equal_with_cache(left, right, cache)
@@ -4379,6 +5729,7 @@ fn aggregate_identity(value: &Value) -> Option<(u8, usize)> {
         Value::Record(values) => Some((3, Rc::as_ptr(values).cast::<()>() as usize)),
         Value::Enum(value) => Some((4, Rc::as_ptr(value) as usize)),
         Value::Unknown(value) => Some((5, Rc::as_ptr(value) as usize)),
+        Value::Newtype(value) => Some((6, Rc::as_ptr(value) as usize)),
         Value::Int(_)
         | Value::Bool(_)
         | Value::Float(_)
@@ -4390,7 +5741,9 @@ fn aggregate_identity(value: &Value) -> Option<(u8, usize)> {
         | Value::Future(_)
         | Value::Task(_)
         | Value::Workspace(_)
-        | Value::SubAgent(_) => None,
+        | Value::SubAgent(_)
+        | Value::Range(_)
+        | Value::Sequence(_) => None,
     }
 }
 
@@ -4417,6 +5770,8 @@ fn value_matches_type(
         | (Value::Float(_), ValueType::Float)
         | (Value::String(_), ValueType::String)
         | (Value::Bytes(_), ValueType::Bytes)
+        | (Value::Range(_), ValueType::Range)
+        | (Value::Sequence(_), ValueType::Sequence(_))
         | (Value::ExternalFsAccess(_), ValueType::ExternalFsAccess)
         | (Value::Unit, ValueType::Unit)
         | (Value::Unknown(_), ValueType::Unknown)
@@ -4447,6 +5802,9 @@ fn value_matches_type(
         (Value::Record(values), ValueType::Record(fields)) => {
             record_matches_type(values, fields, module, depth, cache)
         }
+        (Value::Newtype(value), ValueType::Newtype { name, underlying }) => Ok(value.identity()
+            == name
+            && value_matches_type(value.value(), underlying, module, depth + 1, cache)?),
         (Value::Enum(value), ValueType::Enum(type_id)) => {
             if value.identity != EnumIdentity::User(*type_id) {
                 return Ok(false);
@@ -4571,6 +5929,9 @@ fn language_order(left: &Value, right: &Value) -> Result<Option<Ordering>, VmErr
             Ok(Some(left.as_bytes().cmp(right.as_bytes())))
         }
         (Value::Bytes(left), Value::Bytes(right)) => Ok(Some(left.cmp(right))),
+        (Value::Newtype(left), Value::Newtype(right)) if left.identity() == right.identity() => {
+            language_order(left.value(), right.value())
+        }
         _ => Err(VmError::Invariant(
             "ordered comparison contains unsupported values",
         )),
@@ -4583,6 +5944,11 @@ fn compare_map_keys(left: &Value, right: &Value) -> Ordering {
         (Value::Int(left), Value::Int(right)) => left.cmp(right),
         (Value::String(left), Value::String(right)) => left.as_bytes().cmp(right.as_bytes()),
         (Value::Bytes(left), Value::Bytes(right)) => left.cmp(right),
+        (Value::Newtype(left), Value::Newtype(right)) => left
+            .identity()
+            .as_bytes()
+            .cmp(right.identity().as_bytes())
+            .then_with(|| compare_map_keys(left.value(), right.value())),
         _ => Ordering::Equal,
     }
 }
@@ -4621,6 +5987,50 @@ fn collection_length(collection: &Value) -> Result<i64, VmError> {
         }
     };
     i64::try_from(length).map_err(|_| VmError::Invariant("collection length exceeds Int"))
+}
+
+fn slice_get(
+    collection: &Value,
+    start: i64,
+    end: i64,
+    budget: &mut Budget<'_>,
+) -> Result<Value, VmError> {
+    let (Ok(start), Ok(end)) = (usize::try_from(start), usize::try_from(end)) else {
+        return Ok(option_none());
+    };
+    if start > end {
+        return Ok(option_none());
+    }
+    match collection {
+        Value::List(values) => {
+            if end > values.len() {
+                return Ok(option_none());
+            }
+            budget.charge_allocation(enum_size(1)?)?;
+            budget.charge_allocation(collection_size(end - start, VALUE_SLOT_BYTES)?)?;
+            Ok(option_some(Value::List(values[start..end].to_vec().into())))
+        }
+        Value::Bytes(values) => {
+            if end > values.len() {
+                return Ok(option_none());
+            }
+            budget.charge_allocation(enum_size(1)?)?;
+            budget.charge_allocation(collection_size(end - start, 1)?)?;
+            Ok(option_some(Value::Bytes(Rc::from(&values[start..end]))))
+        }
+        Value::String(value) => {
+            let Some(start_byte) = scalar_byte_index(value, start) else {
+                return Ok(option_none());
+            };
+            let Some(end_byte) = scalar_byte_index(value, end) else {
+                return Ok(option_none());
+            };
+            allocated_some_string(&value[start_byte..end_byte], budget)
+        }
+        _ => Err(VmError::Invariant(
+            "slice source is not List, Bytes, or String",
+        )),
+    }
 }
 
 #[allow(clippy::too_many_lines)]
@@ -4739,6 +6149,49 @@ fn string_call(
                 Err(_) => Ok(option_none()),
             }
         }
+        StringOperation::Replace => {
+            let [value, needle, replacement] = arguments else {
+                return Err(VmError::Invariant("String replace arity is invalid"));
+            };
+            let value = read_string(registers, *value)?;
+            let needle = read_string(registers, *needle)?;
+            let replacement = read_string(registers, *replacement)?;
+            if needle.is_empty() {
+                allocate_string(value, budget)
+            } else {
+                let matches = value.match_indices(needle).count();
+                let removed = needle
+                    .len()
+                    .checked_mul(matches)
+                    .ok_or(VmError::ResourceLimit {
+                        resource: RESOURCE_ALLOCATION_BYTES,
+                    })?;
+                let added =
+                    replacement
+                        .len()
+                        .checked_mul(matches)
+                        .ok_or(VmError::ResourceLimit {
+                            resource: RESOURCE_ALLOCATION_BYTES,
+                        })?;
+                let length = value
+                    .len()
+                    .checked_sub(removed)
+                    .and_then(|length| length.checked_add(added))
+                    .ok_or(VmError::ResourceLimit {
+                        resource: RESOURCE_ALLOCATION_BYTES,
+                    })?;
+                budget.charge_allocation(string_size_bytes(length)?)?;
+                let mut output = String::with_capacity(length);
+                let mut cursor = 0;
+                for (index, _) in value.match_indices(needle) {
+                    output.push_str(&value[cursor..index]);
+                    output.push_str(replacement);
+                    cursor = index + needle.len();
+                }
+                output.push_str(&value[cursor..]);
+                Ok(Value::String(output.into()))
+            }
+        }
         StringOperation::TemplateConcat => {
             if arguments.is_empty() {
                 return Err(VmError::Invariant(
@@ -4747,6 +6200,420 @@ fn string_call(
             }
             concatenate_string_registers(registers, arguments, budget)
         }
+    }
+}
+
+fn render_template(
+    template: &TemplateResource,
+    registers: &[Option<Value>],
+    arguments: &[Register],
+    budget: &mut Budget<'_>,
+) -> Result<Value, VmError> {
+    if arguments.len() != template.holes.len() {
+        return Err(VmError::Invariant("template render arity is invalid"));
+    }
+    let marker_bytes = template.markers.iter().try_fold(0usize, |total, marker| {
+        let length = usize::try_from(marker.end.saturating_sub(marker.start)).map_err(|_| {
+            VmError::ResourceLimit {
+                resource: RESOURCE_TEMPLATE_OUTPUT_BYTES,
+            }
+        })?;
+        total.checked_add(length).ok_or(VmError::ResourceLimit {
+            resource: RESOURCE_TEMPLATE_OUTPUT_BYTES,
+        })
+    })?;
+    let literal_bytes = template
+        .content
+        .len()
+        .checked_sub(marker_bytes)
+        .ok_or(VmError::Invariant("template marker ranges are invalid"))?;
+    let length = template
+        .markers
+        .iter()
+        .try_fold(literal_bytes, |total, marker| {
+            let register = *arguments
+                .get(marker.hole as usize)
+                .ok_or(VmError::Invariant("template marker hole is invalid"))?;
+            total
+                .checked_add(template_scalar_length(read_register(registers, register)?)?)
+                .ok_or(VmError::ResourceLimit {
+                    resource: RESOURCE_TEMPLATE_OUTPUT_BYTES,
+                })
+        })?;
+    if length > MAXIMUM_TEMPLATE_OUTPUT_BYTES {
+        return Err(VmError::ResourceLimit {
+            resource: RESOURCE_TEMPLATE_OUTPUT_BYTES,
+        });
+    }
+    budget.charge_allocation(string_size_bytes(length)?)?;
+    let mut output = String::with_capacity(length);
+    let mut cursor = 0usize;
+    for marker in &template.markers {
+        let start = marker.start as usize;
+        let end = marker.end as usize;
+        output.push_str(&template.content[cursor..start]);
+        let register = arguments[marker.hole as usize];
+        write_template_scalar(&mut output, read_register(registers, register)?)?;
+        cursor = end;
+    }
+    output.push_str(&template.content[cursor..]);
+    debug_assert_eq!(output.len(), length);
+    Ok(Value::String(output.into()))
+}
+
+fn template_scalar_length(value: &Value) -> Result<usize, VmError> {
+    match value {
+        Value::Bool(value) => Ok(if *value { 4 } else { 5 }),
+        Value::Int(value) => {
+            let mut buffer = StackBuffer::<32>::new();
+            write!(&mut buffer, "{value}")
+                .map_err(|_| VmError::Invariant("Int text is too long"))?;
+            Ok(buffer.as_str().len())
+        }
+        Value::Float(value) => {
+            let mut buffer = StackBuffer::<32>::new();
+            write_float(&mut buffer, *value)
+                .map_err(|_| VmError::Invariant("Float text is too long"))?;
+            Ok(buffer.as_str().len())
+        }
+        Value::String(value) => Ok(value.len()),
+        Value::Newtype(value) => template_scalar_length(value.value()),
+        _ => Err(VmError::Invariant("template operand is not a scalar")),
+    }
+}
+
+fn write_template_scalar(output: &mut String, value: &Value) -> Result<(), VmError> {
+    match value {
+        Value::Bool(value) => output.push_str(if *value { "true" } else { "false" }),
+        Value::Int(value) => write!(output, "{value}")
+            .map_err(|_| VmError::Invariant("writing Int template text failed"))?,
+        Value::Float(value) => write_float(output, *value)
+            .map_err(|_| VmError::Invariant("writing Float template text failed"))?,
+        Value::String(value) => output.push_str(value),
+        Value::Newtype(value) => return write_template_scalar(output, value.value()),
+        _ => return Err(VmError::Invariant("template operand is not a scalar")),
+    }
+    Ok(())
+}
+
+const UTC_MIN_SECONDS: i64 = -62_135_596_800;
+const UTC_MAX_SECONDS: i64 = 253_402_300_799;
+const SECONDS_PER_DAY: i64 = 86_400;
+
+fn standard_call(
+    registers: &[Option<Value>],
+    operation: StandardOperation,
+    arguments: &[Register],
+    budget: &mut Budget<'_>,
+) -> Result<Value, VmError> {
+    match operation {
+        StandardOperation::ToInt => standard_to_int(registers, arguments, budget),
+        StandardOperation::FloatFormat => standard_float_format(registers, arguments, budget),
+        StandardOperation::TimeFormatUtc => standard_time_format_utc(registers, arguments, budget),
+        StandardOperation::TimeParseUtc => standard_time_parse_utc(registers, arguments, budget),
+        StandardOperation::TimeBucket => standard_time_bucket(registers, arguments, budget),
+    }
+}
+
+fn standard_to_int(
+    registers: &[Option<Value>],
+    arguments: &[Register],
+    budget: &mut Budget<'_>,
+) -> Result<Value, VmError> {
+    let [text] = arguments else {
+        return Err(VmError::Invariant("to_int arity is invalid"));
+    };
+    match parse_int(read_string(registers, *text)?) {
+        Ok(value) => standard_result_ok(Value::Int(value), budget),
+        Err(IntParseError::Invalid) => standard_result_error(
+            "parse.invalid_int",
+            "expected a canonical base-10 Int",
+            budget,
+        ),
+        Err(IntParseError::Overflow) => standard_result_error(
+            "parse.int_overflow",
+            "integer text is outside the Int range",
+            budget,
+        ),
+    }
+}
+
+fn standard_float_format(
+    registers: &[Option<Value>],
+    arguments: &[Register],
+    budget: &mut Budget<'_>,
+) -> Result<Value, VmError> {
+    let [value, decimals] = arguments else {
+        return Err(VmError::Invariant("Float format arity is invalid"));
+    };
+    let value = read_float(registers, *value)?.as_f64();
+    let decimals = read_int(registers, *decimals)?;
+    if !(0..=18).contains(&decimals) {
+        return standard_result_error(
+            "float.invalid_decimals",
+            "decimal places must be between 0 and 18",
+            budget,
+        );
+    }
+    if !value.is_finite() {
+        return standard_result_error(
+            "float.non_finite",
+            "cannot format a non-finite Float",
+            budget,
+        );
+    }
+    let decimals = usize::try_from(decimals)
+        .map_err(|_| VmError::Invariant("verified decimal places do not fit usize"))?;
+    let text = format!("{value:.decimals$}");
+    let value = allocate_string(&text, budget)?;
+    standard_result_ok(value, budget)
+}
+
+fn standard_time_format_utc(
+    registers: &[Option<Value>],
+    arguments: &[Register],
+    budget: &mut Budget<'_>,
+) -> Result<Value, VmError> {
+    let [seconds] = arguments else {
+        return Err(VmError::Invariant("Time format_utc arity is invalid"));
+    };
+    let seconds = read_int(registers, *seconds)?;
+    if !(UTC_MIN_SECONDS..=UTC_MAX_SECONDS).contains(&seconds) {
+        return standard_result_error(
+            "time.out_of_range",
+            "epoch seconds are outside the supported UTC range",
+            budget,
+        );
+    }
+    let value = allocate_string(&format_utc(seconds), budget)?;
+    standard_result_ok(value, budget)
+}
+
+fn standard_time_parse_utc(
+    registers: &[Option<Value>],
+    arguments: &[Register],
+    budget: &mut Budget<'_>,
+) -> Result<Value, VmError> {
+    let [text] = arguments else {
+        return Err(VmError::Invariant("Time parse_utc arity is invalid"));
+    };
+    match parse_utc(read_string(registers, *text)?) {
+        Ok(seconds) => standard_result_ok(Value::Int(seconds), budget),
+        Err(UtcParseError::InvalidFormat) => standard_result_error(
+            "time.invalid_format",
+            "expected UTC text in YYYY-MM-DDTHH:MM:SSZ format",
+            budget,
+        ),
+        Err(UtcParseError::OutOfRange) => standard_result_error(
+            "time.out_of_range",
+            "UTC text is outside the supported range",
+            budget,
+        ),
+    }
+}
+
+fn standard_time_bucket(
+    registers: &[Option<Value>],
+    arguments: &[Register],
+    budget: &mut Budget<'_>,
+) -> Result<Value, VmError> {
+    let [seconds, width] = arguments else {
+        return Err(VmError::Invariant("Time bucket arity is invalid"));
+    };
+    let seconds = read_int(registers, *seconds)?;
+    let width = read_int(registers, *width)?;
+    if !(UTC_MIN_SECONDS..=UTC_MAX_SECONDS).contains(&seconds) {
+        return standard_result_error(
+            "time.out_of_range",
+            "epoch seconds are outside the supported UTC range",
+            budget,
+        );
+    }
+    if width <= 0 {
+        return standard_result_error(
+            "time.invalid_bucket",
+            "bucket width must be positive",
+            budget,
+        );
+    }
+    let bucket = seconds
+        .div_euclid(width)
+        .checked_mul(width)
+        .ok_or(VmError::Invariant("Time bucket result does not fit Int"))?;
+    standard_result_ok(Value::Int(bucket), budget)
+}
+
+#[derive(Clone, Copy)]
+enum IntParseError {
+    Invalid,
+    Overflow,
+}
+
+fn parse_int(text: &str) -> Result<i64, IntParseError> {
+    let bytes = text.as_bytes();
+    let (negative, digits) = match bytes {
+        [b'-', digits @ ..] => (true, digits),
+        digits => (false, digits),
+    };
+    if digits.is_empty()
+        || !digits.iter().all(u8::is_ascii_digit)
+        || (digits.len() > 1 && digits[0] == b'0')
+        || (negative && digits == [b'0'])
+    {
+        return Err(IntParseError::Invalid);
+    }
+    let mut value = 0_i64;
+    for digit in digits {
+        let digit = i64::from(digit - b'0');
+        value = if negative {
+            value
+                .checked_mul(10)
+                .and_then(|value| value.checked_sub(digit))
+        } else {
+            value
+                .checked_mul(10)
+                .and_then(|value| value.checked_add(digit))
+        }
+        .ok_or(IntParseError::Overflow)?;
+    }
+    Ok(value)
+}
+
+fn standard_result_ok(value: Value, budget: &mut Budget<'_>) -> Result<Value, VmError> {
+    budget.charge_allocation(enum_size(1)?)?;
+    Ok(Value::Enum(Rc::new(builtin_enum(
+        EnumIdentity::Result,
+        0,
+        EnumPayload::Tuple(vec![value].into()),
+    ))))
+}
+
+fn standard_result_error(
+    code: &str,
+    message: &str,
+    budget: &mut Budget<'_>,
+) -> Result<Value, VmError> {
+    let allocation = checked_allocation_add(
+        checked_allocation_add(enum_size(1)?, record_size(2)?)?,
+        checked_allocation_add(string_size(code)?, string_size(message)?)?,
+    )?;
+    budget.charge_allocation(allocation)?;
+    Ok(Value::Enum(Rc::new(builtin_enum(
+        EnumIdentity::Result,
+        1,
+        EnumPayload::Tuple(
+            vec![Value::Record(
+                vec![
+                    (Rc::from("code"), Value::String(Rc::from(code))),
+                    (Rc::from("message"), Value::String(Rc::from(message))),
+                ]
+                .into(),
+            )]
+            .into(),
+        ),
+    ))))
+}
+
+fn format_utc(seconds: i64) -> String {
+    let days = seconds.div_euclid(SECONDS_PER_DAY);
+    let day_seconds = seconds.rem_euclid(SECONDS_PER_DAY);
+    let (year, month, day) = civil_from_days(days);
+    let hour = day_seconds / 3_600;
+    let minute = (day_seconds % 3_600) / 60;
+    let second = day_seconds % 60;
+    format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}Z")
+}
+
+#[derive(Clone, Copy)]
+enum UtcParseError {
+    InvalidFormat,
+    OutOfRange,
+}
+
+fn parse_utc(text: &str) -> Result<i64, UtcParseError> {
+    let bytes = text.as_bytes();
+    if bytes.len() != 20
+        || bytes[4] != b'-'
+        || bytes[7] != b'-'
+        || bytes[10] != b'T'
+        || bytes[13] != b':'
+        || bytes[16] != b':'
+        || bytes[19] != b'Z'
+    {
+        return Err(UtcParseError::InvalidFormat);
+    }
+    let year = decimal_field(bytes, 0, 4)?;
+    let month = decimal_field(bytes, 5, 2)?;
+    let day = decimal_field(bytes, 8, 2)?;
+    let hour = decimal_field(bytes, 11, 2)?;
+    let minute = decimal_field(bytes, 14, 2)?;
+    let second = decimal_field(bytes, 17, 2)?;
+    if !(1..=9_999).contains(&year) {
+        return Err(UtcParseError::OutOfRange);
+    }
+    if !(1..=12).contains(&month)
+        || day == 0
+        || day > days_in_month(year, month)
+        || hour > 23
+        || minute > 59
+        || second > 59
+    {
+        return Err(UtcParseError::InvalidFormat);
+    }
+    let days = days_from_civil(year, month, day);
+    let seconds = days
+        .checked_mul(SECONDS_PER_DAY)
+        .and_then(|value| value.checked_add(hour * 3_600 + minute * 60 + second))
+        .ok_or(UtcParseError::OutOfRange)?;
+    if !(UTC_MIN_SECONDS..=UTC_MAX_SECONDS).contains(&seconds) {
+        return Err(UtcParseError::OutOfRange);
+    }
+    Ok(seconds)
+}
+
+fn decimal_field(bytes: &[u8], start: usize, width: usize) -> Result<i64, UtcParseError> {
+    bytes[start..start + width]
+        .iter()
+        .try_fold(0_i64, |value, byte| {
+            if !byte.is_ascii_digit() {
+                return Err(UtcParseError::InvalidFormat);
+            }
+            Ok(value * 10 + i64::from(byte - b'0'))
+        })
+}
+
+fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
+    let year = year - i64::from(month <= 2);
+    let era = year.div_euclid(400);
+    let year_of_era = year - era * 400;
+    let month_from_march = month + if month > 2 { -3 } else { 9 };
+    let day_of_year = (153 * month_from_march + 2) / 5 + day - 1;
+    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+    era * 146_097 + day_of_era - 719_468
+}
+
+fn civil_from_days(days: i64) -> (i64, i64, i64) {
+    let days = days + 719_468;
+    let era = days.div_euclid(146_097);
+    let day_of_era = days - era * 146_097;
+    let year_of_era =
+        (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let mut year = year_of_era + era * 400;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let month_from_march = (5 * day_of_year + 2) / 153;
+    let day = day_of_year - (153 * month_from_march + 2) / 5 + 1;
+    let month = month_from_march + if month_from_march < 10 { 3 } else { -9 };
+    year += i64::from(month <= 2);
+    (year, month, day)
+}
+
+fn days_in_month(year: i64, month: i64) -> i64 {
+    match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if year % 4 == 0 && (year % 100 != 0 || year % 400 == 0) => 29,
+        2 => 28,
+        _ => unreachable!("validated month"),
     }
 }
 
@@ -5004,6 +6871,143 @@ fn checked_allocation_add(left: u64, right: u64) -> Result<u64, VmError> {
     })
 }
 
+fn collection_call(
+    registers: &[Option<Value>],
+    operation: CollectionOperation,
+    arguments: &[Register],
+    budget: &mut Budget<'_>,
+) -> Result<Value, VmError> {
+    match operation {
+        CollectionOperation::Zip => collection_zip(registers, arguments, budget),
+        CollectionOperation::ListMin | CollectionOperation::ListMax => {
+            collection_extremum(registers, operation, arguments, budget)
+        }
+        CollectionOperation::ListSumInt => {
+            let [values] = arguments else {
+                return Err(VmError::Invariant("list sum arity is invalid"));
+            };
+            let Value::List(values) = read_register(registers, *values)? else {
+                return Err(VmError::Invariant("list sum operand is not List"));
+            };
+            let mut sum = 0_i64;
+            for value in values.iter() {
+                let Value::Int(value) = value else {
+                    return Err(VmError::Invariant("integer list sum received non-Int"));
+                };
+                let Some(next) = sum.checked_add(*value) else {
+                    return Ok(option_none());
+                };
+                sum = next;
+            }
+            budget.charge_allocation(enum_size(1)?)?;
+            Ok(option_some(Value::Int(sum)))
+        }
+        CollectionOperation::ListSumFloat => {
+            let [values] = arguments else {
+                return Err(VmError::Invariant("list sum arity is invalid"));
+            };
+            let Value::List(values) = read_register(registers, *values)? else {
+                return Err(VmError::Invariant("list sum operand is not List"));
+            };
+            let mut sum = 0.0_f64;
+            for value in values.iter() {
+                let Value::Float(value) = value else {
+                    return Err(VmError::Invariant("float list sum received non-Float"));
+                };
+                sum += value.as_f64();
+            }
+            Ok(Value::Float(FloatValue::from_canonical_bits(
+                canonical_float_bits(sum.to_bits()),
+            )))
+        }
+    }
+}
+
+fn collection_zip(
+    registers: &[Option<Value>],
+    arguments: &[Register],
+    budget: &mut Budget<'_>,
+) -> Result<Value, VmError> {
+    if !(2..=8).contains(&arguments.len()) {
+        return Err(VmError::Invariant("list.zip arity is invalid"));
+    }
+    let lists = arguments
+        .iter()
+        .map(|register| match read_register(registers, *register)? {
+            Value::List(values) => Ok(Rc::clone(values)),
+            _ => Err(VmError::Invariant("list.zip operand is not List")),
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let length = lists[0].len();
+    if lists.iter().any(|values| values.len() != length) {
+        return Err(VmError::ListLengthMismatch);
+    }
+    let allocation = collection_size(length, VALUE_SLOT_BYTES)?
+        .checked_add(collection_size(
+            length
+                .checked_mul(lists.len())
+                .ok_or(VmError::ResourceLimit {
+                    resource: RESOURCE_ALLOCATION_BYTES,
+                })?,
+            VALUE_SLOT_BYTES,
+        )?)
+        .ok_or(VmError::ResourceLimit {
+            resource: RESOURCE_ALLOCATION_BYTES,
+        })?;
+    budget.charge_allocation(allocation)?;
+    Ok(Value::List(
+        (0..length)
+            .map(|index| {
+                Value::Tuple(
+                    lists
+                        .iter()
+                        .map(|values| values[index].clone())
+                        .collect::<Vec<_>>()
+                        .into(),
+                )
+            })
+            .collect::<Vec<_>>()
+            .into(),
+    ))
+}
+
+fn collection_extremum(
+    registers: &[Option<Value>],
+    operation: CollectionOperation,
+    arguments: &[Register],
+    budget: &mut Budget<'_>,
+) -> Result<Value, VmError> {
+    let [values] = arguments else {
+        return Err(VmError::Invariant("list extremum arity is invalid"));
+    };
+    let Value::List(values) = read_register(registers, *values)? else {
+        return Err(VmError::Invariant("list extremum operand is not List"));
+    };
+    let Some(first) = values.first() else {
+        return Ok(option_none());
+    };
+    let mut best = first.clone();
+    for value in &values[1..] {
+        if matches!(best, Value::Float(bits) if bits.as_f64().is_nan())
+            || matches!(value, Value::Float(bits) if bits.as_f64().is_nan())
+        {
+            best = Value::Float(FloatValue::from_canonical_bits(
+                allen_bytecode::CANONICAL_NAN_BITS,
+            ));
+            break;
+        }
+        let order = language_order(value, &best)?
+            .ok_or(VmError::Invariant("list extremum values are not ordered"))?;
+        if (operation == CollectionOperation::ListMin && order == Ordering::Less)
+            || (operation == CollectionOperation::ListMax && order == Ordering::Greater)
+        {
+            best = value.clone();
+        }
+    }
+    budget.charge_allocation(enum_size(1)?)?;
+    Ok(option_some(best))
+}
+
 fn safe_collection_call(
     registers: &[Option<Value>],
     operation: SafeCollectionOperation,
@@ -5047,6 +7051,28 @@ fn safe_collection_call(
                 .find(|(entry_key, _)| language_equal(entry_key, key))
                 .map(|(_, value)| value.clone())
         }
+        SafeCollectionOperation::MapInsert => {
+            return safe_map_insert(registers, arguments, budget);
+        }
+        SafeCollectionOperation::MapRemove => {
+            return safe_map_remove(registers, arguments, budget);
+        }
+        SafeCollectionOperation::MapKeys => {
+            let [map] = arguments else {
+                return Err(VmError::Invariant("map.keys arity is invalid"));
+            };
+            let Value::Map(entries) = read_register(registers, *map)? else {
+                return Err(VmError::Invariant("map.keys operand is not Map"));
+            };
+            budget.charge_allocation(collection_size(entries.len(), VALUE_SLOT_BYTES)?)?;
+            return Ok(Value::List(
+                entries
+                    .iter()
+                    .map(|(key, _)| key.clone())
+                    .collect::<Vec<_>>()
+                    .into(),
+            ));
+        }
         SafeCollectionOperation::ListTrySet => {
             let [values, index, replacement] = arguments else {
                 return Err(VmError::Invariant("list.try_set arity is invalid"));
@@ -5077,6 +7103,88 @@ fn safe_collection_call(
         }
         None => Ok(option_none()),
     }
+}
+
+fn safe_map_insert(
+    registers: &[Option<Value>],
+    arguments: &[Register],
+    budget: &mut Budget<'_>,
+) -> Result<Value, VmError> {
+    let [map, key, replacement] = arguments else {
+        return Err(VmError::Invariant("map.insert arity is invalid"));
+    };
+    let Value::Map(entries) = read_register(registers, *map)? else {
+        return Err(VmError::Invariant("map.insert operand is not Map"));
+    };
+    let key = read_register(registers, *key)?.clone();
+    let replacement = read_register(registers, *replacement)?.clone();
+    let previous = entries
+        .iter()
+        .find(|(entry_key, _)| language_equal(entry_key, &key))
+        .map(|(_, value)| value.clone());
+    budget.charge_allocation(checked_allocation_add(
+        collection_size(
+            entries.len().checked_add(1).ok_or(VmError::ResourceLimit {
+                resource: RESOURCE_ALLOCATION_BYTES,
+            })?,
+            MAP_ENTRY_BYTES,
+        )?,
+        checked_allocation_add(enum_size(1)?, collection_size(2, MAP_ENTRY_BYTES)?)?,
+    )?)?;
+    let mut output = entries
+        .iter()
+        .filter(|(entry_key, _)| !language_equal(entry_key, &key))
+        .cloned()
+        .collect::<Vec<_>>();
+    output.push((key, replacement));
+    output.sort_by(|(left, _), (right, _)| compare_map_keys(left, right));
+    Ok(Value::Record(
+        vec![
+            (
+                Rc::<str>::from("previous"),
+                previous.map_or_else(option_none, option_some),
+            ),
+            (Rc::<str>::from("values"), Value::Map(output.into())),
+        ]
+        .into(),
+    ))
+}
+
+fn safe_map_remove(
+    registers: &[Option<Value>],
+    arguments: &[Register],
+    budget: &mut Budget<'_>,
+) -> Result<Value, VmError> {
+    let [map, key] = arguments else {
+        return Err(VmError::Invariant("map.remove arity is invalid"));
+    };
+    let Value::Map(entries) = read_register(registers, *map)? else {
+        return Err(VmError::Invariant("map.remove operand is not Map"));
+    };
+    let key = read_register(registers, *key)?;
+    let removed = entries
+        .iter()
+        .find(|(entry_key, _)| language_equal(entry_key, key))
+        .map(|(_, value)| value.clone());
+    budget.charge_allocation(checked_allocation_add(
+        collection_size(entries.len(), MAP_ENTRY_BYTES)?,
+        checked_allocation_add(enum_size(1)?, collection_size(2, MAP_ENTRY_BYTES)?)?,
+    )?)?;
+    let output = entries
+        .iter()
+        .filter(|(entry_key, _)| !language_equal(entry_key, key))
+        .cloned()
+        .collect::<Vec<_>>();
+    Ok(Value::Record(
+        vec![
+            (
+                Rc::<str>::from("removed"),
+                removed.map_or_else(option_none, option_some),
+            ),
+            (Rc::<str>::from("values"), Value::Map(output.into())),
+        ]
+        .into(),
+    ))
 }
 
 fn checked_int_call(
@@ -5311,22 +7419,29 @@ fn write_float(writer: &mut impl fmt::Write, value: FloatValue) -> fmt::Result {
 mod tests {
     use super::{
         BudgetWarning, CancellationSource, CanonicalDecodeError, CanonicalEncodeError, Checkpoint,
-        CheckpointObserver, ConcurrentEffectCounter, EffectProvider, EnumIdentity, EnumPayload,
-        EnumValue, ExecutionCapabilities, ExecutionLimits, ExecutionOutcome, ExecutionResult,
-        FloatValue, MonotonicClock, RESOURCE_CLEANUP_INSTRUCTIONS, RESOURCE_CONCURRENT_EFFECTS,
-        RESOURCE_TASKS, TaskEvent, TaskEventKind, Value, VmError, WorkspaceValue, decode_canonical,
-        decode_canonical_with_limit, encode_canonical, encode_canonical_with_limit, execute,
-        execute_entry_with_capabilities_and_runtime_context, execute_entry_with_runtime_context,
-        execute_with_context, execute_with_limits, execute_with_runtime_context, option_none,
-        option_some,
+        CheckpointObserver, ClosureValue, ConcurrentEffectCounter, EffectProvider, EnumIdentity,
+        EnumPayload, EnumValue, ExecutionCapabilities, ExecutionLimits, ExecutionOutcome,
+        ExecutionResult, FloatValue, JsonDecodeErrorKind, MonotonicClock, NewtypeValue,
+        RESOURCE_CLEANUP_INSTRUCTIONS, RESOURCE_CONCURRENT_EFFECTS, RESOURCE_DECODE_BYTES,
+        RESOURCE_TASKS, RESOURCE_TEMPLATE_OUTPUT_BYTES, RangeValue, SequenceValue, TaskEvent,
+        TaskEventKind, Value, VmError, WorkspaceValue, compare_map_keys, decode_canonical,
+        decode_canonical_with_limit, encode_canonical, encode_canonical_with_limit, enum_size,
+        execute, execute_entry_with_capabilities_and_runtime_context,
+        execute_entry_with_runtime_context, execute_with_context, execute_with_limits,
+        execute_with_runtime_context, language_equal, option_none, option_some, project_json_value,
+        string_size,
     };
     use allen_bytecode::{
         CapabilityOperation, CheckedIntOperation, Constant, DebugInfo, DebugLocation,
         EnumPayloadType, EnumSwitchArm, EnumType, EnumVariant, ExternalFsAccess, FsOperation,
-        Function, Instruction, Module, NumericBinaryOp, RecordField, SafeCollectionOperation,
-        StringOperation, ValueType, VerifiedModule, external_file_request_type, file_error_type,
-        http_response_type, network_error_type, permission_error_type, task_snapshot_type, verify,
+        Function, Instruction, ListCombinator, Module, NumericBinaryOp, RecordField,
+        SafeCollectionOperation, StandardOperation, StringOperation, TemplateHole, TemplateMarker,
+        TemplateResource, ValueType, VerifiedModule, compute_template_digest, decode_error_type,
+        external_file_request_type, file_error_type, http_response_type, network_error_type,
+        permission_error_type, standard_error_type, task_snapshot_type, verify,
     };
+    use serde_json::json;
+    use std::cmp::Ordering;
     use std::rc::Rc;
     use std::time::Duration;
 
@@ -5343,6 +7458,8 @@ mod tests {
             functions: vec![Function {
                 name: "main".to_owned(),
                 parameters: vec![],
+                parameter_names: Vec::new(),
+                parameter_default_digests: Vec::new(),
                 captures: vec![],
                 registers,
                 return_type,
@@ -5353,6 +7470,133 @@ mod tests {
             entry: 0,
         })
         .expect("module must verify")
+    }
+
+    fn decode_module(bytes: Vec<u8>, target: ValueType) -> VerifiedModule {
+        let result = ValueType::Result(Box::new(target.clone()), Box::new(decode_error_type()));
+        verified(
+            vec![Constant::Bytes(bytes)],
+            vec![ValueType::Bytes, result.clone()],
+            result,
+            vec![
+                Instruction::Const {
+                    destination: 0,
+                    constant: 0,
+                },
+                Instruction::Decode {
+                    destination: 1,
+                    source: 0,
+                    target,
+                },
+                Instruction::Return { source: 1 },
+            ],
+        )
+    }
+
+    fn decode_error_code(value: &Value) -> Option<&str> {
+        let Value::Enum(result) = value else {
+            return None;
+        };
+        let EnumPayload::Tuple(payload) = &result.payload else {
+            return None;
+        };
+        let Value::Record(fields) = payload.first()? else {
+            return None;
+        };
+        let Value::String(code) = &fields.first()?.1 else {
+            return None;
+        };
+        Some(code)
+    }
+
+    #[test]
+    fn decode_executes_strict_json_and_returns_structural_errors() {
+        let success = execute(&decode_module(
+            br#"[7,"ok"]"#.to_vec(),
+            ValueType::Tuple(vec![ValueType::Int, ValueType::String]),
+        ))
+        .unwrap();
+        let Value::Enum(result) = success else {
+            panic!("expected Result")
+        };
+        assert_eq!(result.variant, 0);
+
+        for (bytes, code) in [
+            (vec![0xff], "invalid_utf8"),
+            (b"1 2".to_vec(), "invalid_json"),
+            (br#"{"a":1,"a":2}"#.to_vec(), "duplicate_key"),
+            (b"true".to_vec(), "type_mismatch"),
+        ] {
+            let value = execute(&decode_module(bytes, ValueType::Int)).unwrap();
+            assert_eq!(decode_error_code(&value), Some(code));
+        }
+    }
+
+    #[test]
+    fn decode_rejects_noncanonical_maps_and_enforces_input_limit() {
+        let target = ValueType::Map(Box::new(ValueType::String), Box::new(ValueType::Int));
+        let value = execute(&decode_module(br#"[["b",1],["a",2]]"#.to_vec(), target)).unwrap();
+        assert_eq!(decode_error_code(&value), Some("type_mismatch"));
+
+        let oversized = decode_module(vec![b' '; 1_048_577], ValueType::Int);
+        assert_eq!(
+            execute(&oversized),
+            Err(VmError::ResourceLimit {
+                resource: RESOURCE_DECODE_BYTES
+            })
+        );
+    }
+
+    #[test]
+    fn decode_input_budget_is_cumulative_and_depth_is_terminal() {
+        let first = [vec![b' '; 530_000], b"1".to_vec()].concat();
+        let second = [vec![b' '; 530_000], b"2".to_vec()].concat();
+        let result = ValueType::Result(Box::new(ValueType::Int), Box::new(decode_error_type()));
+        let module = verified(
+            vec![Constant::Bytes(first), Constant::Bytes(second)],
+            vec![
+                ValueType::Bytes,
+                result.clone(),
+                ValueType::Bytes,
+                result.clone(),
+            ],
+            result.clone(),
+            vec![
+                Instruction::Const {
+                    destination: 0,
+                    constant: 0,
+                },
+                Instruction::Decode {
+                    destination: 1,
+                    source: 0,
+                    target: ValueType::Int,
+                },
+                Instruction::Const {
+                    destination: 2,
+                    constant: 1,
+                },
+                Instruction::Decode {
+                    destination: 3,
+                    source: 2,
+                    target: ValueType::Int,
+                },
+                Instruction::Return { source: 3 },
+            ],
+        );
+        assert_eq!(
+            execute(&module),
+            Err(VmError::ResourceLimit {
+                resource: RESOURCE_DECODE_BYTES
+            })
+        );
+
+        let nested = ["[".repeat(129), "null".to_owned(), "]".repeat(129)].concat();
+        assert_eq!(
+            execute(&decode_module(nested.into_bytes(), ValueType::Unit)),
+            Err(VmError::ResourceLimit {
+                resource: super::RESOURCE_DECODE_DEPTH
+            })
+        );
     }
 
     fn verified_with_enums(
@@ -5369,6 +7613,8 @@ mod tests {
             functions: vec![Function {
                 name: "main".to_owned(),
                 parameters: vec![],
+                parameter_names: Vec::new(),
+                parameter_default_digests: Vec::new(),
                 captures: vec![],
                 registers,
                 return_type,
@@ -5411,6 +7657,57 @@ mod tests {
         });
         let module = verified(constants, registers, result_type, code);
         execute_with_limits(&module, ExecutionLimits::default()).expect("String operation executes")
+    }
+
+    fn execute_standard_operation(
+        constants: Vec<Constant>,
+        operation: StandardOperation,
+        arguments: Vec<u16>,
+        result_type: ValueType,
+    ) -> super::ExecutionResult {
+        let mut registers = constants
+            .iter()
+            .map(Constant::value_type)
+            .collect::<Vec<_>>();
+        let destination = u16::try_from(registers.len()).expect("test register count fits");
+        registers.push(result_type.clone());
+        let mut code = constants
+            .iter()
+            .enumerate()
+            .map(|(index, _)| Instruction::Const {
+                destination: u16::try_from(index).expect("test register fits"),
+                constant: u32::try_from(index).expect("test constant fits"),
+            })
+            .collect::<Vec<_>>();
+        code.push(Instruction::StandardCall {
+            destination,
+            operation,
+            arguments,
+        });
+        code.push(Instruction::Return {
+            source: destination,
+        });
+        let module = verified(constants, registers, result_type, code);
+        execute_with_limits(&module, ExecutionLimits::default())
+            .expect("standard operation executes")
+    }
+
+    fn pure_result_error_code(result: &super::ExecutionResult) -> &str {
+        let Value::Enum(result) = &result.value else {
+            panic!("operation must return Result");
+        };
+        let EnumPayload::Tuple(payload) = &result.payload else {
+            panic!("Result must have tuple payload");
+        };
+        let [Value::Record(fields)] = payload.as_ref() else {
+            panic!("Result::Err must contain an error record");
+        };
+        let Some((_, Value::String(code))) =
+            fields.iter().find(|(name, _)| name.as_ref() == "code")
+        else {
+            panic!("error record must contain code");
+        };
+        code
     }
 
     #[test]
@@ -5486,6 +7783,215 @@ mod tests {
             .to_string(),
             "Some(2)"
         );
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn pure_time_parse_float_and_replace_operations_are_exact_and_charged() {
+        let int_result =
+            ValueType::Result(Box::new(ValueType::Int), Box::new(standard_error_type()));
+        let string_result =
+            ValueType::Result(Box::new(ValueType::String), Box::new(standard_error_type()));
+
+        for (text, expected) in [
+            ("0", "Ok(0)"),
+            ("42", "Ok(42)"),
+            ("-9223372036854775808", "Ok(-9223372036854775808)"),
+            ("9223372036854775807", "Ok(9223372036854775807)"),
+        ] {
+            assert_eq!(
+                execute_standard_operation(
+                    vec![Constant::String(text.to_owned())],
+                    StandardOperation::ToInt,
+                    vec![0],
+                    int_result.clone(),
+                )
+                .value
+                .to_string(),
+                expected
+            );
+        }
+        for text in ["", "+1", " 1", "1 ", "01", "-0", "1_0", "١", "--1"] {
+            let result = execute_standard_operation(
+                vec![Constant::String(text.to_owned())],
+                StandardOperation::ToInt,
+                vec![0],
+                int_result.clone(),
+            );
+            assert_eq!(
+                pure_result_error_code(&result),
+                "parse.invalid_int",
+                "{text}"
+            );
+        }
+        for text in ["9223372036854775808", "-9223372036854775809"] {
+            let result = execute_standard_operation(
+                vec![Constant::String(text.to_owned())],
+                StandardOperation::ToInt,
+                vec![0],
+                int_result.clone(),
+            );
+            assert_eq!(pure_result_error_code(&result), "parse.int_overflow");
+        }
+
+        assert_eq!(
+            execute_standard_operation(
+                vec![Constant::Int(0)],
+                StandardOperation::TimeFormatUtc,
+                vec![0],
+                string_result.clone(),
+            )
+            .value
+            .to_string(),
+            r#"Ok("1970-01-01T00:00:00Z")"#
+        );
+        for seconds in [super::UTC_MIN_SECONDS, super::UTC_MAX_SECONDS] {
+            let formatted = execute_standard_operation(
+                vec![Constant::Int(seconds)],
+                StandardOperation::TimeFormatUtc,
+                vec![0],
+                string_result.clone(),
+            );
+            let Value::Enum(value) = &formatted.value else {
+                panic!("format result must be Result");
+            };
+            let EnumPayload::Tuple(payload) = &value.payload else {
+                panic!("format result must carry a payload");
+            };
+            let [Value::String(text)] = payload.as_ref() else {
+                panic!("format result must be String");
+            };
+            assert_eq!(text.len(), 20);
+            assert_eq!(
+                execute_standard_operation(
+                    vec![Constant::String(text.to_string())],
+                    StandardOperation::TimeParseUtc,
+                    vec![0],
+                    int_result.clone(),
+                )
+                .value
+                .to_string(),
+                format!("Ok({seconds})")
+            );
+        }
+        for text in [
+            "1970-01-01T00:00:00+00:00",
+            "1970-01-01T00:00:00.0Z",
+            "1970-01-01T00:00:60Z",
+            "1970-02-30T00:00:00Z",
+            " 1970-01-01T00:00:00Z",
+        ] {
+            let result = execute_standard_operation(
+                vec![Constant::String(text.to_owned())],
+                StandardOperation::TimeParseUtc,
+                vec![0],
+                int_result.clone(),
+            );
+            assert_eq!(
+                pure_result_error_code(&result),
+                "time.invalid_format",
+                "{text}"
+            );
+        }
+        assert_eq!(
+            pure_result_error_code(&execute_standard_operation(
+                vec![Constant::String("0000-01-01T00:00:00Z".to_owned())],
+                StandardOperation::TimeParseUtc,
+                vec![0],
+                int_result.clone(),
+            )),
+            "time.out_of_range"
+        );
+        assert_eq!(
+            execute_standard_operation(
+                vec![Constant::Int(-1), Constant::Int(60)],
+                StandardOperation::TimeBucket,
+                vec![0, 1],
+                int_result.clone(),
+            )
+            .value
+            .to_string(),
+            "Ok(-60)"
+        );
+        assert_eq!(
+            pure_result_error_code(&execute_standard_operation(
+                vec![Constant::Int(1), Constant::Int(0)],
+                StandardOperation::TimeBucket,
+                vec![0, 1],
+                int_result.clone(),
+            )),
+            "time.invalid_bucket"
+        );
+        assert_eq!(
+            pure_result_error_code(&execute_standard_operation(
+                vec![Constant::Int(super::UTC_MAX_SECONDS + 1), Constant::Int(60)],
+                StandardOperation::TimeBucket,
+                vec![0, 1],
+                int_result.clone(),
+            )),
+            "time.out_of_range"
+        );
+
+        for (value, decimals, expected) in [
+            (2.5_f64, 0_i64, "Ok(\"2\")"),
+            (3.5_f64, 0_i64, "Ok(\"4\")"),
+            (-0.004_f64, 2_i64, "Ok(\"-0.00\")"),
+            (-0.0_f64, 3_i64, "Ok(\"-0.000\")"),
+        ] {
+            assert_eq!(
+                execute_standard_operation(
+                    vec![Constant::Float(value.to_bits()), Constant::Int(decimals)],
+                    StandardOperation::FloatFormat,
+                    vec![0, 1],
+                    string_result.clone(),
+                )
+                .value
+                .to_string(),
+                expected
+            );
+        }
+        assert_eq!(
+            pure_result_error_code(&execute_standard_operation(
+                vec![Constant::Float(1.0_f64.to_bits()), Constant::Int(19)],
+                StandardOperation::FloatFormat,
+                vec![0, 1],
+                string_result.clone(),
+            )),
+            "float.invalid_decimals"
+        );
+        assert_eq!(
+            pure_result_error_code(&execute_standard_operation(
+                vec![Constant::Float(f64::INFINITY.to_bits()), Constant::Int(0)],
+                StandardOperation::FloatFormat,
+                vec![0, 1],
+                string_result.clone(),
+            )),
+            "float.non_finite"
+        );
+
+        let replaced = execute_string_operation(
+            vec![
+                Constant::String("éé".to_owned()),
+                Constant::String("é".to_owned()),
+                Constant::String("漢".to_owned()),
+            ],
+            StringOperation::Replace,
+            vec![0, 1, 2],
+            ValueType::String,
+        );
+        assert_eq!(replaced.value.to_string(), r#""\u{6f22}\u{6f22}""#);
+        let empty_needle = execute_string_operation(
+            vec![
+                Constant::String("é".to_owned()),
+                Constant::String(String::new()),
+                Constant::String("x".to_owned()),
+            ],
+            StringOperation::Replace,
+            vec![0, 1, 2],
+            ValueType::String,
+        );
+        assert_eq!(empty_needle.value.to_string(), r#""\u{e9}""#);
+        assert!(replaced.usage.allocation_bytes > empty_needle.usage.allocation_bytes);
     }
 
     #[test]
@@ -5766,6 +8272,8 @@ mod tests {
             functions: vec![Function {
                 name: "main".to_owned(),
                 parameters: vec![],
+                parameter_names: Vec::new(),
+                parameter_default_digests: Vec::new(),
                 captures: vec![],
                 registers: vec![ValueType::List(Box::new(ValueType::String))],
                 return_type: ValueType::List(Box::new(ValueType::String)),
@@ -5820,6 +8328,8 @@ mod tests {
                 Function {
                     name: "main".to_owned(),
                     parameters: vec![],
+                    parameter_names: Vec::new(),
+                    parameter_default_digests: Vec::new(),
                     captures: vec![],
                     registers: vec![
                         ValueType::Future(Box::new(ValueType::Bool)),
@@ -5849,6 +8359,8 @@ mod tests {
                 Function {
                     name: "child".to_owned(),
                     parameters: vec![],
+                    parameter_names: Vec::new(),
+                    parameter_default_digests: Vec::new(),
                     captures: vec![],
                     registers: vec![ValueType::String, ValueType::Bool],
                     return_type: ValueType::Bool,
@@ -6130,6 +8642,8 @@ mod tests {
                 Function {
                     name: "main".to_owned(),
                     parameters: vec![],
+                    parameter_names: Vec::new(),
+                    parameter_default_digests: Vec::new(),
                     captures: vec![],
                     registers: vec![
                         ValueType::Bool,
@@ -6209,6 +8723,8 @@ mod tests {
                 Function {
                     name: "worker".to_owned(),
                     parameters: vec![],
+                    parameter_names: Vec::new(),
+                    parameter_default_digests: Vec::new(),
                     captures: vec![],
                     registers: vec![ValueType::Int],
                     return_type: ValueType::Int,
@@ -6831,6 +9347,37 @@ mod tests {
     }
 
     #[test]
+    fn canonical_newtypes_preserve_identity_value_and_map_key_order() {
+        let epoch = Value::Newtype(Rc::new(NewtypeValue::new(
+            "src/time.allen::EpochSeconds",
+            Value::Int(7),
+        )));
+        let count = Value::Newtype(Rc::new(NewtypeValue::new(
+            "src/time.allen::RetryCount",
+            Value::Int(7),
+        )));
+        let bytes = encode_canonical(&epoch).expect("newtype encodes");
+        assert_eq!(decode_canonical(&bytes), Ok(epoch.clone()));
+        assert_ne!(bytes, encode_canonical(&count).unwrap());
+        assert!(!language_equal(&epoch, &count));
+
+        let earlier = Value::Newtype(Rc::new(NewtypeValue::new(
+            "src/time.allen::EpochSeconds",
+            Value::Int(6),
+        )));
+        assert_eq!(compare_map_keys(&earlier, &epoch), Ordering::Less);
+        let map = Value::Map(
+            vec![
+                (earlier, Value::String("first".into())),
+                (epoch, Value::String("second".into())),
+            ]
+            .into(),
+        );
+        let encoded = encode_canonical(&map).expect("newtype-key map encodes");
+        assert_eq!(decode_canonical(&encoded), Ok(map));
+    }
+
+    #[test]
     fn canonical_collections_preserve_tags_and_map_order() {
         let list = Value::List(Rc::from([Value::Int(1)].as_slice()));
         let tuple = Value::Tuple(Rc::from([Value::Int(1)].as_slice()));
@@ -6963,7 +9510,7 @@ mod tests {
             Err(CanonicalDecodeError::InvalidValue)
         );
         assert_eq!(
-            decode_canonical(&[0x0d]),
+            decode_canonical(&[0x0e]),
             Err(CanonicalDecodeError::InvalidValue)
         );
         assert_eq!(
@@ -7045,6 +9592,146 @@ mod tests {
             VmError::ResourceLimit {
                 resource: "instructions"
             }
+        );
+    }
+
+    #[test]
+    fn newtype_allocation_is_charged_before_wrapper_construction() {
+        let epoch = ValueType::Newtype {
+            name: "src/time.allen::EpochSeconds".to_owned(),
+            underlying: Box::new(ValueType::Int),
+        };
+        let module = verified(
+            vec![Constant::Int(1)],
+            vec![ValueType::Int, epoch.clone()],
+            epoch,
+            vec![
+                Instruction::Const {
+                    destination: 0,
+                    constant: 0,
+                },
+                Instruction::NewtypeWrap {
+                    destination: 1,
+                    source: 0,
+                },
+                Instruction::Return { source: 1 },
+            ],
+        );
+        assert_eq!(
+            execute_with_limits(
+                &module,
+                ExecutionLimits {
+                    allocation_bytes: 64,
+                    ..ExecutionLimits::default()
+                },
+            ),
+            Err(VmError::ResourceLimit {
+                resource: "allocation_bytes",
+            })
+        );
+        assert!(matches!(execute(&module), Ok(Value::Newtype(_))));
+    }
+
+    #[test]
+    fn literal_builds_expand_lists_and_overwrite_maps_atomically() {
+        let list_type = ValueType::List(Box::new(ValueType::Int));
+        let list_module = verified(
+            vec![Constant::Int(1), Constant::Int(2)],
+            vec![
+                ValueType::Int,
+                ValueType::Int,
+                list_type.clone(),
+                list_type.clone(),
+            ],
+            list_type.clone(),
+            vec![
+                Instruction::Const {
+                    destination: 0,
+                    constant: 0,
+                },
+                Instruction::Const {
+                    destination: 1,
+                    constant: 1,
+                },
+                Instruction::ListNew {
+                    destination: 2,
+                    elements: vec![1],
+                },
+                Instruction::ListLiteralBuild {
+                    destination: 3,
+                    items: vec![
+                        allen_bytecode::ListLiteralItem::Element(0),
+                        allen_bytecode::ListLiteralItem::Spread(2),
+                    ],
+                },
+                Instruction::Return { source: 3 },
+            ],
+        );
+        assert_eq!(
+            execute(&list_module),
+            Ok(Value::List(Rc::from(
+                [Value::Int(1), Value::Int(2)].as_slice(),
+            )))
+        );
+
+        let map_type = ValueType::Map(Box::new(ValueType::Int), Box::new(ValueType::Int));
+        let map_module = verified(
+            vec![
+                Constant::Int(1),
+                Constant::Int(10),
+                Constant::Int(2),
+                Constant::Int(20),
+            ],
+            vec![
+                ValueType::Int,
+                ValueType::Int,
+                ValueType::Int,
+                ValueType::Int,
+                map_type.clone(),
+                map_type.clone(),
+            ],
+            map_type,
+            vec![
+                Instruction::Const {
+                    destination: 0,
+                    constant: 0,
+                },
+                Instruction::Const {
+                    destination: 1,
+                    constant: 1,
+                },
+                Instruction::Const {
+                    destination: 2,
+                    constant: 2,
+                },
+                Instruction::Const {
+                    destination: 3,
+                    constant: 3,
+                },
+                Instruction::MapNew {
+                    destination: 4,
+                    entries: vec![(0, 1)],
+                },
+                Instruction::MapLiteralBuild {
+                    destination: 5,
+                    items: vec![
+                        allen_bytecode::MapLiteralItem::Entry { key: 0, value: 3 },
+                        allen_bytecode::MapLiteralItem::Spread(4),
+                        allen_bytecode::MapLiteralItem::Entry { key: 2, value: 3 },
+                    ],
+                },
+                Instruction::Return { source: 5 },
+            ],
+        );
+        assert_eq!(
+            execute(&map_module),
+            Ok(Value::Map(Rc::from(
+                [
+                    (Value::Int(1), Value::Int(10)),
+                    (Value::Int(2), Value::Int(20)),
+                ]
+                .as_slice(),
+            )))
         );
     }
 
@@ -7329,6 +10016,8 @@ mod tests {
             functions: vec![Function {
                 name: "main".to_owned(),
                 parameters: vec![0, 1],
+                parameter_names: vec!["_arg0".to_owned(), "_arg1".to_owned()],
+                parameter_default_digests: vec![None, None],
                 captures: vec![],
                 registers: vec![map_type, ValueType::Int, entry_type.clone()],
                 return_type: entry_type,
@@ -7482,6 +10171,8 @@ mod tests {
             functions: vec![Function {
                 name: "main".to_owned(),
                 parameters: vec![0],
+                parameter_names: vec!["_arg0".to_owned()],
+                parameter_default_digests: vec![None],
                 captures: vec![],
                 registers: vec![list_type.clone(), ValueType::Int, list_type.clone()],
                 return_type: list_type,
@@ -7553,6 +10244,92 @@ mod tests {
             }
         );
         assert_eq!(original_values.as_ref(), &[Value::Int(1)]);
+    }
+
+    #[test]
+    fn list_combinator_maps_in_order_and_charges_its_completed_result() {
+        let list = ValueType::List(Box::new(ValueType::Int));
+        let callback = ValueType::Function {
+            parameters: vec![ValueType::Int],
+            return_type: Box::new(ValueType::Int),
+            effects: 0,
+        };
+        let module = verify(Module {
+            constants: vec![Constant::Int(1), Constant::Int(2)],
+            enum_types: vec![],
+            effect_sets: vec![vec![]],
+            functions: vec![
+                Function {
+                    name: "main".to_owned(),
+                    parameters: vec![],
+                    parameter_names: Vec::new(),
+                    parameter_default_digests: Vec::new(),
+                    captures: vec![],
+                    registers: vec![
+                        ValueType::Int,
+                        ValueType::Int,
+                        list.clone(),
+                        callback,
+                        ValueType::Int,
+                        list.clone(),
+                    ],
+                    return_type: list.clone(),
+                    effects: 0,
+                    code: vec![
+                        Instruction::Const {
+                            destination: 0,
+                            constant: 0,
+                        },
+                        Instruction::Const {
+                            destination: 1,
+                            constant: 1,
+                        },
+                        Instruction::ListNew {
+                            destination: 2,
+                            elements: vec![0, 1],
+                        },
+                        Instruction::ClosureNew {
+                            destination: 3,
+                            function: 1,
+                            captures: vec![],
+                        },
+                        Instruction::ListCombinator {
+                            destination: 5,
+                            operation: ListCombinator::Map,
+                            values: 2,
+                            initial: None,
+                            callback: 3,
+                            callback_result: 4,
+                        },
+                        Instruction::Return { source: 5 },
+                    ],
+                },
+                Function {
+                    name: "identity".to_owned(),
+                    parameters: vec![0],
+                    parameter_names: vec!["_arg0".to_owned()],
+                    parameter_default_digests: vec![None],
+                    captures: vec![],
+                    registers: vec![ValueType::Int],
+                    return_type: ValueType::Int,
+                    effects: 0,
+                    code: vec![Instruction::Return { source: 0 }],
+                },
+            ],
+            async_functions: vec![],
+            entry: 0,
+        })
+        .expect("list-combinator module verifies");
+        let result = execute_with_limits(&module, ExecutionLimits::default())
+            .expect("list combinator executes");
+        assert_eq!(
+            result.value,
+            Value::List(vec![Value::Int(1), Value::Int(2)].into())
+        );
+        assert!(
+            result.usage.instructions >= 8,
+            "every callback resume is metered"
+        );
     }
 
     #[test]
@@ -7732,6 +10509,7 @@ mod tests {
         assert_eq!(result.usage.maximum_call_depth, 1);
     }
 
+    #[allow(clippy::too_many_lines)]
     fn verified_call_module() -> allen_bytecode::VerifiedModule {
         let callback_type = ValueType::Function {
             parameters: vec![ValueType::Int],
@@ -7746,6 +10524,8 @@ mod tests {
                 Function {
                     name: "main".to_owned(),
                     parameters: vec![],
+                    parameter_names: Vec::new(),
+                    parameter_default_digests: Vec::new(),
                     captures: vec![],
                     registers: vec![
                         ValueType::Int,
@@ -7795,6 +10575,8 @@ mod tests {
                 Function {
                     name: "add".to_owned(),
                     parameters: vec![0, 1],
+                    parameter_names: vec!["_arg0".to_owned(), "_arg1".to_owned()],
+                    parameter_default_digests: vec![None, None],
                     captures: vec![],
                     registers: vec![ValueType::Int, ValueType::Int, ValueType::Int],
                     return_type: ValueType::Int,
@@ -7812,6 +10594,8 @@ mod tests {
                 Function {
                     name: "add_captured".to_owned(),
                     parameters: vec![0],
+                    parameter_names: vec!["_arg0".to_owned()],
+                    parameter_default_digests: vec![None],
                     captures: vec![1],
                     registers: vec![ValueType::Int, ValueType::Int, ValueType::Int],
                     return_type: ValueType::Int,
@@ -7900,6 +10684,65 @@ mod tests {
         fn now(&mut self) -> Duration {
             Duration::ZERO
         }
+    }
+
+    #[test]
+    fn template_render_precomputes_unicode_output_and_enforces_terminal_cap() {
+        let holes = vec![TemplateHole {
+            name: "name".to_owned(),
+            value_type: ValueType::String,
+        }];
+        let content = "hé {{name}}/{{name}}";
+        let template = TemplateResource {
+            identity: "pkg://test@0.1.0/templates/greeting".to_owned(),
+            content: content.to_owned(),
+            digest: compute_template_digest(content, &holes),
+            holes,
+            markers: vec![
+                TemplateMarker {
+                    start: 4,
+                    end: 12,
+                    hole: 0,
+                },
+                TemplateMarker {
+                    start: 13,
+                    end: 21,
+                    hole: 0,
+                },
+            ],
+        };
+        let mut clock = FixedClock;
+        let mut observer = super::IgnoreCheckpoints;
+        let mut cancellation = super::NeverCancelled;
+        let mut budget = super::Budget::new(
+            ExecutionLimits::default(),
+            &mut clock,
+            &mut observer,
+            &mut cancellation,
+        );
+        let registers = vec![Some(Value::String("Zoë".into()))];
+        let rendered = super::render_template(&template, &registers, &[0], &mut budget).unwrap();
+        assert_eq!(rendered, Value::String("hé Zoë/Zoë".into()));
+        assert_eq!(budget.usage.allocation_bytes, 8 + "hé Zoë/Zoë".len() as u64);
+
+        let mut clock = FixedClock;
+        let mut observer = super::IgnoreCheckpoints;
+        let mut cancellation = super::NeverCancelled;
+        let mut budget = super::Budget::new(
+            ExecutionLimits::default(),
+            &mut clock,
+            &mut observer,
+            &mut cancellation,
+        );
+        let oversized = "x".repeat(1_048_577);
+        let registers = vec![Some(Value::String(oversized.into()))];
+        assert_eq!(
+            super::render_template(&template, &registers, &[0], &mut budget),
+            Err(VmError::ResourceLimit {
+                resource: RESOURCE_TEMPLATE_OUTPUT_BYTES,
+            })
+        );
+        assert_eq!(budget.usage.allocation_bytes, 0);
     }
 
     struct ReadyEffect {
@@ -8247,6 +11090,8 @@ mod tests {
             functions: vec![Function {
                 name: "main.allen::main".to_owned(),
                 parameters: vec![],
+                parameter_names: Vec::new(),
+                parameter_default_digests: Vec::new(),
                 captures: vec![],
                 registers,
                 return_type: result_type,
@@ -8275,6 +11120,8 @@ mod tests {
             functions: vec![Function {
                 name: "main.allen::main".to_owned(),
                 parameters: vec![],
+                parameter_names: Vec::new(),
+                parameter_default_digests: Vec::new(),
                 captures: vec![],
                 registers: vec![
                     ValueType::ExternalFsAccess,
@@ -8370,6 +11217,8 @@ mod tests {
             functions: vec![Function {
                 name: "main.allen::main".to_owned(),
                 parameters: vec![],
+                parameter_names: Vec::new(),
+                parameter_default_digests: Vec::new(),
                 captures: vec![],
                 effects: 0,
                 registers: vec![
@@ -8412,6 +11261,8 @@ mod tests {
             functions: vec![Function {
                 name: "main.allen::main".to_owned(),
                 parameters: vec![],
+                parameter_names: Vec::new(),
+                parameter_default_digests: Vec::new(),
                 captures: vec![],
                 registers: vec![ValueType::String],
                 return_type: ValueType::Never,
@@ -8825,6 +11676,8 @@ mod tests {
             functions: vec![Function {
                 name: "main.allen::main".to_owned(),
                 parameters: vec![],
+                parameter_names: Vec::new(),
+                parameter_default_digests: Vec::new(),
                 captures: vec![],
                 effects: 0,
                 registers: vec![
@@ -9023,6 +11876,297 @@ mod tests {
         assert_eq!(
             encode_canonical(&result_ok(workspace)),
             Err(CanonicalEncodeError::InvalidValue)
+        );
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn range_slice_and_sequence_substrate_edges_are_stable() {
+        let range = Value::Range(Rc::new(RangeValue {
+            start: i64::MIN,
+            end: i64::MAX,
+            inclusive: false,
+        }));
+        assert_eq!(range.to_string(), format!("{}..{}", i64::MIN, i64::MAX));
+        assert!(language_equal(
+            &range,
+            &Value::Range(Rc::new(RangeValue {
+                start: i64::MIN,
+                end: i64::MAX,
+                inclusive: false,
+            }))
+        ));
+        assert!(!language_equal(
+            &range,
+            &Value::Range(Rc::new(RangeValue {
+                start: i64::MIN,
+                end: i64::MAX,
+                inclusive: true,
+            }))
+        ));
+        assert_eq!(
+            encode_canonical(&range),
+            Err(CanonicalEncodeError::InvalidValue)
+        );
+
+        let mut clock = FixedClock;
+        let mut observer = super::IgnoreCheckpoints;
+        let mut cancellation = super::NeverCancelled;
+        let mut budget = super::Budget::new(
+            ExecutionLimits::default(),
+            &mut clock,
+            &mut observer,
+            &mut cancellation,
+        );
+        let list = Value::List(vec![Value::Int(1), Value::Int(2), Value::Int(3)].into());
+        assert_eq!(
+            super::slice_get(&list, 1, 3, &mut budget,).unwrap(),
+            option_some(Value::List(vec![Value::Int(2), Value::Int(3)].into()))
+        );
+        assert_eq!(
+            super::slice_get(&list, -1, 2, &mut budget,).unwrap(),
+            option_none()
+        );
+        let bytes = Value::Bytes(Rc::from(&b"abcd"[..]));
+        assert_eq!(
+            super::slice_get(&bytes, 1, 3, &mut budget,).unwrap(),
+            option_some(Value::Bytes(Rc::from(&b"bc"[..])))
+        );
+        let unicode = Value::String(Rc::from("aéz"));
+        assert_eq!(
+            super::slice_get(&unicode, 1, 2, &mut budget,).unwrap(),
+            option_some(Value::String(Rc::from("é")))
+        );
+        assert_eq!(
+            super::slice_get(&list, 3, 2, &mut budget).unwrap(),
+            option_none()
+        );
+        assert_eq!(
+            super::slice_get(&list, 0, 99, &mut budget).unwrap(),
+            option_none()
+        );
+        let sequence = Rc::new(SequenceValue::from_list(
+            vec![Value::Int(1), Value::Int(2), Value::Int(3)].into(),
+        ));
+        assert_eq!(sequence.next_pipeline().unwrap().0, Value::Int(1));
+        assert!(sequence.consume().is_ok());
+        assert!(matches!(
+            sequence.consume(),
+            Err(VmError::Invariant(
+                "sequence handle has already been consumed"
+            ))
+        ));
+        let empty_take = SequenceValue::take(Rc::clone(&sequence), 0);
+        assert!(empty_take.next_pipeline().is_none());
+        assert_eq!(
+            encode_canonical(&Value::Sequence(Rc::new(empty_take))),
+            Err(CanonicalEncodeError::InvalidValue)
+        );
+
+        let callback = Rc::new(ClosureValue {
+            function: 0,
+            captures: Rc::from([]),
+        });
+        let filtered = Rc::new(SequenceValue::filter(
+            Rc::new(SequenceValue::from_list(
+                vec![Value::Int(1), Value::Int(2), Value::Int(3)].into(),
+            )),
+            callback,
+        ));
+        let taken = SequenceValue::take(filtered, 2);
+        let (_, adapters) = taken.next_pipeline().expect("first raw sequence item");
+        assert!(matches!(
+            adapters.first(),
+            Some(super::SequenceAdapter::Filter(_))
+        ));
+        assert!(matches!(
+            adapters.get(1),
+            Some(super::SequenceAdapter::Take(_))
+        ));
+        // A rejected filtered item must not consume the outer take budget.
+        let (_, adapters) = taken.next_pipeline().expect("second raw sequence item");
+        let Some(super::SequenceAdapter::Take(take)) = adapters.get(1) else {
+            panic!("take adapter follows filter");
+        };
+        assert!(take.take_one());
+        let (_, adapters) = taken.next_pipeline().expect("third raw sequence item");
+        let Some(super::SequenceAdapter::Take(take)) = adapters.get(1) else {
+            panic!("take adapter follows filter");
+        };
+        assert!(take.take_one());
+        assert!(taken.next_pipeline().is_none());
+    }
+
+    #[test]
+    fn string_slice_charges_one_some_wrapper_and_matches_string_slice() {
+        let string = Value::String(Rc::from("aé"));
+        let expected_empty = enum_size(1).unwrap() + string_size("").unwrap();
+        let expected_nonempty = enum_size(1).unwrap() + string_size("é").unwrap();
+
+        for (start, end, expected) in [(0, 0, expected_empty), (1, 2, expected_nonempty)] {
+            let mut clock = FixedClock;
+            let mut observer = super::IgnoreCheckpoints;
+            let mut cancellation = super::NeverCancelled;
+            let mut budget = super::Budget::new(
+                ExecutionLimits {
+                    allocation_bytes: expected,
+                    ..ExecutionLimits::default()
+                },
+                &mut clock,
+                &mut observer,
+                &mut cancellation,
+            );
+            let result = super::slice_get(&string, start, end, &mut budget)
+                .expect("String SliceGet fits its exact allocation limit");
+            assert_eq!(budget.usage.allocation_bytes, expected);
+            assert!(matches!(result, Value::Enum(_)));
+        }
+
+        let mut bracket_clock = FixedClock;
+        let mut bracket_observer = super::IgnoreCheckpoints;
+        let mut bracket_cancellation = super::NeverCancelled;
+        let mut bracket_budget = super::Budget::new(
+            ExecutionLimits::default(),
+            &mut bracket_clock,
+            &mut bracket_observer,
+            &mut bracket_cancellation,
+        );
+        let bracket =
+            super::slice_get(&string, 1, 2, &mut bracket_budget).expect("bracket slice succeeds");
+
+        let mut function_clock = FixedClock;
+        let mut function_observer = super::IgnoreCheckpoints;
+        let mut function_cancellation = super::NeverCancelled;
+        let mut function_budget = super::Budget::new(
+            ExecutionLimits::default(),
+            &mut function_clock,
+            &mut function_observer,
+            &mut function_cancellation,
+        );
+        let function =
+            super::string_slice("aé", 1, 2, &mut function_budget).expect("string.slice succeeds");
+
+        assert_eq!(bracket, function);
+        assert_eq!(
+            bracket_budget.usage.allocation_bytes,
+            function_budget.usage.allocation_bytes
+        );
+    }
+
+    #[test]
+    fn nested_sequence_adapters_preserve_order_and_take_cuts_off_pulls() {
+        let callback = Rc::new(ClosureValue {
+            function: 0,
+            captures: Rc::from([]),
+        });
+        let source = Rc::new(SequenceValue::from_list(
+            vec![Value::Int(1), Value::Int(2), Value::Int(3)].into(),
+        ));
+        let limited = Rc::new(SequenceValue::take(source, 2));
+        let filtered = Rc::new(SequenceValue::filter(limited, Rc::clone(&callback)));
+        let mapped = SequenceValue::map(filtered, callback);
+
+        for expected in [Value::Int(1), Value::Int(2)] {
+            let (value, adapters) = mapped.next_pipeline().expect("take yields item");
+            assert_eq!(value, expected);
+            assert!(matches!(
+                adapters.as_slice(),
+                [
+                    super::SequenceAdapter::Take(_),
+                    super::SequenceAdapter::Filter(_),
+                    super::SequenceAdapter::Map(_)
+                ]
+            ));
+            let Some(super::SequenceAdapter::Take(take)) = adapters.first() else {
+                panic!("take adapter is first");
+            };
+            assert!(take.take_one());
+        }
+        assert!(mapped.next_pipeline().is_none());
+    }
+
+    #[test]
+    fn range_and_sequence_json_boundaries_are_rejected() {
+        assert_eq!(
+            project_json_value(&json!(1), &ValueType::Range, &[])
+                .expect_err("Range JSON boundary must be rejected")
+                .kind(),
+            JsonDecodeErrorKind::TypeMismatch
+        );
+        assert_eq!(
+            project_json_value(
+                &json!([1]),
+                &ValueType::Sequence(Box::new(ValueType::Int)),
+                &[]
+            )
+            .expect_err("Sequence JSON boundary must be rejected")
+            .kind(),
+            JsonDecodeErrorKind::TypeMismatch
+        );
+    }
+
+    #[test]
+    fn range_projections_preserve_min_max_and_inclusive_flag() {
+        let result_type = ValueType::Tuple(vec![ValueType::Int, ValueType::Int, ValueType::Bool]);
+        let module = verified(
+            vec![Constant::Int(i64::MIN), Constant::Int(i64::MAX)],
+            vec![
+                ValueType::Int,
+                ValueType::Int,
+                ValueType::Range,
+                ValueType::Int,
+                ValueType::Int,
+                ValueType::Bool,
+                result_type.clone(),
+            ],
+            result_type,
+            vec![
+                Instruction::Const {
+                    destination: 0,
+                    constant: 0,
+                },
+                Instruction::Const {
+                    destination: 1,
+                    constant: 1,
+                },
+                Instruction::RangeNew {
+                    destination: 2,
+                    start: 0,
+                    end: 1,
+                    inclusive: true,
+                },
+                Instruction::RangeStart {
+                    destination: 3,
+                    range: 2,
+                },
+                Instruction::RangeEnd {
+                    destination: 4,
+                    range: 2,
+                },
+                Instruction::RangeInclusive {
+                    destination: 5,
+                    range: 2,
+                },
+                Instruction::TupleNew {
+                    destination: 6,
+                    elements: vec![3, 4, 5],
+                },
+                Instruction::Return { source: 6 },
+            ],
+        );
+        let Value::Tuple(values) = execute_with_limits(&module, ExecutionLimits::default())
+            .expect("range projections execute")
+            .value
+        else {
+            panic!("range projections return a tuple");
+        };
+        assert_eq!(
+            values.as_ref(),
+            &[
+                Value::Int(i64::MIN),
+                Value::Int(i64::MAX),
+                Value::Bool(true)
+            ]
         );
     }
 
@@ -9345,6 +12489,8 @@ mod tests {
                 Function {
                     name: "main".to_owned(),
                     parameters: vec![],
+                    parameter_names: Vec::new(),
+                    parameter_default_digests: Vec::new(),
                     captures: vec![],
                     registers: vec![ValueType::Int],
                     return_type: ValueType::Int,
@@ -9361,6 +12507,8 @@ mod tests {
                 Function {
                     name: "middle".to_owned(),
                     parameters: vec![],
+                    parameter_names: Vec::new(),
+                    parameter_default_digests: Vec::new(),
                     captures: vec![],
                     registers: vec![closure_type, ValueType::Int],
                     return_type: ValueType::Int,
@@ -9382,6 +12530,8 @@ mod tests {
                 Function {
                     name: "inner".to_owned(),
                     parameters: vec![],
+                    parameter_names: Vec::new(),
+                    parameter_default_digests: Vec::new(),
                     captures: vec![],
                     registers: vec![ValueType::Int, ValueType::Int, ValueType::Int],
                     return_type: ValueType::Int,
@@ -9527,6 +12677,8 @@ mod tests {
                 Function {
                     name: "main".to_owned(),
                     parameters: vec![],
+                    parameter_names: Vec::new(),
+                    parameter_default_digests: Vec::new(),
                     captures: vec![],
                     registers: vec![
                         ValueType::Future(Box::new(ValueType::Int)),
@@ -9541,6 +12693,8 @@ mod tests {
                 Function {
                     name: "worker".to_owned(),
                     parameters: vec![],
+                    parameter_names: Vec::new(),
+                    parameter_default_digests: Vec::new(),
                     captures: vec![],
                     registers: vec![ValueType::Int],
                     return_type: ValueType::Int,
@@ -9585,6 +12739,8 @@ mod tests {
                 Function {
                     name: "main".to_owned(),
                     parameters: vec![],
+                    parameter_names: Vec::new(),
+                    parameter_default_digests: Vec::new(),
                     captures: vec![],
                     registers: vec![
                         ValueType::Future(Box::new(ValueType::Int)),
@@ -9637,6 +12793,8 @@ mod tests {
                 Function {
                     name: "worker".to_owned(),
                     parameters: vec![],
+                    parameter_names: Vec::new(),
+                    parameter_default_digests: Vec::new(),
                     captures: vec![],
                     registers: vec![ValueType::Int],
                     return_type: ValueType::Int,
@@ -9708,6 +12866,8 @@ mod tests {
                 Function {
                     name: "main".to_owned(),
                     parameters: vec![],
+                    parameter_names: Vec::new(),
+                    parameter_default_digests: Vec::new(),
                     captures: vec![],
                     registers: vec![
                         ValueType::Future(Box::new(ValueType::Int)),
@@ -9750,6 +12910,8 @@ mod tests {
                 Function {
                     name: "helper".to_owned(),
                     parameters: vec![],
+                    parameter_names: Vec::new(),
+                    parameter_default_digests: Vec::new(),
                     captures: vec![],
                     registers: vec![
                         ValueType::Future(Box::new(ValueType::Int)),
@@ -9781,6 +12943,8 @@ mod tests {
                 Function {
                     name: "worker".to_owned(),
                     parameters: vec![],
+                    parameter_names: Vec::new(),
+                    parameter_default_digests: Vec::new(),
                     captures: vec![],
                     registers: vec![ValueType::Int],
                     return_type: ValueType::Int,
@@ -9813,6 +12977,8 @@ mod tests {
                 Function {
                     name: "main".to_owned(),
                     parameters: vec![],
+                    parameter_names: Vec::new(),
+                    parameter_default_digests: Vec::new(),
                     captures: vec![],
                     registers: vec![
                         ValueType::Future(Box::new(ValueType::Task(Box::new(ValueType::Int)))),
@@ -9849,6 +13015,8 @@ mod tests {
                 Function {
                     name: "producer".to_owned(),
                     parameters: vec![],
+                    parameter_names: Vec::new(),
+                    parameter_default_digests: Vec::new(),
                     captures: vec![],
                     registers: vec![
                         ValueType::Future(Box::new(ValueType::Int)),
@@ -9873,6 +13041,8 @@ mod tests {
                 Function {
                     name: "worker".to_owned(),
                     parameters: vec![],
+                    parameter_names: Vec::new(),
+                    parameter_default_digests: Vec::new(),
                     captures: vec![],
                     registers: vec![ValueType::Int],
                     return_type: ValueType::Int,
@@ -9911,6 +13081,8 @@ mod tests {
                 Function {
                     name: "main.allen::main".to_owned(),
                     parameters: vec![],
+                    parameter_names: Vec::new(),
+                    parameter_default_digests: Vec::new(),
                     captures: vec![],
                     registers: vec![
                         ValueType::Future(Box::new(ValueType::Int)),
@@ -9947,6 +13119,8 @@ mod tests {
                 Function {
                     name: "main.allen::answer".to_owned(),
                     parameters: vec![],
+                    parameter_names: Vec::new(),
+                    parameter_default_digests: Vec::new(),
                     captures: vec![],
                     registers: vec![ValueType::Int],
                     return_type: ValueType::Int,
@@ -10027,6 +13201,8 @@ mod tests {
             functions: vec![Function {
                 name: "main.allen::worker".to_owned(),
                 parameters: vec![],
+                parameter_names: Vec::new(),
+                parameter_default_digests: Vec::new(),
                 captures: vec![],
                 registers: vec![ValueType::Unit],
                 return_type: ValueType::Unit,
@@ -10102,6 +13278,8 @@ mod tests {
                 Function {
                     name: "main".to_owned(),
                     parameters: vec![],
+                    parameter_names: Vec::new(),
+                    parameter_default_digests: Vec::new(),
                     captures: vec![],
                     registers: vec![
                         ValueType::Future(Box::new(ValueType::Int)),
@@ -10145,6 +13323,8 @@ mod tests {
                 Function {
                     name: "first".to_owned(),
                     parameters: vec![],
+                    parameter_names: Vec::new(),
+                    parameter_default_digests: Vec::new(),
                     captures: vec![],
                     registers: vec![ValueType::Int, ValueType::Int],
                     return_type: ValueType::Int,
@@ -10164,6 +13344,8 @@ mod tests {
                 Function {
                     name: "second".to_owned(),
                     parameters: vec![],
+                    parameter_names: Vec::new(),
+                    parameter_default_digests: Vec::new(),
                     captures: vec![],
                     registers: vec![ValueType::Int, ValueType::Int],
                     return_type: ValueType::Int,
@@ -10240,6 +13422,8 @@ mod tests {
                 Function {
                     name: "main".to_owned(),
                     parameters: vec![],
+                    parameter_names: Vec::new(),
+                    parameter_default_digests: Vec::new(),
                     captures: vec![],
                     registers: vec![
                         ValueType::Future(Box::new(ValueType::Int)),
@@ -10281,6 +13465,8 @@ mod tests {
                 Function {
                     name: "produce".to_owned(),
                     parameters: vec![],
+                    parameter_names: Vec::new(),
+                    parameter_default_digests: Vec::new(),
                     captures: vec![],
                     registers: vec![ValueType::Int],
                     return_type: ValueType::Int,
@@ -10296,6 +13482,8 @@ mod tests {
                 Function {
                     name: "consume".to_owned(),
                     parameters: vec![0],
+                    parameter_names: vec!["_arg0".to_owned()],
+                    parameter_default_digests: vec![None],
                     captures: vec![],
                     registers: vec![ValueType::Task(Box::new(ValueType::Int)), ValueType::Int],
                     return_type: ValueType::Int,
@@ -10339,6 +13527,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)]
     fn stopped_outcome_wins_over_cleanup_budget_failure() {
         let module = verify(Module {
             constants: vec![Constant::String("done".to_owned()), Constant::Int(7)],
@@ -10348,6 +13537,8 @@ mod tests {
                 Function {
                     name: "main".to_owned(),
                     parameters: vec![],
+                    parameter_names: Vec::new(),
+                    parameter_default_digests: Vec::new(),
                     captures: vec![],
                     registers: vec![
                         ValueType::Future(Box::new(ValueType::Int)),
@@ -10377,6 +13568,8 @@ mod tests {
                 Function {
                     name: "worker".to_owned(),
                     parameters: vec![],
+                    parameter_names: Vec::new(),
+                    parameter_default_digests: Vec::new(),
                     captures: vec![],
                     registers: vec![ValueType::Int],
                     return_type: ValueType::Int,
@@ -10432,6 +13625,28 @@ mod tests {
                 reason: "done".to_owned()
             }
         );
+
+        let mut failed_module = module.module().clone();
+        failed_module.functions[0].code[3] = Instruction::Fail { reason: 2 };
+        let failed_module = verify(failed_module).unwrap();
+        let failure = execute_with_runtime_context(
+            &failed_module,
+            None,
+            ExecutionLimits {
+                cleanup_instructions: 0,
+                ..ExecutionLimits::default()
+            },
+            &mut FixedClock,
+            &mut super::IgnoreCheckpoints,
+            &mut super::NeverCancelled,
+        )
+        .unwrap_err();
+        assert_eq!(
+            failure.error,
+            VmError::ResourceLimit {
+                resource: RESOURCE_CLEANUP_INSTRUCTIONS
+            }
+        );
     }
 
     #[test]
@@ -10444,6 +13659,8 @@ mod tests {
                 Function {
                     name: "main".to_owned(),
                     parameters: vec![],
+                    parameter_names: Vec::new(),
+                    parameter_default_digests: Vec::new(),
                     captures: vec![],
                     registers: vec![
                         ValueType::Future(Box::new(ValueType::Int)),
@@ -10487,6 +13704,8 @@ mod tests {
                 Function {
                     name: "worker".to_owned(),
                     parameters: vec![],
+                    parameter_names: Vec::new(),
+                    parameter_default_digests: Vec::new(),
                     captures: vec![],
                     registers: vec![ValueType::Int],
                     return_type: ValueType::Int,
@@ -10532,6 +13751,8 @@ mod tests {
                 Function {
                     name: "main".to_owned(),
                     parameters: vec![],
+                    parameter_names: Vec::new(),
+                    parameter_default_digests: Vec::new(),
                     captures: vec![],
                     registers: vec![
                         ValueType::Future(Box::new(ValueType::Unit)),
@@ -10578,6 +13799,8 @@ mod tests {
                 Function {
                     name: "stopper".to_owned(),
                     parameters: vec![],
+                    parameter_names: Vec::new(),
+                    parameter_default_digests: Vec::new(),
                     captures: vec![],
                     registers: vec![ValueType::String],
                     return_type: ValueType::Unit,
@@ -10593,6 +13816,8 @@ mod tests {
                 Function {
                     name: "sibling".to_owned(),
                     parameters: vec![],
+                    parameter_names: Vec::new(),
+                    parameter_default_digests: Vec::new(),
                     captures: vec![],
                     registers: vec![ValueType::Int],
                     return_type: ValueType::Int,
@@ -10650,6 +13875,8 @@ mod tests {
                 Function {
                     name: "main".to_owned(),
                     parameters: vec![],
+                    parameter_names: Vec::new(),
+                    parameter_default_digests: Vec::new(),
                     captures: vec![],
                     registers: vec![
                         ValueType::Future(Box::new(ValueType::Int)),
@@ -10697,6 +13924,8 @@ mod tests {
                 Function {
                     name: "worker".to_owned(),
                     parameters: vec![],
+                    parameter_names: Vec::new(),
+                    parameter_default_digests: Vec::new(),
                     captures: vec![],
                     registers: vec![ValueType::Int],
                     return_type: ValueType::Int,
@@ -10804,6 +14033,8 @@ mod tests {
                 Function {
                     name: "main".to_owned(),
                     parameters: vec![],
+                    parameter_names: Vec::new(),
+                    parameter_default_digests: Vec::new(),
                     captures: vec![],
                     registers: vec![
                         ValueType::Future(Box::new(ValueType::Int)),
@@ -10847,6 +14078,8 @@ mod tests {
                 Function {
                     name: "first".to_owned(),
                     parameters: vec![],
+                    parameter_names: Vec::new(),
+                    parameter_default_digests: Vec::new(),
                     captures: vec![],
                     registers: vec![ValueType::Int, ValueType::Int, ValueType::Int],
                     return_type: ValueType::Int,
@@ -10872,6 +14105,8 @@ mod tests {
                 Function {
                     name: "second".to_owned(),
                     parameters: vec![],
+                    parameter_names: Vec::new(),
+                    parameter_default_digests: Vec::new(),
                     captures: vec![],
                     registers: vec![ValueType::Int, ValueType::Int, ValueType::Int],
                     return_type: ValueType::Int,
@@ -10956,6 +14191,8 @@ mod tests {
                     functions: vec![Function {
                         name: "checked".to_owned(),
                         parameters: vec![],
+                        parameter_names: Vec::new(),
+                        parameter_default_digests: Vec::new(),
                         captures: vec![],
                         registers,
                         return_type: ValueType::Option(Box::new(ValueType::Int)),
@@ -11019,6 +14256,8 @@ mod tests {
                 functions: vec![Function {
                     name: "list_get".to_owned(),
                     parameters: vec![],
+                    parameter_names: Vec::new(),
+                    parameter_default_digests: Vec::new(),
                     captures: vec![],
                     registers: vec![
                         ValueType::Int,
@@ -11075,6 +14314,8 @@ mod tests {
                 functions: vec![Function {
                     name: "bytes_get".to_owned(),
                     parameters: vec![],
+                    parameter_names: Vec::new(),
+                    parameter_default_digests: Vec::new(),
                     captures: vec![],
                     registers: vec![
                         ValueType::Bytes,
@@ -11129,6 +14370,8 @@ mod tests {
                 functions: vec![Function {
                     name: "map_get".to_owned(),
                     parameters: vec![],
+                    parameter_names: Vec::new(),
+                    parameter_default_digests: Vec::new(),
                     captures: vec![],
                     registers: vec![
                         key_type.clone(),
@@ -11262,6 +14505,8 @@ mod tests {
                 functions: vec![Function {
                     name: "try_set".to_owned(),
                     parameters: vec![],
+                    parameter_names: Vec::new(),
+                    parameter_default_digests: Vec::new(),
                     captures: vec![],
                     registers: vec![
                         ValueType::Int,

@@ -53,14 +53,48 @@ impl Parser<'_, '_> {
 
     fn pattern(&mut self) {
         let marker = self.start();
+        self.pattern_or();
+        self.complete(marker, SyntaxKind::Pattern);
+    }
+
+    fn pattern_or(&mut self) {
+        let marker = self.start();
+        self.pattern_primary();
+        while self.at(SyntaxKind::Pipe) {
+            self.bump_nontrivia();
+            if self.at_pattern_start() {
+                self.pattern_primary();
+            } else {
+                self.missing("expected pattern after `|`");
+                break;
+            }
+        }
+        self.complete(marker, SyntaxKind::PatternOr);
+    }
+
+    fn pattern_primary(&mut self) {
+        let marker = self.start();
         match self.nth(0) {
+            SyntaxKind::Minus
+                if self.nth(1) == SyntaxKind::IntLiteral
+                    && matches!(self.nth(2), SyntaxKind::DotDot | SyntaxKind::DotDotEq) =>
+            {
+                self.range_pattern();
+            }
+            SyntaxKind::IntLiteral
+            | SyntaxKind::FloatLiteral
+            | SyntaxKind::StringLiteral
+            | SyntaxKind::BytesLiteral
+                if matches!(self.nth(1), SyntaxKind::DotDot | SyntaxKind::DotDotEq) =>
+            {
+                self.range_pattern();
+            }
             SyntaxKind::Underscore | SyntaxKind::KwTrue | SyntaxKind::KwFalse => {
                 self.bump_nontrivia();
             }
             SyntaxKind::Ident if self.nth_text(0) == Some("_") => {
                 self.bump_pattern_contextual(SyntaxKind::Underscore);
             }
-            SyntaxKind::KwNone => self.bump_nontrivia(),
             SyntaxKind::KwSome | SyntaxKind::KwOk | SyntaxKind::KwErr => {
                 self.builtin_payload_pattern();
             }
@@ -72,9 +106,41 @@ impl Parser<'_, '_> {
             SyntaxKind::Ident if self.nth_text(0) == Some("None") => {
                 self.bump_pattern_contextual(SyntaxKind::KwNone);
             }
+            SyntaxKind::KwNone | SyntaxKind::Ident => self.bump_nontrivia(),
             _ => self.missing("expected match pattern"),
         }
-        self.complete(marker, SyntaxKind::Pattern);
+        self.complete(marker, SyntaxKind::PatternPrimary);
+    }
+
+    fn range_pattern(&mut self) {
+        let marker = self.start();
+        self.range_pattern_endpoint();
+        if matches!(self.nth(0), SyntaxKind::DotDot | SyntaxKind::DotDotEq) {
+            self.bump_nontrivia();
+        } else {
+            self.missing("expected `..` or `..=` in range pattern");
+        }
+        self.range_pattern_endpoint();
+        self.complete(marker, SyntaxKind::PatternRange);
+    }
+
+    fn range_pattern_endpoint(&mut self) {
+        if self.at(SyntaxKind::Minus) {
+            self.bump_nontrivia();
+            if self.at(SyntaxKind::IntLiteral) {
+                self.literal(true);
+            } else {
+                self.missing("expected Int literal after `-` in range pattern");
+            }
+            return;
+        }
+        match self.nth(0) {
+            SyntaxKind::IntLiteral
+            | SyntaxKind::FloatLiteral
+            | SyntaxKind::StringLiteral
+            | SyntaxKind::BytesLiteral => self.literal(false),
+            _ => self.missing("expected literal range-pattern endpoint"),
+        }
     }
 
     fn builtin_payload_pattern(&mut self) {
@@ -93,7 +159,7 @@ impl Parser<'_, '_> {
             SyntaxKind::LParen,
             "expected `(` after built-in pattern constructor",
         ) {
-            self.pattern_binding("expected built-in pattern binding");
+            self.pattern();
             self.recover_builtin_pattern_payload(SyntaxKind::RParen);
             self.expect_close_delimiter(
                 SyntaxKind::RParen,
@@ -138,29 +204,29 @@ impl Parser<'_, '_> {
         {
             return;
         }
-        let mut saw_binding = false;
-        let mut expect_binding = true;
+        let mut saw_pattern = false;
+        let mut expect_pattern = true;
         while !self.exceeded && !self.at_pattern_list_end(SyntaxKind::RParen) {
-            if expect_binding {
-                if self.at_pattern_binding() {
-                    self.pattern_binding("expected enum pattern binding");
-                    saw_binding = true;
-                    expect_binding = false;
+            if expect_pattern {
+                if self.at_pattern_start() {
+                    self.pattern();
+                    saw_pattern = true;
+                    expect_pattern = false;
                 } else {
-                    self.error_one("expected enum pattern binding");
+                    self.error_one("expected enum payload pattern");
                 }
             } else if self.at(SyntaxKind::Comma) {
                 self.bump_nontrivia();
-                expect_binding = !self.at(SyntaxKind::RParen);
-            } else if self.at_pattern_binding() {
-                self.missing("expected `,` between enum pattern bindings");
-                self.pattern_binding("expected enum pattern binding");
+                expect_pattern = !self.at(SyntaxKind::RParen);
+            } else if self.at_pattern_start() {
+                self.missing("expected `,` between enum payload patterns");
+                self.pattern();
             } else {
                 self.error_one("expected `,` or `)` in enum tuple pattern");
             }
         }
-        if !saw_binding {
-            self.missing("expected enum pattern binding");
+        if !saw_pattern {
+            self.missing("expected enum payload pattern");
         }
         self.expect_close_delimiter(SyntaxKind::RParen, "expected `)` after enum tuple pattern");
     }
@@ -190,39 +256,28 @@ impl Parser<'_, '_> {
         self.expect(SyntaxKind::Ident, "expected pattern field name");
         if self.at(SyntaxKind::Colon) {
             self.bump_nontrivia();
-            self.pattern_binding("expected pattern field binding");
+            self.pattern();
         }
         self.complete(marker, SyntaxKind::PatternField);
-    }
-
-    fn pattern_binding(&mut self, message: &'static str) {
-        if self.nth(0) == SyntaxKind::Ident && self.nth_text(0) == Some("_") {
-            self.bump_pattern_contextual(SyntaxKind::Underscore);
-        } else if self.at_pattern_binding() {
-            self.bump_nontrivia();
-        } else {
-            self.missing(message);
-        }
-    }
-
-    fn at_pattern_binding(&self) -> bool {
-        matches!(self.nth(0), SyntaxKind::Ident | SyntaxKind::Underscore)
     }
 
     pub(super) fn at_pattern_start(&self) -> bool {
         matches!(
             self.nth(0),
             SyntaxKind::Underscore
+                | SyntaxKind::Ident
+                | SyntaxKind::IntLiteral
+                | SyntaxKind::FloatLiteral
+                | SyntaxKind::StringLiteral
+                | SyntaxKind::BytesLiteral
                 | SyntaxKind::KwTrue
                 | SyntaxKind::KwFalse
                 | SyntaxKind::KwNone
                 | SyntaxKind::KwSome
                 | SyntaxKind::KwOk
                 | SyntaxKind::KwErr
-        ) || self.nth(0) == SyntaxKind::Ident
-            && (matches!(self.nth_text(0), Some("_" | "None"))
-                || self.at_contextual_payload_pattern()
-                || matches!(self.nth(1), SyntaxKind::LBrace | SyntaxKind::Dot))
+                | SyntaxKind::Minus
+        )
     }
 
     fn at_contextual_payload_pattern(&self) -> bool {
@@ -849,6 +904,58 @@ mod tests {
         assert_eq!(parsed.syntax().kind(), SyntaxKind::Source);
         assert!(parsed.has_errors());
         assert_eq!(parsed.diagnostics().len(), 1);
+        parsed.assert_round_trip(&malformed);
+    }
+
+    #[test]
+    fn range_and_or_patterns_are_low_precedence_and_recursive() {
+        let text = "fn classify(value: T) returns Int { match value { -5..-1 | -1..=3 | 5..8 => 1, Some(1..=2 | item) => 2, Choice.Pair(0..1 | left, right) => 3, Box { value: 0..=9 | inner } => 4, _ => 0 } }";
+        let file = source(text);
+        let parsed = parse(&file);
+        assert!(
+            parsed.diagnostics().is_empty(),
+            "{:?}",
+            parsed.diagnostics()
+        );
+        assert!(!parsed.has_errors());
+        parsed.assert_round_trip(&file);
+        let kinds = node_kinds(text);
+        assert_eq!(
+            kinds
+                .iter()
+                .filter(|kind| **kind == SyntaxKind::PatternRange)
+                .count(),
+            6
+        );
+        assert!(
+            kinds
+                .iter()
+                .filter(|kind| **kind == SyntaxKind::PatternOr)
+                .count()
+                >= 9
+        );
+
+        let malformed = source(
+            "fn bad(value: T) returns Int { match value { 1.. => 0, _ => 1 } } fn later() returns Void {}",
+        );
+        let parsed = parse(&malformed);
+        assert!(parsed.has_errors());
+        assert_eq!(
+            parsed
+                .syntax()
+                .descendants()
+                .filter(|node| node.kind() == SyntaxKind::MatchArm)
+                .count(),
+            2
+        );
+        assert_eq!(
+            parsed
+                .syntax()
+                .descendants()
+                .filter(|node| node.kind() == SyntaxKind::FunctionDeclaration)
+                .count(),
+            2
+        );
         parsed.assert_round_trip(&malformed);
     }
 }

@@ -4,8 +4,8 @@ use std::fmt;
 use std::rc::Rc;
 
 use super::{
-    EnumIdentity, EnumPayload, EnumValue, FloatValue, RecordValues, Value, compare_map_keys,
-    language_equal,
+    EnumIdentity, EnumPayload, EnumValue, FloatValue, NewtypeValue, RecordValues, Value,
+    compare_map_keys, language_equal,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -225,6 +225,14 @@ impl<'a> CanonicalReader<'a> {
             0x0a => self.record(depth).map(Value::Record),
             0x0b => self.enum_value(depth),
             0x0c => Ok(Value::Unknown(Rc::new(self.value(depth + 1)?))),
+            0x0d => {
+                let identity = self.text()?;
+                if !valid_newtype_identity(&identity) {
+                    return Err(CanonicalDecodeError::InvalidValue);
+                }
+                let value = self.value(depth + 1)?;
+                Ok(Value::Newtype(Rc::new(NewtypeValue::new(identity, value))))
+            }
             _ => Err(CanonicalDecodeError::InvalidValue),
         }
     }
@@ -256,6 +264,7 @@ impl<'a> CanonicalReader<'a> {
             Value::Int(_) => Some(1),
             Value::String(_) => Some(2),
             Value::Bytes(_) => Some(3),
+            Value::Newtype(value) => Self::map_key_kind(value.value()).map(|_| 4),
             _ => None,
         }
     }
@@ -273,6 +282,9 @@ impl<'a> CanonicalReader<'a> {
             let key = self.value(depth + 1)?;
             let key_kind = Self::map_key_kind(&key).ok_or(CanonicalDecodeError::InvalidValue)?;
             if kind.is_some_and(|expected| expected != key_kind)
+                || previous
+                    .as_ref()
+                    .is_some_and(|previous| !same_map_key_kind(previous, &key))
                 || previous
                     .as_ref()
                     .is_some_and(|previous| compare_map_keys(previous, &key) != Ordering::Less)
@@ -388,10 +400,22 @@ fn encoded_length_at(value: &Value, depth: usize) -> Result<usize, CanonicalEnco
         }
         Value::Record(fields) => record_encoded_length(fields, depth),
         Value::Enum(value) => enum_encoded_length(value, depth),
+        Value::Newtype(value) => {
+            if !valid_newtype_identity(value.identity()) {
+                return Err(CanonicalEncodeError::InvalidValue);
+            }
+            let value_length = encoded_length_at(value.value(), depth + 1)?;
+            1_usize
+                .checked_add(field_name_length(value.identity().len())?)
+                .and_then(|length| length.checked_add(value_length))
+                .ok_or(CanonicalEncodeError::LengthOverflow)
+        }
         Value::Unknown(value) => 1_usize
             .checked_add(encoded_length_at(value, depth + 1)?)
             .ok_or(CanonicalEncodeError::LengthOverflow),
         Value::ExternalFsAccess(_)
+        | Value::Range(_)
+        | Value::Sequence(_)
         | Value::Closure(_)
         | Value::Future(_)
         | Value::Task(_)
@@ -484,6 +508,7 @@ fn sequence_encoded_length(values: &[Value], depth: usize) -> Result<usize, Cano
     })
 }
 
+#[allow(clippy::too_many_lines)]
 fn encode_into(value: &Value, output: &mut Vec<u8>) -> Result<(), CanonicalEncodeError> {
     match value {
         Value::Unit => output.push(0x00),
@@ -570,7 +595,14 @@ fn encode_into(value: &Value, output: &mut Vec<u8>) -> Result<(), CanonicalEncod
             output.push(0x0c);
             encode_into(value, output)?;
         }
+        Value::Newtype(value) => {
+            output.push(0x0d);
+            encode_field_name(value.identity(), output)?;
+            encode_into(value.value(), output)?;
+        }
         Value::ExternalFsAccess(_)
+        | Value::Range(_)
+        | Value::Sequence(_)
         | Value::Closure(_)
         | Value::Future(_)
         | Value::Task(_)
@@ -607,10 +639,7 @@ fn encode_length(length: usize, output: &mut Vec<u8>) -> Result<(), CanonicalEnc
 
 fn validate_map(entries: &[(Value, Value)]) -> Result<(), CanonicalEncodeError> {
     for (index, (key, _)) in entries.iter().enumerate() {
-        if !matches!(
-            key,
-            Value::Bool(_) | Value::Int(_) | Value::String(_) | Value::Bytes(_)
-        ) {
+        if !is_map_key(key) {
             return Err(CanonicalEncodeError::InvalidValue);
         }
         if entries[..index]
@@ -621,12 +650,50 @@ fn validate_map(entries: &[(Value, Value)]) -> Result<(), CanonicalEncodeError> 
         }
         if entries
             .first()
-            .is_some_and(|(first, _)| std::mem::discriminant(first) != std::mem::discriminant(key))
+            .is_some_and(|(first, _)| !same_map_key_kind(first, key))
         {
             return Err(CanonicalEncodeError::InvalidValue);
         }
     }
     Ok(())
+}
+
+fn is_map_key(value: &Value) -> bool {
+    match value {
+        Value::Bool(_) | Value::Int(_) | Value::String(_) | Value::Bytes(_) => true,
+        Value::Newtype(value) => is_map_key(value.value()),
+        _ => false,
+    }
+}
+
+fn same_map_key_kind(left: &Value, right: &Value) -> bool {
+    match (left, right) {
+        (Value::Bool(_), Value::Bool(_))
+        | (Value::Int(_), Value::Int(_))
+        | (Value::String(_), Value::String(_))
+        | (Value::Bytes(_), Value::Bytes(_)) => true,
+        (Value::Newtype(left), Value::Newtype(right)) => {
+            left.identity() == right.identity() && same_map_key_kind(left.value(), right.value())
+        }
+        _ => false,
+    }
+}
+
+fn valid_newtype_identity(value: &str) -> bool {
+    let Some((owner, declaration)) = value.rsplit_once("::") else {
+        return false;
+    };
+    !owner.is_empty()
+        && owner.bytes().all(|byte| byte.is_ascii_graphic())
+        && is_source_identifier(declaration)
+}
+
+fn is_source_identifier(value: &str) -> bool {
+    let mut bytes = value.bytes();
+    bytes
+        .next()
+        .is_some_and(|byte| byte.is_ascii_alphabetic() || byte == b'_')
+        && bytes.all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
 }
 
 fn next_map_entry(

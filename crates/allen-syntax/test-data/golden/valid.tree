@@ -1,4 +1,4 @@
-Source 0..691
+Source 0..816
   LineComment 0..24 "// pi π stays in trivia"
   Newline 24..25 "\n"
   BlockComment 25..60 "/* nested /* snow 雪 */ comment */"
@@ -20,8 +20,8 @@ Source 0..691
     StringLiteral 90..98 "\"pkg/é\""
     Semi 98..99 ";"
   Newline 99..100 "\n"
-  Declaration 100..135
-    RecordDeclaration 100..135
+  Declaration 100..150
+    RecordDeclaration 100..150
       KwRecord 100..106 "record"
       Whitespace 106..107 " "
       Ident 107..110 "Box"
@@ -43,528 +43,767 @@ Source 0..691
       Comma 132..133 ","
       Whitespace 133..134 " "
       RBrace 134..135 "}"
-  Newline 135..136 "\n"
-  Declaration 136..239
-    FunctionDeclaration 136..239
-      KwFn 136..138 "fn"
-      Whitespace 138..139 " "
-      Ident 139..145 "render"
-      LParen 145..146 "("
-      RParen 146..147 ")"
-      Whitespace 147..148 " "
-      KwReturns 148..155 "returns"
-      Type 155..162
-        NamedType 155..162
-          Whitespace 155..156 " "
-          Ident 156..162 "String"
-      Body 162..239
-        Whitespace 162..163 " "
-        LBrace 163..164 "{"
-        Statement 164..189
-          Newline 164..165 "\n"
-          Whitespace 165..167 "  "
-          KwLet 167..170 "let"
-          Whitespace 170..171 " "
-          Ident 171..175 "text"
-          Whitespace 175..176 " "
-          Eq 176..177 "="
-          Expression 177..188
-            Disjunction 177..188
-              Conjunction 177..188
-                Equality 177..188
-                  Comparison 177..188
-                    Addition 177..188
-                      Multiplication 177..188
-                        Unary 177..188
-                          Postfix 177..188
-                            Primary 177..188
-                              Literal 177..188
-                                Whitespace 177..178 " "
-                                StringLiteral 178..188 "\"héllo\\n\""
-          Semi 188..189 ";"
-        Statement 189..213
-          Newline 189..190 "\n"
-          Whitespace 190..192 "  "
-          KwLet 192..195 "let"
-          Whitespace 195..196 " "
-          Ident 196..201 "bytes"
-          Whitespace 201..202 " "
-          Eq 202..203 "="
-          Expression 203..212
-            Disjunction 203..212
-              Conjunction 203..212
-                Equality 203..212
-                  Comparison 203..212
-                    Addition 203..212
-                      Multiplication 203..212
-                        Unary 203..212
-                          Postfix 203..212
-                            Primary 203..212
-                              Literal 203..212
-                                Whitespace 203..204 " "
-                                BytesLiteral 204..212 "b\"A\\x42\""
-          Semi 212..213 ";"
-        Statement 213..237
-          Newline 213..214 "\n"
-          Whitespace 214..216 "  "
-          KwReturn 216..222 "return"
-          Expression 222..236
-            Disjunction 222..236
-              Conjunction 222..236
-                Equality 222..236
-                  Comparison 222..236
-                    Addition 222..236
-                      Multiplication 222..236
-                        Unary 222..236
-                          Postfix 222..236
-                            Primary 222..236
-                              TemplateLiteral 222..236
-                                Whitespace 222..223 " "
-                                Backtick 223..224 "`"
-                                TemplateSegment 224..235
-                                  TemplateTextOrEscape 224..233
-                                    TemplateTextScalar 224..233 "snow 雪 "
-                                  TemplateTextOrEscape 233..235
-                                    TemplateEscape 233..235 "\\`"
-                                Backtick 235..236 "`"
-          Semi 236..237 ";"
-        Newline 237..238 "\n"
-        RBrace 238..239 "}"
-  Newline 239..240 "\n"
-  Declaration 240..657
-    FunctionDeclaration 240..657
-      KwFn 240..242 "fn"
-      Whitespace 242..243 " "
-      Ident 243..251 "classify"
-      LParen 251..252 "("
-      Parameter 252..266
-        Ident 252..257 "value"
-        Colon 257..258 ":"
-        Type 258..266
-          NamedType 258..266
-            Whitespace 258..259 " "
-            Ident 259..266 "Reading"
-      RParen 266..267 ")"
-      Whitespace 267..268 " "
-      KwReturns 268..275 "returns"
-      Type 275..279
-        NamedType 275..279
-          Whitespace 275..276 " "
-          Ident 276..279 "Int"
-      Body 279..657
-        Whitespace 279..280 " "
-        LBrace 280..281 "{"
-        Statement 281..356
-          Newline 281..282 "\n"
-          Whitespace 282..284 "  "
-          KwLet 284..287 "let"
-          Whitespace 287..288 " "
-          Ident 288..293 "apply"
-          Whitespace 293..294 " "
-          Eq 294..295 "="
-          Expression 295..355
-            Disjunction 295..355
-              Conjunction 295..355
-                Equality 295..355
-                  Comparison 295..355
-                    Addition 295..355
-                      Multiplication 295..355
-                        Unary 295..355
-                          Postfix 295..355
-                            Primary 295..355
-                              Closure 295..355
-                                Whitespace 295..296 " "
-                                KwFn 296..298 "fn"
-                                LParen 298..299 "("
-                                Parameter 299..309
-                                  Ident 299..304 "input"
-                                  Colon 304..305 ":"
-                                  Type 305..309
-                                    NamedType 305..309
-                                      Whitespace 305..306 " "
-                                      Ident 306..309 "Int"
-                                Comma 309..310 ","
-                                RParen 310..311 ")"
-                                Whitespace 311..312 " "
-                                KwReturns 312..319 "returns"
-                                Type 319..323
-                                  NamedType 319..323
-                                    Whitespace 319..320 " "
-                                    Ident 320..323 "Int"
-                                EffectClause 323..345
-                                  Whitespace 323..324 " "
-                                  KwEffects 324..331 "effects"
-                                  Whitespace 331..332 " "
-                                  LBracket 332..333 "["
-                                  EffectId 333..343 "tool.run@2"
-                                  Comma 343..344 ","
-                                  RBracket 344..345 "]"
-                                Body 345..355
-                                  Whitespace 345..346 " "
-                                  LBrace 346..347 "{"
-                                  Expression 347..353
-                                    Disjunction 347..353
-                                      Conjunction 347..353
-                                        Equality 347..353
-                                          Comparison 347..353
-                                            Addition 347..353
-                                              Multiplication 347..353
-                                                Unary 347..353
-                                                  Postfix 347..353
-                                                    Primary 347..353
-                                                      Whitespace 347..348 " "
-                                                      Ident 348..353 "input"
-                                  Whitespace 353..354 " "
-                                  RBrace 354..355 "}"
-          Semi 355..356 ";"
-        Expression 356..655
-          Disjunction 356..655
-            Conjunction 356..655
-              Equality 356..655
-                Comparison 356..655
-                  Addition 356..655
-                    Multiplication 356..655
-                      Unary 356..655
-                        Postfix 356..655
-                          Primary 356..655
-                            MatchExpression 356..655
-                              Newline 356..357 "\n"
-                              Whitespace 357..359 "  "
-                              KwMatch 359..364 "match"
-                              Expression 364..370
-                                Disjunction 364..370
-                                  Conjunction 364..370
-                                    Equality 364..370
-                                      Comparison 364..370
-                                        Addition 364..370
-                                          Multiplication 364..370
-                                            Unary 364..370
-                                              Postfix 364..370
-                                                Primary 364..370
-                                                  Whitespace 364..365 " "
-                                                  Ident 365..370 "value"
-                              Whitespace 370..371 " "
-                              LBrace 371..372 "{"
-                              MatchArm 372..393
-                                Pattern 372..381
-                                  Newline 372..373 "\n"
-                                  Whitespace 373..377 "    "
-                                  KwNone 377..381 "None"
-                                Whitespace 381..382 " "
-                                FatArrow 382..384 "=>"
-                                Expression 384..393
-                                  Disjunction 384..393
-                                    Conjunction 384..393
-                                      Equality 384..393
-                                        Comparison 384..393
-                                          Addition 384..393
-                                            Multiplication 384..393
-                                              Unary 384..393
-                                                Postfix 384..393
-                                                  Primary 384..390
-                                                    Whitespace 384..385 " "
-                                                    Ident 385..390 "apply"
-                                                  LParen 390..391 "("
-                                                  Expression 391..392
-                                                    Disjunction 391..392
-                                                      Conjunction 391..392
-                                                        Equality 391..392
-                                                          Comparison 391..392
-                                                            Addition 391..392
-                                                              Multiplication 391..392
-                                                                Unary 391..392
-                                                                  Postfix 391..392
-                                                                    Primary 391..392
-                                                                      Literal 391..392
-                                                                        IntLiteral 391..392 "0"
-                                                  RParen 392..393 ")"
-                              MatchArm 393..427
-                                Pattern 393..410
-                                  Newline 393..394 "\n"
-                                  Whitespace 394..398 "    "
-                                  KwSome 398..402 "Some"
-                                  LParen 402..403 "("
-                                  Ident 403..409 "number"
-                                  RParen 409..410 ")"
-                                Whitespace 410..411 " "
-                                FatArrow 411..413 "=>"
-                                Expression 413..427
-                                  Disjunction 413..427
-                                    Conjunction 413..427
-                                      Equality 413..427
-                                        Comparison 413..427
-                                          Addition 413..427
-                                            Multiplication 413..427
-                                              Unary 413..427
-                                                Postfix 413..427
-                                                  Primary 413..419
-                                                    Whitespace 413..414 " "
-                                                    Ident 414..419 "apply"
-                                                  LParen 419..420 "("
-                                                  Expression 420..426
-                                                    Disjunction 420..426
-                                                      Conjunction 420..426
-                                                        Equality 420..426
-                                                          Comparison 420..426
-                                                            Addition 420..426
-                                                              Multiplication 420..426
-                                                                Unary 420..426
-                                                                  Postfix 420..426
-                                                                    Primary 420..426
-                                                                      Ident 420..426 "number"
-                                                  RParen 426..427 ")"
-                              Comma 427..428 ","
-                              MatchArm 428..443
-                                Pattern 428..438
-                                  Newline 428..429 "\n"
-                                  Whitespace 429..433 "    "
-                                  KwOk 433..435 "Ok"
-                                  LParen 435..436 "("
-                                  Underscore 436..437 "_"
-                                  RParen 437..438 ")"
-                                Whitespace 438..439 " "
-                                FatArrow 439..441 "=>"
-                                Expression 441..443
-                                  Disjunction 441..443
-                                    Conjunction 441..443
-                                      Equality 441..443
-                                        Comparison 441..443
-                                          Addition 441..443
-                                            Multiplication 441..443
-                                              Unary 441..443
-                                                Postfix 441..443
-                                                  Primary 441..443
-                                                    Literal 441..443
-                                                      Whitespace 441..442 " "
-                                                      IntLiteral 442..443 "1"
-                              MatchArm 443..463
-                                Pattern 443..458
-                                  Newline 443..444 "\n"
-                                  Whitespace 444..448 "    "
-                                  KwErr 448..451 "Err"
-                                  LParen 451..452 "("
-                                  Ident 452..457 "error"
-                                  RParen 457..458 ")"
-                                Whitespace 458..459 " "
-                                FatArrow 459..461 "=>"
-                                Expression 461..463
-                                  Disjunction 461..463
-                                    Conjunction 461..463
-                                      Equality 461..463
-                                        Comparison 461..463
-                                          Addition 461..463
-                                            Multiplication 461..463
-                                              Unary 461..463
-                                                Postfix 461..463
-                                                  Primary 461..463
-                                                    Literal 461..463
-                                                      Whitespace 461..462 " "
-                                                      IntLiteral 462..463 "0"
-                              Comma 463..464 ","
-                              MatchArm 464..487
-                                Pattern 464..482
-                                  EnumPattern 464..482
-                                    Newline 464..465 "\n"
-                                    Whitespace 465..469 "    "
-                                    Ident 469..476 "Reading"
-                                    Dot 476..477 "."
-                                    Ident 477..482 "Empty"
-                                Whitespace 482..483 " "
-                                FatArrow 483..485 "=>"
-                                Expression 485..487
-                                  Disjunction 485..487
-                                    Conjunction 485..487
-                                      Equality 485..487
-                                        Comparison 485..487
-                                          Addition 485..487
-                                            Multiplication 485..487
-                                              Unary 485..487
-                                                Postfix 485..487
-                                                  Primary 485..487
-                                                    Literal 485..487
-                                                      Whitespace 485..486 " "
-                                                      IntLiteral 486..487 "0"
-                              MatchArm 487..525
-                                Pattern 487..515
-                                  EnumPattern 487..515
-                                    Newline 487..488 "\n"
-                                    Whitespace 488..492 "    "
-                                    Ident 492..499 "Reading"
-                                    Dot 499..500 "."
-                                    Ident 500..506 "Number"
-                                    LParen 506..507 "("
-                                    Ident 507..513 "number"
-                                    Comma 513..514 ","
-                                    RParen 514..515 ")"
-                                Whitespace 515..516 " "
-                                FatArrow 516..518 "=>"
-                                Expression 518..525
-                                  Disjunction 518..525
-                                    Conjunction 518..525
-                                      Equality 518..525
-                                        Comparison 518..525
-                                          Addition 518..525
-                                            Multiplication 518..525
-                                              Unary 518..525
-                                                Postfix 518..525
-                                                  Primary 518..525
-                                                    Whitespace 518..519 " "
-                                                    Ident 519..525 "number"
-                              Comma 525..526 ","
-                              MatchArm 526..574
-                                Pattern 526..565
-                                  EnumPattern 526..565
-                                    Newline 526..527 "\n"
-                                    Whitespace 527..531 "    "
-                                    Ident 531..538 "Reading"
-                                    Dot 538..539 "."
-                                    Ident 539..544 "Named"
-                                    Whitespace 544..545 " "
-                                    LBrace 545..546 "{"
-                                    PatternField 546..552
-                                      Whitespace 546..547 " "
-                                      Ident 547..552 "value"
-                                    Comma 552..553 ","
-                                    PatternField 553..562
-                                      Whitespace 553..554 " "
-                                      Ident 554..559 "label"
-                                      Colon 559..560 ":"
-                                      Whitespace 560..561 " "
-                                      Underscore 561..562 "_"
-                                    Comma 562..563 ","
-                                    Whitespace 563..564 " "
-                                    RBrace 564..565 "}"
-                                Whitespace 565..566 " "
-                                FatArrow 566..568 "=>"
-                                Expression 568..574
-                                  Disjunction 568..574
-                                    Conjunction 568..574
-                                      Equality 568..574
-                                        Comparison 568..574
-                                          Addition 568..574
-                                            Multiplication 568..574
-                                              Unary 568..574
-                                                Postfix 568..574
-                                                  Primary 568..574
-                                                    Whitespace 568..569 " "
-                                                    Ident 569..574 "value"
-                              MatchArm 574..609
-                                Pattern 574..600
-                                  RecordPattern 574..600
-                                    Newline 574..575 "\n"
-                                    Whitespace 575..579 "    "
-                                    Ident 579..582 "Box"
-                                    Whitespace 582..583 " "
-                                    LBrace 583..584 "{"
-                                    PatternField 584..597
-                                      Whitespace 584..585 " "
-                                      Ident 585..590 "value"
-                                      Colon 590..591 ":"
-                                      Whitespace 591..592 " "
-                                      Ident 592..597 "inner"
-                                    Comma 597..598 ","
-                                    Whitespace 598..599 " "
-                                    RBrace 599..600 "}"
-                                Whitespace 600..601 " "
-                                FatArrow 601..603 "=>"
-                                Expression 603..609
-                                  Disjunction 603..609
-                                    Conjunction 603..609
-                                      Equality 603..609
-                                        Comparison 603..609
-                                          Addition 603..609
-                                            Multiplication 603..609
-                                              Unary 603..609
-                                                Postfix 603..609
-                                                  Primary 603..609
-                                                    Whitespace 603..604 " "
-                                                    Ident 604..609 "inner"
-                              Comma 609..610 ","
-                              MatchArm 610..624
-                                Pattern 610..619
-                                  Newline 610..611 "\n"
-                                  Whitespace 611..615 "    "
-                                  KwTrue 615..619 "true"
-                                Whitespace 619..620 " "
-                                FatArrow 620..622 "=>"
-                                Expression 622..624
-                                  Disjunction 622..624
-                                    Conjunction 622..624
-                                      Equality 622..624
-                                        Comparison 622..624
-                                          Addition 622..624
-                                            Multiplication 622..624
-                                              Unary 622..624
-                                                Postfix 622..624
-                                                  Primary 622..624
-                                                    Literal 622..624
-                                                      Whitespace 622..623 " "
-                                                      IntLiteral 623..624 "1"
-                              MatchArm 624..639
-                                Pattern 624..634
-                                  Newline 624..625 "\n"
-                                  Whitespace 625..629 "    "
-                                  KwFalse 629..634 "false"
-                                Whitespace 634..635 " "
-                                FatArrow 635..637 "=>"
-                                Expression 637..639
-                                  Disjunction 637..639
-                                    Conjunction 637..639
-                                      Equality 637..639
-                                        Comparison 637..639
-                                          Addition 637..639
-                                            Multiplication 637..639
-                                              Unary 637..639
-                                                Postfix 637..639
-                                                  Primary 637..639
-                                                    Literal 637..639
-                                                      Whitespace 637..638 " "
-                                                      IntLiteral 638..639 "0"
-                              Comma 639..640 ","
-                              MatchArm 640..651
-                                Pattern 640..646
-                                  Newline 640..641 "\n"
-                                  Whitespace 641..645 "    "
-                                  Underscore 645..646 "_"
-                                Whitespace 646..647 " "
-                                FatArrow 647..649 "=>"
-                                Expression 649..651
-                                  Disjunction 649..651
-                                    Conjunction 649..651
-                                      Equality 649..651
-                                        Comparison 649..651
-                                          Addition 649..651
-                                            Multiplication 649..651
-                                              Unary 649..651
-                                                Postfix 649..651
-                                                  Primary 649..651
-                                                    Literal 649..651
-                                                      Whitespace 649..650 " "
-                                                      IntLiteral 650..651 "0"
-                              Newline 651..652 "\n"
-                              Whitespace 652..654 "  "
-                              RBrace 654..655 "}"
-        Newline 655..656 "\n"
-        RBrace 656..657 "}"
-  Newline 657..658 "\n"
-  Declaration 658..690
-    TypeAliasDeclaration 658..690
-      KwExport 658..664 "export"
-      Whitespace 664..665 " "
-      KwType 665..669 "type"
-      Whitespace 669..670 " "
-      Ident 670..675 "Texts"
-      Whitespace 675..676 " "
-      Eq 676..677 "="
-      Type 677..690
-        GenericType 677..690
-          Whitespace 677..678 " "
-          KwList 678..682 "List"
-          Lt 682..683 "<"
-          Type 683..689
-            NamedType 683..689
-              Ident 683..689 "String"
-          Gt 689..690 ">"
-  Newline 690..691 "\n"
-  Eof 691..691 ""
+      Whitespace 135..136 " "
+      KwWhere 136..141 "where"
+      Whitespace 141..142 " "
+      LBrace 142..143 "{"
+      Expression 143..148
+        Range 143..148
+          Coalescing 143..148
+            Pipeline 143..148
+              Composition 143..148
+                Disjunction 143..148
+                  Conjunction 143..148
+                    Equality 143..148
+                      Comparison 143..148
+                        Addition 143..148
+                          Multiplication 143..148
+                            Unary 143..148
+                              Postfix 143..148
+                                Primary 143..148
+                                  Literal 143..148
+                                    Whitespace 143..144 " "
+                                    KwTrue 144..148 "true"
+      Whitespace 148..149 " "
+      RBrace 149..150 "}"
+  Newline 150..151 "\n"
+  Declaration 151..177
+    NewtypeDeclaration 151..177
+      KwNewtype 151..158 "newtype"
+      Whitespace 158..159 " "
+      Ident 159..171 "EpochSeconds"
+      Whitespace 171..172 " "
+      Eq 172..173 "="
+      Type 173..177
+        NamedType 173..177
+          Whitespace 173..174 " "
+          Ident 174..177 "Int"
+  Newline 177..178 "\n"
+  Declaration 178..281
+    FunctionDeclaration 178..281
+      KwFn 178..180 "fn"
+      Whitespace 180..181 " "
+      Ident 181..187 "render"
+      LParen 187..188 "("
+      RParen 188..189 ")"
+      Whitespace 189..190 " "
+      KwReturns 190..197 "returns"
+      Type 197..204
+        NamedType 197..204
+          Whitespace 197..198 " "
+          Ident 198..204 "String"
+      Body 204..281
+        Whitespace 204..205 " "
+        LBrace 205..206 "{"
+        Statement 206..231
+          Newline 206..207 "\n"
+          Whitespace 207..209 "  "
+          KwLet 209..212 "let"
+          Whitespace 212..213 " "
+          Ident 213..217 "text"
+          Whitespace 217..218 " "
+          Eq 218..219 "="
+          Expression 219..230
+            Range 219..230
+              Coalescing 219..230
+                Pipeline 219..230
+                  Composition 219..230
+                    Disjunction 219..230
+                      Conjunction 219..230
+                        Equality 219..230
+                          Comparison 219..230
+                            Addition 219..230
+                              Multiplication 219..230
+                                Unary 219..230
+                                  Postfix 219..230
+                                    Primary 219..230
+                                      Literal 219..230
+                                        Whitespace 219..220 " "
+                                        StringLiteral 220..230 "\"héllo\\n\""
+          Semi 230..231 ";"
+        Statement 231..255
+          Newline 231..232 "\n"
+          Whitespace 232..234 "  "
+          KwLet 234..237 "let"
+          Whitespace 237..238 " "
+          Ident 238..243 "bytes"
+          Whitespace 243..244 " "
+          Eq 244..245 "="
+          Expression 245..254
+            Range 245..254
+              Coalescing 245..254
+                Pipeline 245..254
+                  Composition 245..254
+                    Disjunction 245..254
+                      Conjunction 245..254
+                        Equality 245..254
+                          Comparison 245..254
+                            Addition 245..254
+                              Multiplication 245..254
+                                Unary 245..254
+                                  Postfix 245..254
+                                    Primary 245..254
+                                      Literal 245..254
+                                        Whitespace 245..246 " "
+                                        BytesLiteral 246..254 "b\"A\\x42\""
+          Semi 254..255 ";"
+        Statement 255..279
+          Newline 255..256 "\n"
+          Whitespace 256..258 "  "
+          KwReturn 258..264 "return"
+          Expression 264..278
+            Range 264..278
+              Coalescing 264..278
+                Pipeline 264..278
+                  Composition 264..278
+                    Disjunction 264..278
+                      Conjunction 264..278
+                        Equality 264..278
+                          Comparison 264..278
+                            Addition 264..278
+                              Multiplication 264..278
+                                Unary 264..278
+                                  Postfix 264..278
+                                    Primary 264..278
+                                      TemplateLiteral 264..278
+                                        Whitespace 264..265 " "
+                                        Backtick 265..266 "`"
+                                        TemplateSegment 266..277
+                                          TemplateTextOrEscape 266..275
+                                            TemplateTextScalar 266..275 "snow 雪 "
+                                          TemplateTextOrEscape 275..277
+                                            TemplateEscape 275..277 "\\`"
+                                        Backtick 277..278 "`"
+          Semi 278..279 ";"
+        Newline 279..280 "\n"
+        RBrace 280..281 "}"
+  Newline 281..282 "\n"
+  Declaration 282..699
+    FunctionDeclaration 282..699
+      KwFn 282..284 "fn"
+      Whitespace 284..285 " "
+      Ident 285..293 "classify"
+      LParen 293..294 "("
+      Parameter 294..308
+        Ident 294..299 "value"
+        Colon 299..300 ":"
+        Type 300..308
+          NamedType 300..308
+            Whitespace 300..301 " "
+            Ident 301..308 "Reading"
+      RParen 308..309 ")"
+      Whitespace 309..310 " "
+      KwReturns 310..317 "returns"
+      Type 317..321
+        NamedType 317..321
+          Whitespace 317..318 " "
+          Ident 318..321 "Int"
+      Body 321..699
+        Whitespace 321..322 " "
+        LBrace 322..323 "{"
+        Statement 323..398
+          Newline 323..324 "\n"
+          Whitespace 324..326 "  "
+          KwLet 326..329 "let"
+          Whitespace 329..330 " "
+          Ident 330..335 "apply"
+          Whitespace 335..336 " "
+          Eq 336..337 "="
+          Expression 337..397
+            Range 337..397
+              Coalescing 337..397
+                Pipeline 337..397
+                  Composition 337..397
+                    Disjunction 337..397
+                      Conjunction 337..397
+                        Equality 337..397
+                          Comparison 337..397
+                            Addition 337..397
+                              Multiplication 337..397
+                                Unary 337..397
+                                  Postfix 337..397
+                                    Primary 337..397
+                                      Closure 337..397
+                                        Whitespace 337..338 " "
+                                        KwFn 338..340 "fn"
+                                        LParen 340..341 "("
+                                        Parameter 341..351
+                                          Ident 341..346 "input"
+                                          Colon 346..347 ":"
+                                          Type 347..351
+                                            NamedType 347..351
+                                              Whitespace 347..348 " "
+                                              Ident 348..351 "Int"
+                                        Comma 351..352 ","
+                                        RParen 352..353 ")"
+                                        Whitespace 353..354 " "
+                                        KwReturns 354..361 "returns"
+                                        Type 361..365
+                                          NamedType 361..365
+                                            Whitespace 361..362 " "
+                                            Ident 362..365 "Int"
+                                        EffectClause 365..387
+                                          Whitespace 365..366 " "
+                                          KwEffects 366..373 "effects"
+                                          Whitespace 373..374 " "
+                                          LBracket 374..375 "["
+                                          EffectId 375..385 "tool.run@2"
+                                          Comma 385..386 ","
+                                          RBracket 386..387 "]"
+                                        Body 387..397
+                                          Whitespace 387..388 " "
+                                          LBrace 388..389 "{"
+                                          Expression 389..395
+                                            Range 389..395
+                                              Coalescing 389..395
+                                                Pipeline 389..395
+                                                  Composition 389..395
+                                                    Disjunction 389..395
+                                                      Conjunction 389..395
+                                                        Equality 389..395
+                                                          Comparison 389..395
+                                                            Addition 389..395
+                                                              Multiplication 389..395
+                                                                Unary 389..395
+                                                                  Postfix 389..395
+                                                                    Primary 389..395
+                                                                      Whitespace 389..390 " "
+                                                                      Ident 390..395 "input"
+                                          Whitespace 395..396 " "
+                                          RBrace 396..397 "}"
+          Semi 397..398 ";"
+        Expression 398..697
+          Range 398..697
+            Coalescing 398..697
+              Pipeline 398..697
+                Composition 398..697
+                  Disjunction 398..697
+                    Conjunction 398..697
+                      Equality 398..697
+                        Comparison 398..697
+                          Addition 398..697
+                            Multiplication 398..697
+                              Unary 398..697
+                                Postfix 398..697
+                                  Primary 398..697
+                                    MatchExpression 398..697
+                                      Newline 398..399 "\n"
+                                      Whitespace 399..401 "  "
+                                      KwMatch 401..406 "match"
+                                      Expression 406..412
+                                        Range 406..412
+                                          Coalescing 406..412
+                                            Pipeline 406..412
+                                              Composition 406..412
+                                                Disjunction 406..412
+                                                  Conjunction 406..412
+                                                    Equality 406..412
+                                                      Comparison 406..412
+                                                        Addition 406..412
+                                                          Multiplication 406..412
+                                                            Unary 406..412
+                                                              Postfix 406..412
+                                                                Primary 406..412
+                                                                  Whitespace 406..407 " "
+                                                                  Ident 407..412 "value"
+                                      Whitespace 412..413 " "
+                                      LBrace 413..414 "{"
+                                      MatchArm 414..435
+                                        Pattern 414..423
+                                          PatternOr 414..423
+                                            PatternPrimary 414..423
+                                              Newline 414..415 "\n"
+                                              Whitespace 415..419 "    "
+                                              KwNone 419..423 "None"
+                                        Whitespace 423..424 " "
+                                        FatArrow 424..426 "=>"
+                                        Expression 426..435
+                                          Range 426..435
+                                            Coalescing 426..435
+                                              Pipeline 426..435
+                                                Composition 426..435
+                                                  Disjunction 426..435
+                                                    Conjunction 426..435
+                                                      Equality 426..435
+                                                        Comparison 426..435
+                                                          Addition 426..435
+                                                            Multiplication 426..435
+                                                              Unary 426..435
+                                                                Postfix 426..435
+                                                                  Primary 426..432
+                                                                    Whitespace 426..427 " "
+                                                                    Ident 427..432 "apply"
+                                                                  LParen 432..433 "("
+                                                                  CallArgument 433..434
+                                                                    Expression 433..434
+                                                                      Range 433..434
+                                                                        Coalescing 433..434
+                                                                          Pipeline 433..434
+                                                                            Composition 433..434
+                                                                              Disjunction 433..434
+                                                                                Conjunction 433..434
+                                                                                  Equality 433..434
+                                                                                    Comparison 433..434
+                                                                                      Addition 433..434
+                                                                                        Multiplication 433..434
+                                                                                          Unary 433..434
+                                                                                            Postfix 433..434
+                                                                                              Primary 433..434
+                                                                                                Literal 433..434
+                                                                                                  IntLiteral 433..434 "0"
+                                                                  RParen 434..435 ")"
+                                      MatchArm 435..469
+                                        Pattern 435..452
+                                          PatternOr 435..452
+                                            PatternPrimary 435..452
+                                              Newline 435..436 "\n"
+                                              Whitespace 436..440 "    "
+                                              KwSome 440..444 "Some"
+                                              LParen 444..445 "("
+                                              Pattern 445..451
+                                                PatternOr 445..451
+                                                  PatternPrimary 445..451
+                                                    Ident 445..451 "number"
+                                              RParen 451..452 ")"
+                                        Whitespace 452..453 " "
+                                        FatArrow 453..455 "=>"
+                                        Expression 455..469
+                                          Range 455..469
+                                            Coalescing 455..469
+                                              Pipeline 455..469
+                                                Composition 455..469
+                                                  Disjunction 455..469
+                                                    Conjunction 455..469
+                                                      Equality 455..469
+                                                        Comparison 455..469
+                                                          Addition 455..469
+                                                            Multiplication 455..469
+                                                              Unary 455..469
+                                                                Postfix 455..469
+                                                                  Primary 455..461
+                                                                    Whitespace 455..456 " "
+                                                                    Ident 456..461 "apply"
+                                                                  LParen 461..462 "("
+                                                                  CallArgument 462..468
+                                                                    Expression 462..468
+                                                                      Range 462..468
+                                                                        Coalescing 462..468
+                                                                          Pipeline 462..468
+                                                                            Composition 462..468
+                                                                              Disjunction 462..468
+                                                                                Conjunction 462..468
+                                                                                  Equality 462..468
+                                                                                    Comparison 462..468
+                                                                                      Addition 462..468
+                                                                                        Multiplication 462..468
+                                                                                          Unary 462..468
+                                                                                            Postfix 462..468
+                                                                                              Primary 462..468
+                                                                                                Ident 462..468 "number"
+                                                                  RParen 468..469 ")"
+                                      Comma 469..470 ","
+                                      MatchArm 470..485
+                                        Pattern 470..480
+                                          PatternOr 470..480
+                                            PatternPrimary 470..480
+                                              Newline 470..471 "\n"
+                                              Whitespace 471..475 "    "
+                                              KwOk 475..477 "Ok"
+                                              LParen 477..478 "("
+                                              Pattern 478..479
+                                                PatternOr 478..479
+                                                  PatternPrimary 478..479
+                                                    Underscore 478..479 "_"
+                                              RParen 479..480 ")"
+                                        Whitespace 480..481 " "
+                                        FatArrow 481..483 "=>"
+                                        Expression 483..485
+                                          Range 483..485
+                                            Coalescing 483..485
+                                              Pipeline 483..485
+                                                Composition 483..485
+                                                  Disjunction 483..485
+                                                    Conjunction 483..485
+                                                      Equality 483..485
+                                                        Comparison 483..485
+                                                          Addition 483..485
+                                                            Multiplication 483..485
+                                                              Unary 483..485
+                                                                Postfix 483..485
+                                                                  Primary 483..485
+                                                                    Literal 483..485
+                                                                      Whitespace 483..484 " "
+                                                                      IntLiteral 484..485 "1"
+                                      MatchArm 485..505
+                                        Pattern 485..500
+                                          PatternOr 485..500
+                                            PatternPrimary 485..500
+                                              Newline 485..486 "\n"
+                                              Whitespace 486..490 "    "
+                                              KwErr 490..493 "Err"
+                                              LParen 493..494 "("
+                                              Pattern 494..499
+                                                PatternOr 494..499
+                                                  PatternPrimary 494..499
+                                                    Ident 494..499 "error"
+                                              RParen 499..500 ")"
+                                        Whitespace 500..501 " "
+                                        FatArrow 501..503 "=>"
+                                        Expression 503..505
+                                          Range 503..505
+                                            Coalescing 503..505
+                                              Pipeline 503..505
+                                                Composition 503..505
+                                                  Disjunction 503..505
+                                                    Conjunction 503..505
+                                                      Equality 503..505
+                                                        Comparison 503..505
+                                                          Addition 503..505
+                                                            Multiplication 503..505
+                                                              Unary 503..505
+                                                                Postfix 503..505
+                                                                  Primary 503..505
+                                                                    Literal 503..505
+                                                                      Whitespace 503..504 " "
+                                                                      IntLiteral 504..505 "0"
+                                      Comma 505..506 ","
+                                      MatchArm 506..529
+                                        Pattern 506..524
+                                          PatternOr 506..524
+                                            PatternPrimary 506..524
+                                              EnumPattern 506..524
+                                                Newline 506..507 "\n"
+                                                Whitespace 507..511 "    "
+                                                Ident 511..518 "Reading"
+                                                Dot 518..519 "."
+                                                Ident 519..524 "Empty"
+                                        Whitespace 524..525 " "
+                                        FatArrow 525..527 "=>"
+                                        Expression 527..529
+                                          Range 527..529
+                                            Coalescing 527..529
+                                              Pipeline 527..529
+                                                Composition 527..529
+                                                  Disjunction 527..529
+                                                    Conjunction 527..529
+                                                      Equality 527..529
+                                                        Comparison 527..529
+                                                          Addition 527..529
+                                                            Multiplication 527..529
+                                                              Unary 527..529
+                                                                Postfix 527..529
+                                                                  Primary 527..529
+                                                                    Literal 527..529
+                                                                      Whitespace 527..528 " "
+                                                                      IntLiteral 528..529 "0"
+                                      MatchArm 529..567
+                                        Pattern 529..557
+                                          PatternOr 529..557
+                                            PatternPrimary 529..557
+                                              EnumPattern 529..557
+                                                Newline 529..530 "\n"
+                                                Whitespace 530..534 "    "
+                                                Ident 534..541 "Reading"
+                                                Dot 541..542 "."
+                                                Ident 542..548 "Number"
+                                                LParen 548..549 "("
+                                                Pattern 549..555
+                                                  PatternOr 549..555
+                                                    PatternPrimary 549..555
+                                                      Ident 549..555 "number"
+                                                Comma 555..556 ","
+                                                RParen 556..557 ")"
+                                        Whitespace 557..558 " "
+                                        FatArrow 558..560 "=>"
+                                        Expression 560..567
+                                          Range 560..567
+                                            Coalescing 560..567
+                                              Pipeline 560..567
+                                                Composition 560..567
+                                                  Disjunction 560..567
+                                                    Conjunction 560..567
+                                                      Equality 560..567
+                                                        Comparison 560..567
+                                                          Addition 560..567
+                                                            Multiplication 560..567
+                                                              Unary 560..567
+                                                                Postfix 560..567
+                                                                  Primary 560..567
+                                                                    Whitespace 560..561 " "
+                                                                    Ident 561..567 "number"
+                                      Comma 567..568 ","
+                                      MatchArm 568..616
+                                        Pattern 568..607
+                                          PatternOr 568..607
+                                            PatternPrimary 568..607
+                                              EnumPattern 568..607
+                                                Newline 568..569 "\n"
+                                                Whitespace 569..573 "    "
+                                                Ident 573..580 "Reading"
+                                                Dot 580..581 "."
+                                                Ident 581..586 "Named"
+                                                Whitespace 586..587 " "
+                                                LBrace 587..588 "{"
+                                                PatternField 588..594
+                                                  Whitespace 588..589 " "
+                                                  Ident 589..594 "value"
+                                                Comma 594..595 ","
+                                                PatternField 595..604
+                                                  Whitespace 595..596 " "
+                                                  Ident 596..601 "label"
+                                                  Colon 601..602 ":"
+                                                  Pattern 602..604
+                                                    PatternOr 602..604
+                                                      PatternPrimary 602..604
+                                                        Whitespace 602..603 " "
+                                                        Underscore 603..604 "_"
+                                                Comma 604..605 ","
+                                                Whitespace 605..606 " "
+                                                RBrace 606..607 "}"
+                                        Whitespace 607..608 " "
+                                        FatArrow 608..610 "=>"
+                                        Expression 610..616
+                                          Range 610..616
+                                            Coalescing 610..616
+                                              Pipeline 610..616
+                                                Composition 610..616
+                                                  Disjunction 610..616
+                                                    Conjunction 610..616
+                                                      Equality 610..616
+                                                        Comparison 610..616
+                                                          Addition 610..616
+                                                            Multiplication 610..616
+                                                              Unary 610..616
+                                                                Postfix 610..616
+                                                                  Primary 610..616
+                                                                    Whitespace 610..611 " "
+                                                                    Ident 611..616 "value"
+                                      MatchArm 616..651
+                                        Pattern 616..642
+                                          PatternOr 616..642
+                                            PatternPrimary 616..642
+                                              RecordPattern 616..642
+                                                Newline 616..617 "\n"
+                                                Whitespace 617..621 "    "
+                                                Ident 621..624 "Box"
+                                                Whitespace 624..625 " "
+                                                LBrace 625..626 "{"
+                                                PatternField 626..639
+                                                  Whitespace 626..627 " "
+                                                  Ident 627..632 "value"
+                                                  Colon 632..633 ":"
+                                                  Pattern 633..639
+                                                    PatternOr 633..639
+                                                      PatternPrimary 633..639
+                                                        Whitespace 633..634 " "
+                                                        Ident 634..639 "inner"
+                                                Comma 639..640 ","
+                                                Whitespace 640..641 " "
+                                                RBrace 641..642 "}"
+                                        Whitespace 642..643 " "
+                                        FatArrow 643..645 "=>"
+                                        Expression 645..651
+                                          Range 645..651
+                                            Coalescing 645..651
+                                              Pipeline 645..651
+                                                Composition 645..651
+                                                  Disjunction 645..651
+                                                    Conjunction 645..651
+                                                      Equality 645..651
+                                                        Comparison 645..651
+                                                          Addition 645..651
+                                                            Multiplication 645..651
+                                                              Unary 645..651
+                                                                Postfix 645..651
+                                                                  Primary 645..651
+                                                                    Whitespace 645..646 " "
+                                                                    Ident 646..651 "inner"
+                                      Comma 651..652 ","
+                                      MatchArm 652..666
+                                        Pattern 652..661
+                                          PatternOr 652..661
+                                            PatternPrimary 652..661
+                                              Newline 652..653 "\n"
+                                              Whitespace 653..657 "    "
+                                              KwTrue 657..661 "true"
+                                        Whitespace 661..662 " "
+                                        FatArrow 662..664 "=>"
+                                        Expression 664..666
+                                          Range 664..666
+                                            Coalescing 664..666
+                                              Pipeline 664..666
+                                                Composition 664..666
+                                                  Disjunction 664..666
+                                                    Conjunction 664..666
+                                                      Equality 664..666
+                                                        Comparison 664..666
+                                                          Addition 664..666
+                                                            Multiplication 664..666
+                                                              Unary 664..666
+                                                                Postfix 664..666
+                                                                  Primary 664..666
+                                                                    Literal 664..666
+                                                                      Whitespace 664..665 " "
+                                                                      IntLiteral 665..666 "1"
+                                      MatchArm 666..681
+                                        Pattern 666..676
+                                          PatternOr 666..676
+                                            PatternPrimary 666..676
+                                              Newline 666..667 "\n"
+                                              Whitespace 667..671 "    "
+                                              KwFalse 671..676 "false"
+                                        Whitespace 676..677 " "
+                                        FatArrow 677..679 "=>"
+                                        Expression 679..681
+                                          Range 679..681
+                                            Coalescing 679..681
+                                              Pipeline 679..681
+                                                Composition 679..681
+                                                  Disjunction 679..681
+                                                    Conjunction 679..681
+                                                      Equality 679..681
+                                                        Comparison 679..681
+                                                          Addition 679..681
+                                                            Multiplication 679..681
+                                                              Unary 679..681
+                                                                Postfix 679..681
+                                                                  Primary 679..681
+                                                                    Literal 679..681
+                                                                      Whitespace 679..680 " "
+                                                                      IntLiteral 680..681 "0"
+                                      Comma 681..682 ","
+                                      MatchArm 682..693
+                                        Pattern 682..688
+                                          PatternOr 682..688
+                                            PatternPrimary 682..688
+                                              Newline 682..683 "\n"
+                                              Whitespace 683..687 "    "
+                                              Underscore 687..688 "_"
+                                        Whitespace 688..689 " "
+                                        FatArrow 689..691 "=>"
+                                        Expression 691..693
+                                          Range 691..693
+                                            Coalescing 691..693
+                                              Pipeline 691..693
+                                                Composition 691..693
+                                                  Disjunction 691..693
+                                                    Conjunction 691..693
+                                                      Equality 691..693
+                                                        Comparison 691..693
+                                                          Addition 691..693
+                                                            Multiplication 691..693
+                                                              Unary 691..693
+                                                                Postfix 691..693
+                                                                  Primary 691..693
+                                                                    Literal 691..693
+                                                                      Whitespace 691..692 " "
+                                                                      IntLiteral 692..693 "0"
+                                      Newline 693..694 "\n"
+                                      Whitespace 694..696 "  "
+                                      RBrace 696..697 "}"
+        Newline 697..698 "\n"
+        RBrace 698..699 "}"
+  Newline 699..700 "\n"
+  Declaration 700..782
+    TestDeclaration 700..782
+      KwTest 700..704 "test"
+      Whitespace 704..705 " "
+      StringLiteral 705..723 "\"classifies empty\""
+      EffectClause 723..734
+        Whitespace 723..724 " "
+        KwEffects 724..731 "effects"
+        Whitespace 731..732 " "
+        LBracket 732..733 "["
+        RBracket 733..734 "]"
+      Body 734..782
+        Whitespace 734..735 " "
+        LBrace 735..736 "{"
+        Statement 736..775
+          Newline 736..737 "\n"
+          Whitespace 737..739 "  "
+          KwLet 739..742 "let"
+          Whitespace 742..743 " "
+          Ident 743..748 "value"
+          Whitespace 748..749 " "
+          Eq 749..750 "="
+          Expression 750..774
+            Range 750..774
+              Coalescing 750..774
+                Pipeline 750..774
+                  Composition 750..774
+                    Disjunction 750..774
+                      Conjunction 750..774
+                        Equality 750..774
+                          Comparison 750..774
+                            Addition 750..774
+                              Multiplication 750..774
+                                Unary 750..774
+                                  Postfix 750..774
+                                    Primary 750..759
+                                      Whitespace 750..751 " "
+                                      Ident 751..759 "classify"
+                                    LParen 759..760 "("
+                                    CallArgument 760..773
+                                      Expression 760..773
+                                        Range 760..773
+                                          Coalescing 760..773
+                                            Pipeline 760..773
+                                              Composition 760..773
+                                                Disjunction 760..773
+                                                  Conjunction 760..773
+                                                    Equality 760..773
+                                                      Comparison 760..773
+                                                        Addition 760..773
+                                                          Multiplication 760..773
+                                                            Unary 760..773
+                                                              Postfix 760..773
+                                                                Primary 760..773
+                                                                  QualifiedEnum 760..773
+                                                                    Ident 760..767 "Reading"
+                                                                    Dot 767..768 "."
+                                                                    Ident 768..773 "Empty"
+                                    RParen 773..774 ")"
+          Semi 774..775 ";"
+        Expression 775..780
+          Range 775..780
+            Coalescing 775..780
+              Pipeline 775..780
+                Composition 775..780
+                  Disjunction 775..780
+                    Conjunction 775..780
+                      Equality 775..780
+                        Comparison 775..780
+                          Addition 775..780
+                            Multiplication 775..780
+                              Unary 775..780
+                                Postfix 775..780
+                                  Primary 775..780
+                                    Literal 775..780
+                                      Newline 775..776 "\n"
+                                      Whitespace 776..778 "  "
+                                      LParen 778..779 "("
+                                      RParen 779..780 ")"
+        Newline 780..781 "\n"
+        RBrace 781..782 "}"
+  Newline 782..783 "\n"
+  Declaration 783..815
+    TypeAliasDeclaration 783..815
+      KwExport 783..789 "export"
+      Whitespace 789..790 " "
+      KwType 790..794 "type"
+      Whitespace 794..795 " "
+      Ident 795..800 "Texts"
+      Whitespace 800..801 " "
+      Eq 801..802 "="
+      Type 802..815
+        GenericType 802..815
+          Whitespace 802..803 " "
+          KwList 803..807 "List"
+          Lt 807..808 "<"
+          Type 808..814
+            NamedType 808..814
+              Ident 808..814 "String"
+          Gt 814..815 ">"
+  Newline 815..816 "\n"
+  Eof 816..816 ""
 diagnostics:

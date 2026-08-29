@@ -86,7 +86,7 @@ impl Validate for InitializeParams {
                 validate_language_range(range).is_ok() && range_contains_language(range)
             })
         {
-            return Err(invalid("language_versions must contain 0.1.0"));
+            return Err(invalid("language_versions must contain 0.1.1"));
         }
         for range in &self.language_versions {
             validate_language_range(range)?;
@@ -111,7 +111,7 @@ impl Validate for InitializeParams {
             }
             _ => {
                 return Err(invalid(
-                    "josh/1.4 invoking_session_id does not match execution_mode",
+                    "josh/1.5 invoking_session_id does not match execution_mode",
                 ));
             }
         }

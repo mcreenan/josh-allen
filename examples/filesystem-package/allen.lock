@@ -1,5 +1,5 @@
 lock_version = 1
-language = "0.1.0"
+language = "0.1.1"
 root = "filesystem-example@0.1.0"
 
 [[package]]

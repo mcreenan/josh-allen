@@ -4,9 +4,10 @@ mod artifact;
 
 pub use artifact::{
     ARTIFACT_MAGIC, Artifact, ArtifactError, ArtifactErrorCode, ArtifactMetadata, BYTECODE_VERSION,
-    DebugInfo, DebugLocation, DecodeLimits, DecodedArtifact, EntryContract, ImportContract,
-    ManifestContract, SectionSummary, SemanticVersion, StrictSchema, TargetProfile, ToolContract,
-    VerifiedArtifact, canonical_value_type_bytes, compute_strict_schema_digest,
+    DebugInfo, DebugLocation, DecodeLimits, DecodedArtifact, EntryContract, EntryRecordProvenance,
+    ImportContract, ManifestContract, SectionSummary, SemanticVersion, StrictSchema, TargetProfile,
+    ToolContract, VerifiedArtifact, canonical_value_type_bytes, compute_entry_contract_digest,
+    compute_entry_record_provenance, compute_strict_schema_digest, compute_template_digest,
     compute_tool_contract_digest, decode, decode_and_verify, encode, encode_with_limits,
 };
 
@@ -37,6 +38,8 @@ mod tests {
         Function {
             name: "main".to_owned(),
             parameters: vec![],
+            parameter_names: vec![],
+            parameter_default_digests: vec![],
             captures: vec![],
             registers,
             return_type,
@@ -78,6 +81,10 @@ mod tests {
             ],
         );
         operation.parameters = parameters;
+        operation.parameter_names = (0..operation.parameters.len())
+            .map(|index| format!("_arg{index}"))
+            .collect();
+        operation.parameter_default_digests = vec![None; operation.parameters.len()];
         bytecode_module(vec![], vec![], operation)
     }
 
@@ -216,6 +223,10 @@ mod tests {
                 ],
             );
             function.parameters = parameters;
+            function.parameter_names = (0..function.parameters.len())
+                .map(|index| format!("_arg{index}"))
+                .collect();
+            function.parameter_default_digests = vec![None; function.parameters.len()];
             let mut module = bytecode_module(vec![], vec![], function);
             module.effect_sets[0] = vec![operation.required_effect().to_owned()];
             module.async_functions = vec![0];
@@ -448,6 +459,8 @@ mod tests {
             ],
         );
         list_function.parameters = vec![0, 1, 2];
+        list_function.parameter_names = vec!["_arg0".into(), "_arg1".into(), "_arg2".into()];
+        list_function.parameter_default_digests = vec![None, None, None];
         let mut bytes_function = function(
             vec![ValueType::Bytes, ValueType::Int],
             ValueType::Int,
@@ -460,6 +473,8 @@ mod tests {
             ],
         );
         bytes_function.parameters = vec![0];
+        bytes_function.parameter_names = vec!["_arg0".into()];
+        bytes_function.parameter_default_digests = vec![None];
         bytes_function.name = "bytes_length".to_owned();
         let module = Module {
             constants: vec![],
@@ -589,6 +604,8 @@ mod tests {
                 Function {
                     name: "main".to_owned(),
                     parameters: vec![],
+                    parameter_names: vec![],
+                    parameter_default_digests: vec![],
                     captures: vec![],
                     registers: vec![
                         future_int.clone(),
@@ -648,6 +665,8 @@ mod tests {
                 Function {
                     name: "number".to_owned(),
                     parameters: vec![],
+                    parameter_names: vec![],
+                    parameter_default_digests: vec![],
                     captures: vec![],
                     registers: vec![ValueType::Int],
                     return_type: ValueType::Int,
@@ -663,6 +682,8 @@ mod tests {
                 Function {
                     name: "transfer_future".to_owned(),
                     parameters: vec![0],
+                    parameter_names: vec!["_arg0".to_owned()],
+                    parameter_default_digests: vec![None],
                     captures: vec![],
                     registers: vec![future_int.clone()],
                     return_type: future_int,
@@ -672,6 +693,8 @@ mod tests {
                 Function {
                     name: "transfer_task".to_owned(),
                     parameters: vec![0],
+                    parameter_names: vec!["_arg0".to_owned()],
+                    parameter_default_digests: vec![None],
                     captures: vec![],
                     registers: vec![task_int.clone()],
                     return_type: task_int,
@@ -692,6 +715,8 @@ mod tests {
         let main = Function {
             name: "main".to_owned(),
             parameters: vec![],
+            parameter_names: vec![],
+            parameter_default_digests: vec![],
             captures: vec![],
             registers: vec![
                 ValueType::Bool,
@@ -730,6 +755,8 @@ mod tests {
         let worker = Function {
             name: "worker".to_owned(),
             parameters: vec![],
+            parameter_names: vec![],
+            parameter_default_digests: vec![],
             captures: vec![],
             registers: vec![ValueType::Unit],
             return_type: ValueType::Unit,
@@ -777,7 +804,7 @@ mod tests {
         ];
         assert_eq!(
             verify(live).unwrap_err().message,
-            "backward control-flow edge cannot carry a live Future or Task"
+            "backward control-flow edge cannot carry a live affine value"
         );
     }
 
@@ -792,6 +819,8 @@ mod tests {
                 Function {
                     name: "main".to_owned(),
                     parameters: vec![0],
+                    parameter_names: vec!["_arg0".to_owned()],
+                    parameter_default_digests: vec![None],
                     captures: vec![],
                     registers: vec![
                         ValueType::SubAgent,
@@ -827,6 +856,8 @@ mod tests {
                 Function {
                     name: "identity_handle".to_owned(),
                     parameters: vec![0],
+                    parameter_names: vec!["_arg0".to_owned()],
+                    parameter_default_digests: vec![None],
                     captures: vec![],
                     registers: vec![ValueType::SubAgent],
                     return_type: ValueType::SubAgent,
@@ -854,6 +885,8 @@ mod tests {
                 Function {
                     name: "main".to_owned(),
                     parameters: vec![0],
+                    parameter_names: vec!["_arg0".to_owned()],
+                    parameter_default_digests: vec![None],
                     captures: vec![],
                     registers: vec![
                         ValueType::SubAgent,
@@ -886,6 +919,8 @@ mod tests {
                 Function {
                     name: "accept_handle".to_owned(),
                     parameters: vec![0],
+                    parameter_names: vec!["_arg0".to_owned()],
+                    parameter_default_digests: vec![None],
                     captures: vec![],
                     registers: vec![ValueType::SubAgent, ValueType::Unit],
                     return_type: ValueType::Unit,
@@ -926,6 +961,8 @@ mod tests {
             ],
         );
         loop_function.parameters = vec![0];
+        loop_function.parameter_names = vec!["_arg0".into()];
+        loop_function.parameter_default_digests = vec![None];
         let module = bytecode_module(vec![Constant::Int(1)], vec![], loop_function);
         assert_eq!(
             verify(module).unwrap_err().message,
@@ -1106,6 +1143,8 @@ mod tests {
             ],
         );
         direct.parameters = vec![0];
+        direct.parameter_names = vec!["_arg0".into()];
+        direct.parameter_default_digests = vec![None];
         assert_eq!(
             verify(bytecode_module(vec![], vec![], direct))
                 .expect_err("SubAgent must remain opaque")
@@ -1958,6 +1997,8 @@ mod tests {
                 Function {
                     name: "main".to_owned(),
                     parameters: vec![],
+                    parameter_names: vec![],
+                    parameter_default_digests: vec![],
                     captures: vec![],
                     registers: vec![
                         ValueType::Int,
@@ -2003,6 +2044,8 @@ mod tests {
                 Function {
                     name: "add".to_owned(),
                     parameters: vec![0, 1],
+                    parameter_names: vec!["_arg0".to_owned(), "_arg1".to_owned()],
+                    parameter_default_digests: vec![None, None],
                     captures: vec![],
                     registers: vec![ValueType::Int, ValueType::Int, ValueType::Int],
                     return_type: ValueType::Int,
@@ -2020,6 +2063,8 @@ mod tests {
                 Function {
                     name: "add_captured".to_owned(),
                     parameters: vec![0],
+                    parameter_names: vec!["_arg0".to_owned()],
+                    parameter_default_digests: vec![None],
                     captures: vec![1],
                     registers: vec![ValueType::Int, ValueType::Int, ValueType::Int],
                     return_type: ValueType::Int,
@@ -2061,6 +2106,8 @@ mod tests {
                 Function {
                     name: "main".to_owned(),
                     parameters: vec![0],
+                    parameter_names: vec!["_arg0".to_owned()],
+                    parameter_default_digests: vec![None],
                     captures: vec![],
                     registers: vec![
                         ValueType::SubAgent,
@@ -2097,6 +2144,8 @@ mod tests {
                 Function {
                     name: "identity_handle".to_owned(),
                     parameters: vec![0],
+                    parameter_names: vec!["_arg0".to_owned()],
+                    parameter_default_digests: vec![None],
                     captures: vec![],
                     registers: vec![ValueType::SubAgent],
                     return_type: ValueType::SubAgent,
@@ -2128,6 +2177,8 @@ mod tests {
                 Function {
                     name: "main".to_owned(),
                     parameters: vec![],
+                    parameter_names: vec![],
+                    parameter_default_digests: vec![],
                     captures: vec![],
                     registers: vec![outer_callback, inner_callback.clone(), ValueType::Unit],
                     return_type: ValueType::Unit,
@@ -2153,6 +2204,8 @@ mod tests {
                 Function {
                     name: "return_callback".to_owned(),
                     parameters: vec![],
+                    parameter_names: vec![],
+                    parameter_default_digests: vec![],
                     captures: vec![],
                     registers: vec![inner_callback],
                     return_type: ValueType::Function {
@@ -2173,6 +2226,8 @@ mod tests {
                 Function {
                     name: "identity_handle".to_owned(),
                     parameters: vec![0],
+                    parameter_names: vec!["_arg0".to_owned()],
+                    parameter_default_digests: vec![None],
                     captures: vec![],
                     registers: vec![ValueType::SubAgent],
                     return_type: ValueType::SubAgent,
@@ -2290,6 +2345,8 @@ mod tests {
                 Function {
                     name: "main".to_owned(),
                     parameters: vec![],
+                    parameter_names: vec![],
+                    parameter_default_digests: vec![],
                     captures: vec![],
                     registers: vec![
                         ValueType::Future(Box::new(ValueType::Int)),
@@ -2326,6 +2383,8 @@ mod tests {
                 Function {
                     name: "worker".to_owned(),
                     parameters: vec![],
+                    parameter_names: vec![],
+                    parameter_default_digests: vec![],
                     captures: vec![],
                     registers: vec![ValueType::Int],
                     return_type: ValueType::Int,
@@ -2365,7 +2424,7 @@ mod tests {
         );
         assert_eq!(
             verify(double_await).unwrap_err().message,
-            "Future or Task register is not live"
+            "affine register is not live"
         );
 
         let mut wrong_scope = async_module();
@@ -2393,6 +2452,8 @@ mod tests {
             functions: vec![Function {
                 name: "main".to_owned(),
                 parameters: vec![0],
+                parameter_names: vec!["_arg0".to_owned()],
+                parameter_default_digests: vec![None],
                 captures: vec![],
                 registers: vec![
                     ValueType::Future(Box::new(ValueType::Int)),
@@ -2442,6 +2503,8 @@ mod tests {
                 Function {
                     name: "main".to_owned(),
                     parameters: vec![],
+                    parameter_names: vec![],
+                    parameter_default_digests: vec![],
                     captures: vec![],
                     registers: vec![
                         ValueType::Bool,
@@ -2492,6 +2555,8 @@ mod tests {
                 Function {
                     name: "worker".to_owned(),
                     parameters: vec![],
+                    parameter_names: vec![],
+                    parameter_default_digests: vec![],
                     captures: vec![],
                     registers: vec![ValueType::Int],
                     return_type: ValueType::Int,
@@ -2523,6 +2588,8 @@ mod tests {
                 Function {
                     name: "main".to_owned(),
                     parameters: vec![],
+                    parameter_names: vec![],
+                    parameter_default_digests: vec![],
                     captures: vec![],
                     registers: vec![
                         ValueType::Future(Box::new(ValueType::Int)),
@@ -2580,6 +2647,8 @@ mod tests {
                 Function {
                     name: "worker".to_owned(),
                     parameters: vec![],
+                    parameter_names: vec![],
+                    parameter_default_digests: vec![],
                     captures: vec![],
                     registers: vec![ValueType::Int],
                     return_type: ValueType::Int,
@@ -2613,6 +2682,8 @@ mod tests {
             functions: vec![Function {
                 name: "main".to_owned(),
                 parameters: vec![],
+                parameter_names: vec![],
+                parameter_default_digests: vec![],
                 captures: vec![],
                 registers: vec![ValueType::Bool, ValueType::Unit],
                 return_type: ValueType::Unit,
@@ -2662,6 +2733,8 @@ mod tests {
             functions: vec![Function {
                 name: "main".to_owned(),
                 parameters: vec![],
+                parameter_names: vec![],
+                parameter_default_digests: vec![],
                 captures: vec![],
                 registers: vec![
                     ValueType::Bool,
@@ -2811,6 +2884,8 @@ mod tests {
         scoped_return.functions.push(Function {
             name: "scoped".to_owned(),
             parameters: vec![],
+            parameter_names: vec![],
+            parameter_default_digests: vec![],
             captures: vec![],
             registers: vec![
                 ValueType::Future(Box::new(ValueType::Int)),
@@ -2847,6 +2922,8 @@ mod tests {
         captured_task.functions.push(Function {
             name: "consume_task".to_owned(),
             parameters: vec![0],
+            parameter_names: vec!["_arg0".to_owned()],
+            parameter_default_digests: vec![None],
             captures: vec![],
             registers: vec![ValueType::Task(Box::new(ValueType::Int)), ValueType::Int],
             return_type: ValueType::Int,
@@ -2892,6 +2969,8 @@ mod tests {
         future_parameter.functions.push(Function {
             name: "future_parameter".to_owned(),
             parameters: vec![0],
+            parameter_names: vec!["_arg0".to_owned()],
+            parameter_default_digests: vec![None],
             captures: vec![],
             registers: vec![ValueType::Future(Box::new(ValueType::Int)), ValueType::Unit],
             return_type: ValueType::Unit,
@@ -2983,6 +3062,8 @@ mod tests {
         let function = Function {
             name: "main".to_owned(),
             parameters: vec![],
+            parameter_names: vec![],
+            parameter_default_digests: vec![],
             captures: vec![],
             registers: vec![
                 ValueType::Workspace,
@@ -3083,6 +3164,8 @@ mod tests {
                 functions: vec![Function {
                     name: "main".to_owned(),
                     parameters: vec![],
+                    parameter_names: vec![],
+                    parameter_default_digests: vec![],
                     captures: vec![],
                     registers,
                     return_type: ValueType::Unit,
@@ -3199,6 +3282,8 @@ mod tests {
             functions: vec![Function {
                 name: "main".to_owned(),
                 parameters: vec![],
+                parameter_names: vec![],
+                parameter_default_digests: vec![],
                 captures: vec![],
                 registers: vec![ValueType::Result(
                     Box::new(ValueType::Workspace),
@@ -3222,6 +3307,8 @@ mod tests {
             source: 0,
         }];
         invalid_shape.functions[0].parameters = vec![0];
+        invalid_shape.functions[0].parameter_names = vec!["_arg0".into()];
+        invalid_shape.functions[0].parameter_default_digests = vec![None];
         assert_eq!(
             verify(invalid_shape).unwrap_err().message,
             "to_unknown source cannot be Function, Future, Task, or Never"

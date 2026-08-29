@@ -7,6 +7,9 @@ license.workspace = true
 
 [dependencies]
 allen-bytecode = { path = "../allen-bytecode" }
+base64 = "0.22"
+serde = "1.0"
+serde_json = "1.0"
 
 [lints]
 workspace = true

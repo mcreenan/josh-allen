@@ -1,0 +1,8 @@
+newtype Count = Int
+
+export fn main() returns Int {
+  match decode<(Count, Option<String>)>(b"[7,{\"tag\":\"Some\",\"value\":\"ok\"}]") {
+    Ok(value) => value[0].value
+    Err(_) => fail("decode fixture failed")
+  }
+}

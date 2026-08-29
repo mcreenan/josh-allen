@@ -122,8 +122,20 @@ pub fn lex_with_limits(source: &SourceFile, limits: SyntaxLimits) -> Lexed {
 #[derive(Clone, Copy, Debug)]
 enum Mode {
     Normal,
-    TemplateSegment { opener: usize },
-    Interpolation { opener: usize, brace_depth: usize },
+    TemplateSegment {
+        opener: usize,
+        delimiter: TemplateDelimiter,
+    },
+    Interpolation {
+        opener: usize,
+        brace_depth: usize,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TemplateDelimiter {
+    Backtick,
+    Multiline,
 }
 
 struct Lexer<'a> {
@@ -159,14 +171,19 @@ impl<'a> Lexer<'a> {
         while !self.terminated && self.offset < self.text.len() {
             match self.modes.last().copied().unwrap_or(Mode::Normal) {
                 Mode::Normal | Mode::Interpolation { .. } => self.lex_normal(),
-                Mode::TemplateSegment { .. } => self.lex_template_segment(),
+                Mode::TemplateSegment { delimiter, .. } => self.lex_template_segment(delimiter),
             }
         }
 
         if !self.terminated {
             match self.modes.last().copied().unwrap_or(Mode::Normal) {
-                Mode::TemplateSegment { opener } => {
-                    self.diagnostic("S0004", "unterminated template literal", opener, opener + 1);
+                Mode::TemplateSegment { opener, delimiter } => {
+                    let end = opener
+                        + match delimiter {
+                            TemplateDelimiter::Backtick => 1,
+                            TemplateDelimiter::Multiline => 3,
+                        };
+                    self.diagnostic("S0004", "unterminated template literal", opener, end);
                 }
                 Mode::Interpolation { opener, .. } => {
                     self.diagnostic(
@@ -217,8 +234,15 @@ impl<'a> Lexer<'a> {
             self.lex_block_comment();
             return;
         }
+        if self.lex_raw_string(start) {
+            return;
+        }
         if rest.starts_with("b\"") {
             self.lex_quoted(start, true);
+            return;
+        }
+        if rest.starts_with("\"\"\"") {
+            self.lex_multiline_start(start);
             return;
         }
         if rest.starts_with('"') {
@@ -240,12 +264,20 @@ impl<'a> Lexer<'a> {
         }
         if rest.starts_with('`') {
             self.offset += 1;
-            if self.push_mode(Mode::TemplateSegment { opener: start }, start) {
+            if self.push_mode(
+                Mode::TemplateSegment {
+                    opener: start,
+                    delimiter: TemplateDelimiter::Backtick,
+                },
+                start,
+            ) {
                 self.token(SyntaxKind::Backtick, start, self.offset);
             }
             return;
         }
-        if rest.as_bytes()[0].is_ascii_digit() {
+        if rest.as_bytes()[0].is_ascii_digit()
+            || (rest.starts_with('_') && rest.as_bytes().get(1).is_some_and(u8::is_ascii_digit))
+        {
             self.lex_number();
             return;
         }
@@ -267,13 +299,101 @@ impl<'a> Lexer<'a> {
         self.error("S0001", "unexpected character", start, self.offset);
     }
 
-    fn lex_template_segment(&mut self) {
+    fn lex_multiline_start(&mut self, start: usize) {
+        self.offset += 3;
+        if !matches!(self.text.as_bytes().get(self.offset), Some(b'\n' | b'\r')) {
+            self.error(
+                "S0002",
+                "multiline string opening delimiter must be followed by a line break",
+                start,
+                self.offset,
+            );
+            return;
+        }
+        if self.push_mode(
+            Mode::TemplateSegment {
+                opener: start,
+                delimiter: TemplateDelimiter::Multiline,
+            },
+            start,
+        ) {
+            self.token(SyntaxKind::MultilineStringDelimiter, start, self.offset);
+        }
+    }
+
+    fn lex_raw_string(&mut self, start: usize) -> bool {
+        let rest = &self.text[start..];
+        if !rest.starts_with('r') {
+            return false;
+        }
+        let mut quote = 1usize;
+        while rest.as_bytes().get(quote) == Some(&b'#') {
+            quote += 1;
+        }
+        if rest.as_bytes().get(quote) != Some(&b'\"') {
+            return false;
+        }
+        let hashes = quote - 1;
+        self.offset = start + quote + 1;
+        if hashes > 16 {
+            self.error(
+                "S0002",
+                "raw string delimiter supports at most 16 hashes",
+                start,
+                self.offset,
+            );
+            return true;
+        }
+        while self.offset < self.text.len() {
+            if self.text[self.offset..].starts_with('\"') {
+                let close_end = self.offset + 1 + hashes;
+                if self
+                    .text
+                    .as_bytes()
+                    .get(self.offset + 1..close_end)
+                    .is_some_and(|suffix| suffix.iter().all(|byte| *byte == b'#'))
+                {
+                    self.offset = close_end;
+                    self.token(SyntaxKind::StringLiteral, start, self.offset);
+                    return true;
+                }
+            }
+            self.offset += self.text[self.offset..]
+                .chars()
+                .next()
+                .expect("in-bounds UTF-8 character")
+                .len_utf8();
+        }
+        let delimiter = format!("\"{}", "#".repeat(hashes));
+        let message = format!("unterminated raw string literal; expected closing {delimiter}");
+        self.diagnostic_message("S0004", message, start, start + quote + 1);
+        self.token(SyntaxKind::ErrorToken, start, self.offset);
+        true
+    }
+
+    fn lex_template_segment(&mut self, delimiter: TemplateDelimiter) {
         let start = self.offset;
         let rest = &self.text[start..];
-        if rest.starts_with('`') {
-            self.offset += 1;
+        let closing = match delimiter {
+            TemplateDelimiter::Backtick => rest.starts_with('`'),
+            TemplateDelimiter::Multiline => {
+                rest.starts_with("\"\"\"") && self.multiline_delimiter_starts_line(start)
+            }
+        };
+        if closing {
+            self.offset += match delimiter {
+                TemplateDelimiter::Backtick => 1,
+                TemplateDelimiter::Multiline => 3,
+            };
             self.modes.pop();
-            self.token(SyntaxKind::Backtick, start, self.offset);
+            self.token(
+                match delimiter {
+                    TemplateDelimiter::Backtick => SyntaxKind::Backtick,
+                    TemplateDelimiter::Multiline => SyntaxKind::MultilineStringDelimiter,
+                },
+                start,
+                self.offset,
+            );
             return;
         }
         if rest.starts_with("${") {
@@ -302,7 +422,7 @@ impl<'a> Lexer<'a> {
         }
 
         let character = rest.chars().next().expect("template mode has source text");
-        if character.is_control() {
+        if delimiter == TemplateDelimiter::Backtick && character.is_control() {
             self.offset += character.len_utf8();
             self.error(
                 "S0002",
@@ -316,17 +436,32 @@ impl<'a> Lexer<'a> {
         let mut end = start;
         while end < self.text.len() {
             let segment = &self.text[end..];
-            if segment.starts_with('`') || segment.starts_with("${") || segment.starts_with('\\') {
+            if (delimiter == TemplateDelimiter::Backtick && segment.starts_with('`'))
+                || (delimiter == TemplateDelimiter::Multiline
+                    && segment.starts_with("\"\"\"")
+                    && self.multiline_delimiter_starts_line(end))
+                || segment.starts_with("${")
+                || segment.starts_with('\\')
+            {
                 break;
             }
             let character = segment.chars().next().expect("in-bounds UTF-8 character");
-            if character.is_control() {
+            if delimiter == TemplateDelimiter::Backtick && character.is_control() {
                 break;
             }
             end += character.len_utf8();
         }
         self.offset = end;
         self.token(SyntaxKind::TemplateTextScalar, start, end);
+    }
+
+    fn multiline_delimiter_starts_line(&self, offset: usize) -> bool {
+        let line_start = self.text[..offset]
+            .rfind(['\n', '\r'])
+            .map_or(0, |newline| newline + 1);
+        self.text[line_start..offset]
+            .bytes()
+            .all(|byte| matches!(byte, b' ' | b'\t'))
     }
 
     fn lex_line_comment(&mut self) {
@@ -464,25 +599,23 @@ impl<'a> Lexer<'a> {
 
     fn lex_number(&mut self) {
         let start = self.offset;
-        self.consume_digits();
+        let (_, integer_valid) = self.consume_digits();
         let mut float = false;
-        let mut malformed = false;
+        let mut malformed = !integer_valid;
         if self.text[self.offset..].starts_with('.')
             && self.text.as_bytes().get(self.offset + 1) != Some(&b'.')
         {
             float = true;
             self.offset += 1;
-            let fraction_start = self.offset;
-            self.consume_digits();
-            malformed = fraction_start == self.offset;
+            let (has_fraction_digits, fraction_valid) = self.consume_digits();
+            malformed |= !has_fraction_digits || !fraction_valid;
             if matches!(self.text.as_bytes().get(self.offset), Some(b'e' | b'E')) {
                 self.offset += 1;
                 if matches!(self.text.as_bytes().get(self.offset), Some(b'+' | b'-')) {
                     self.offset += 1;
                 }
-                let exponent_start = self.offset;
-                self.consume_digits();
-                malformed |= exponent_start == self.offset;
+                let (has_exponent_digits, exponent_valid) = self.consume_digits();
+                malformed |= !has_exponent_digits || !exponent_valid;
             }
         }
         if malformed {
@@ -494,15 +627,31 @@ impl<'a> Lexer<'a> {
         }
     }
 
-    fn consume_digits(&mut self) {
-        while self
-            .text
-            .as_bytes()
-            .get(self.offset)
-            .is_some_and(u8::is_ascii_digit)
-        {
-            self.offset += 1;
+    /// Consume one decimal digit sequence, allowing separators only between
+    /// two digits. The caller owns whether at least one digit is required.
+    fn consume_digits(&mut self) -> (bool, bool) {
+        let mut has_digits = false;
+        let mut previous_was_digit = false;
+        let mut valid = true;
+        while let Some(byte) = self.text.as_bytes().get(self.offset) {
+            if byte.is_ascii_digit() {
+                self.offset += 1;
+                has_digits = true;
+                previous_was_digit = true;
+            } else if *byte == b'_' {
+                valid &= previous_was_digit
+                    && self
+                        .text
+                        .as_bytes()
+                        .get(self.offset + 1)
+                        .is_some_and(u8::is_ascii_digit);
+                self.offset += 1;
+                previous_was_digit = false;
+            } else {
+                break;
+            }
         }
+        (has_digits, valid)
     }
 
     fn lex_identifier(&mut self) {
@@ -620,6 +769,25 @@ impl<'a> Lexer<'a> {
         true
     }
 
+    fn diagnostic_message(
+        &mut self,
+        code: &'static str,
+        message: String,
+        start: usize,
+        end: usize,
+    ) -> bool {
+        if self.diagnostics.len() >= self.limits.diagnostics {
+            return false;
+        }
+        let span = self
+            .source
+            .span(start, end)
+            .expect("lexer spans derive from source");
+        self.diagnostics
+            .push(SyntaxDiagnostic::new(code, message, span));
+        true
+    }
+
     fn limit_at(&mut self, start: usize) {
         if self.terminated {
             return;
@@ -672,8 +840,13 @@ const OPERATORS: &[(&str, SyntaxKind)] = &[
     ("*=", SyntaxKind::StarEq),
     ("/=", SyntaxKind::SlashEq),
     ("%=", SyntaxKind::PercentEq),
+    ("..=", SyntaxKind::DotDotEq),
     ("..", SyntaxKind::DotDot),
+    ("?.", SyntaxKind::QuestionDot),
+    ("|>", SyntaxKind::PipeGt),
+    ("??", SyntaxKind::QuestionQuestion),
     ("||", SyntaxKind::PipePipe),
+    ("|", SyntaxKind::Pipe),
     ("&&", SyntaxKind::AmpAmp),
     ("==", SyntaxKind::EqEq),
     ("!=", SyntaxKind::NotEq),
@@ -717,8 +890,12 @@ fn keyword_kind(text: &str) -> Option<SyntaxKind> {
         "record" => SyntaxKind::KwRecord,
         "enum" => SyntaxKind::KwEnum,
         "type" => SyntaxKind::KwType,
+        "newtype" => SyntaxKind::KwNewtype,
+        "const" => SyntaxKind::KwConst,
+        "where" => SyntaxKind::KwWhere,
         "async" => SyntaxKind::KwAsync,
         "fn" => SyntaxKind::KwFn,
+        "test" => SyntaxKind::KwTest,
         "returns" => SyntaxKind::KwReturns,
         "effects" => SyntaxKind::KwEffects,
         "let" => SyntaxKind::KwLet,
@@ -777,8 +954,28 @@ fn invalid_escape_len(text: &str) -> usize {
 /// The latter is valid only immediately after unary `-`; that contextual check
 /// belongs to parsing/lowering rather than the context-neutral lexer.
 pub(crate) fn int_magnitude_supported(text: &str) -> bool {
-    let digits = text.trim_start_matches('0');
-    digits.len() < 19 || (digits.len() == 19 && digits <= "9223372036854775808")
+    let digits = decimal_digits(text);
+    let digits = &digits[digits
+        .iter()
+        .position(|byte| *byte != b'0')
+        .unwrap_or(digits.len())..];
+    digits.len() < 19 || (digits.len() == 19 && digits <= b"9223372036854775808")
+}
+
+/// Return the decimal digits from a syntactically valid numeric token.
+pub(crate) fn decimal_digits(text: &str) -> Vec<u8> {
+    text.bytes().filter(|byte| *byte != b'_').collect()
+}
+
+/// Whether a syntactically valid integer token spells the magnitude of
+/// `Int::MIN` after numeric separators are removed.
+pub(crate) fn is_minimum_int_magnitude(text: &str) -> bool {
+    let digits = decimal_digits(text);
+    let normalized = &digits[digits
+        .iter()
+        .position(|byte| *byte != b'0')
+        .unwrap_or(digits.len())..];
+    normalized == b"9223372036854775808"
 }
 
 #[cfg(test)]
@@ -839,6 +1036,76 @@ mod tests {
     }
 
     #[test]
+    fn raw_strings_preserve_escapes_and_require_matching_hashes() {
+        let hashes = "#".repeat(16);
+        let input = source(&format!(
+            "r\"${{name}}\\\\d+\" r{hashes}\"quoted \\\" content\"{hashes}tail"
+        ));
+        let lexed = lex(&input);
+        assert_eq!(
+            lexed
+                .tokens()
+                .iter()
+                .filter(|token| token.kind() != SyntaxKind::Whitespace)
+                .map(|token| token.kind())
+                .collect::<Vec<_>>(),
+            vec![
+                SyntaxKind::StringLiteral,
+                SyntaxKind::StringLiteral,
+                SyntaxKind::Ident,
+                SyntaxKind::Eof
+            ]
+        );
+        assert!(lexed.diagnostics().is_empty());
+
+        let unterminated = lex(&source("r##\"value\"#"));
+        assert_eq!(unterminated.diagnostics()[0].code(), "S0004");
+        assert!(unterminated.diagnostics()[0].message().contains("\"##"));
+
+        let too_many = lex(&source(&format!(
+            "r{}\"value\"{}",
+            "#".repeat(17),
+            "#".repeat(17)
+        )));
+        assert_eq!(too_many.diagnostics()[0].code(), "S0002");
+        assert!(too_many.diagnostics()[0].message().contains("at most 16"));
+    }
+
+    #[test]
+    fn multiline_templates_keep_newlines_and_interpolation_boundaries() {
+        let input = source("\"\"\"\n  hello ${name}\n  \"\"\"");
+        let lexed = lex(&input);
+        assert_eq!(
+            lexed
+                .tokens()
+                .iter()
+                .map(|token| token.kind())
+                .collect::<Vec<_>>(),
+            vec![
+                SyntaxKind::MultilineStringDelimiter,
+                SyntaxKind::TemplateTextScalar,
+                SyntaxKind::TemplateExprStart,
+                SyntaxKind::Ident,
+                SyntaxKind::RBrace,
+                SyntaxKind::TemplateTextScalar,
+                SyntaxKind::MultilineStringDelimiter,
+                SyntaxKind::Eof,
+            ]
+        );
+        assert!(lexed.diagnostics().is_empty());
+
+        for invalid in ["\"\"\"no line break\"\"\"", "\"\"\"\nvalue \"\"\""] {
+            let lexed = lex(&source(invalid));
+            assert!(
+                lexed
+                    .diagnostics()
+                    .iter()
+                    .any(|diagnostic| diagnostic.code() == "S0002" || diagnostic.code() == "S0004")
+            );
+        }
+    }
+
+    #[test]
     #[should_panic(expected = "LexToken used with a different SourceFile")]
     fn token_text_rejects_an_equal_shaped_different_source() {
         let original = SourceFile::new(SourceFileId::new(1), "same").unwrap();
@@ -877,6 +1144,66 @@ mod tests {
             vec![SyntaxKind::IntLiteral, SyntaxKind::Eof]
         );
         assert!(!int_magnitude_supported("9223372036854775809"));
+    }
+
+    #[test]
+    fn numeric_separators_must_be_between_decimal_digits() {
+        let valid =
+            source("485_273 12_345.67_89e+1_0 9_223_372_036_854_775_808 0_9223372036854775808");
+        let lexed = lex(&valid);
+        assert!(lexed.diagnostics().is_empty(), "{:?}", lexed.diagnostics());
+        assert_eq!(
+            kinds(valid.text()),
+            vec![
+                SyntaxKind::IntLiteral,
+                SyntaxKind::Whitespace,
+                SyntaxKind::FloatLiteral,
+                SyntaxKind::Whitespace,
+                SyntaxKind::IntLiteral,
+                SyntaxKind::Whitespace,
+                SyntaxKind::IntLiteral,
+                SyntaxKind::Eof,
+            ]
+        );
+        assert_eq!(lexed.tokens()[0].text(&valid), "485_273");
+        assert_eq!(lexed.tokens()[2].text(&valid), "12_345.67_89e+1_0");
+        assert!(int_magnitude_supported("9_223_372_036_854_775_808"));
+        assert!(!int_magnitude_supported("9_223_372_036_854_775_809"));
+        assert!(is_minimum_int_magnitude("0_9223372036854775808"));
+        assert!(!int_magnitude_supported("0_9223372036854775809"));
+
+        for (text, error_start) in [
+            ("_1", 0),
+            ("-_1", 1),
+            ("1_", 0),
+            ("-1_", 1),
+            ("1__0", 0),
+            ("1_.0", 0),
+            ("1._0", 0),
+            ("1.0_", 0),
+            ("1.0_e2", 0),
+            ("1.0e_2", 0),
+            ("1.0e+_2", 0),
+            ("1.0e-_2", 0),
+            ("1.0e2_", 0),
+        ] {
+            let source = source(text);
+            let lexed = lex(&source);
+            assert_eq!(lexed.diagnostics().len(), 1, "{text}");
+            assert_eq!(lexed.diagnostics()[0].code(), "S0003", "{text}");
+            assert_eq!(
+                lexed.diagnostics()[0].message(),
+                "malformed number",
+                "{text}"
+            );
+            let error = lexed
+                .tokens()
+                .iter()
+                .find(|token| token.kind() == SyntaxKind::ErrorToken)
+                .expect("malformed number token");
+            assert_eq!(error.text(&source), &text[error_start..], "{text}");
+            assert_eq!(lexed.round_trip(&source), source.text(), "{text}");
+        }
     }
 
     #[test]

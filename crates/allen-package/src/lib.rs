@@ -11,6 +11,7 @@ pub use error::{PackageError, PackageErrorCode};
 pub use loader::{
     LoadLimits, LoadedPackage, PackageId, ResolvedDependency, ResolvedPackage, SourceModule,
     generate_lock, load_verified_package, load_verified_root_package,
+    load_verified_root_package_with_resources,
 };
 pub use lockfile::{
     LOCK_VERSION, LockedDependency, LockedPackage, Lockfile, canonical_lockfile, parse_lockfile,

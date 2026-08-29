@@ -8,6 +8,9 @@ publish = false
 
 [dependencies]
 allen-bytecode = { path = "../allen-bytecode" }
+allen-exec = { path = "../allen-exec" }
+allen-runtime = { path = "../allen-runtime" }
+allen-schema = { path = "../allen-schema" }
 allen-vm = { path = "../allen-vm" }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"

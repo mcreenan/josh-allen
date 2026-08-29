@@ -1,10 +1,10 @@
 {
   "profile": "host-0.1",
   "status": "conforming",
-  "completed_on": "2026-08-16",
-  "language_versions": ["0.1.0"],
-  "bytecode_versions": [13],
-  "protocol_versions": ["josh/1.4"],
+  "completed_on": "2026-08-29",
+  "language_versions": ["0.1.1"],
+  "bytecode_versions": [19],
+  "protocol_versions": ["josh/1.5"],
   "required": {
     "agent_and_typed_response_operations": "conforming",
     "canary_secret_scans": "conforming",
@@ -19,12 +19,13 @@
     "structured_sub_agents": "conforming",
     "worker_process_isolation": "conforming_with_platform_exclusions",
     "closed_result_provider_operations": "conforming",
-    "error_registry": "conforming"
+    "error_registry": "conforming",
+    "exec_replay_binding": "conforming_no_live_fallback"
   },
   "runner": {
     "command": "scripts/host-conformance.sh",
     "evidence_directory": "${TMPDIR:-/tmp}/allen-host-conformance",
-    "status": "passed_on_macos_arm64_2026-08-16"
+    "status": "passed_on_macos_arm64_2026-08-29"
   },
   "isolation": {
     "claim": "ALLEN enforces language-level capability checks and is not described as an operating-system sandbox.",

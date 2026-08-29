@@ -12,6 +12,15 @@ Add mutation semantics to effect contracts. Add typed effect receipts and
 stable idempotency keys. Define safe behavior for retries, transactions,
 compensation, and ambiguous results.
 
+### Current deployment boundary
+
+This proposal is not current runtime behavior. Cron or Orca may schedule
+independent bounded `josh run` executions, but a scheduler must not
+automatically retry a headless-tool mutation, or a future exec mutation, after
+an ambiguous result. PD-4 receipts and the idempotency, retry, and reconciliation
+rules in this proposal must be accepted first. Until then, external
+reconciliation or an explicit operator decision must precede another mutation.
+
 ## Problem
 
 A provider can commit a mutation and lose its response. The caller sees no

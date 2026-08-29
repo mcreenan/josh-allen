@@ -45,18 +45,22 @@ Source 0..179
           Whitespace 60..61 " "
           Eq 61..62 "="
           Expression 62..71
-            Disjunction 62..71
-              Conjunction 62..71
-                Equality 62..71
-                  Comparison 62..71
-                    Addition 62..71
-                      Multiplication 62..71
-                        Unary 62..71
-                          Postfix 62..71
-                            Primary 62..71
-                              Whitespace 62..63 " "
-                              Error 63..71
-                                ErrorToken 63..71 "\"oops\\q\""
+            Range 62..71
+              Coalescing 62..71
+                Pipeline 62..71
+                  Composition 62..71
+                    Disjunction 62..71
+                      Conjunction 62..71
+                        Equality 62..71
+                          Comparison 62..71
+                            Addition 62..71
+                              Multiplication 62..71
+                                Unary 62..71
+                                  Postfix 62..71
+                                    Primary 62..71
+                                      Whitespace 62..63 " "
+                                      Error 63..71
+                                        ErrorToken 63..71 "\"oops\\q\""
           Semi 71..72 ";"
         Whitespace 72..73 " "
         RBrace 73..74 "}"
@@ -81,46 +85,54 @@ Source 0..179
           Whitespace 104..105 " "
           KwReturn 105..111 "return"
           Expression 111..125
-            Disjunction 111..125
-              Conjunction 111..125
-                Equality 111..125
-                  Comparison 111..125
-                    Addition 111..125
-                      Multiplication 111..125
-                        Unary 111..125
-                          Postfix 111..125
-                            Primary 111..125
-                              TemplateLiteral 111..125
-                                Whitespace 111..112 " "
-                                Backtick 112..113 "`"
-                                TemplateSegment 113..116
-                                  TemplateTextOrEscape 113..116
-                                    TemplateTextScalar 113..116 "ok "
-                                TemplateInterpolation 116..124
-                                  TemplateExprStart 116..118 "${"
-                                  Expression 118..123
-                                    Disjunction 118..123
-                                      Conjunction 118..123
-                                        Equality 118..123
-                                          Comparison 118..123
-                                            Addition 118..123
-                                              Multiplication 118..119
-                                                Unary 118..119
-                                                  Postfix 118..119
-                                                    Primary 118..119
-                                                      Literal 118..119
-                                                        IntLiteral 118..119 "1"
-                                              Whitespace 119..120 " "
-                                              Plus 120..121 "+"
-                                              Multiplication 121..123
-                                                Unary 121..123
-                                                  Postfix 121..123
-                                                    Primary 121..123
-                                                      Literal 121..123
-                                                        Whitespace 121..122 " "
-                                                        IntLiteral 122..123 "2"
-                                  RBrace 123..124 "}"
-                                Backtick 124..125 "`"
+            Range 111..125
+              Coalescing 111..125
+                Pipeline 111..125
+                  Composition 111..125
+                    Disjunction 111..125
+                      Conjunction 111..125
+                        Equality 111..125
+                          Comparison 111..125
+                            Addition 111..125
+                              Multiplication 111..125
+                                Unary 111..125
+                                  Postfix 111..125
+                                    Primary 111..125
+                                      TemplateLiteral 111..125
+                                        Whitespace 111..112 " "
+                                        Backtick 112..113 "`"
+                                        TemplateSegment 113..116
+                                          TemplateTextOrEscape 113..116
+                                            TemplateTextScalar 113..116 "ok "
+                                        TemplateInterpolation 116..124
+                                          TemplateExprStart 116..118 "${"
+                                          Expression 118..123
+                                            Range 118..123
+                                              Coalescing 118..123
+                                                Pipeline 118..123
+                                                  Composition 118..123
+                                                    Disjunction 118..123
+                                                      Conjunction 118..123
+                                                        Equality 118..123
+                                                          Comparison 118..123
+                                                            Addition 118..123
+                                                              Multiplication 118..119
+                                                                Unary 118..119
+                                                                  Postfix 118..119
+                                                                    Primary 118..119
+                                                                      Literal 118..119
+                                                                        IntLiteral 118..119 "1"
+                                                              Whitespace 119..120 " "
+                                                              Plus 120..121 "+"
+                                                              Multiplication 121..123
+                                                                Unary 121..123
+                                                                  Postfix 121..123
+                                                                    Primary 121..123
+                                                                      Literal 121..123
+                                                                        Whitespace 121..122 " "
+                                                                        IntLiteral 122..123 "2"
+                                          RBrace 123..124 "}"
+                                        Backtick 124..125 "`"
           Semi 125..126 ";"
         Whitespace 126..127 " "
         RBrace 127..128 "}"

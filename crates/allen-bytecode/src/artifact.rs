@@ -4,20 +4,22 @@ use std::fmt;
 use std::rc::Rc;
 
 use crate::{
-    BoolBinaryOp, CapabilityOperation, CheckedIntOperation, CompareOp, Constant, Conversion,
-    EnumPayloadType, EnumSwitchArm, EnumType, EnumVariant, Function, FunctionId, Instruction,
-    MAX_VALUE_NESTING, Module, NumericBinaryOp, RecordField, Register, SafeCollectionOperation,
-    StringOperation, ToolVerificationContract, ValueType, VerifiedModule, canonical_float_bits,
-    verify_internal,
+    BoolBinaryOp, CapabilityOperation, CheckedIntOperation, CollectionOperation, CompareOp,
+    Constant, Conversion, EntryValidatorPathSegment, EntryValidatorSite, EnumPayloadType,
+    EnumSwitchArm, EnumType, EnumVariant, Function, FunctionId, Instruction, ListCombinator,
+    ListLiteralItem, MAX_VALUE_NESTING, MapLiteralItem, Module, NumericBinaryOp, RecordField,
+    RecordInvariantDefinition, Register, SafeCollectionOperation, StandardOperation,
+    StringOperation, TemplateHole, TemplateMarker, TemplateResource, ToolVerificationContract,
+    ValidatorExpr, ValueType, VerifiedModule, canonical_float_bits, verify_internal,
 };
 
 pub const ARTIFACT_MAGIC: [u8; 8] = *b"ALLEN\0\x01\0";
 /// Current artifact-format identifier stored in the binary header.
-pub const BYTECODE_VERSION: u16 = 13;
+pub const BYTECODE_VERSION: u16 = 19;
 pub const HEADER_SIZE: usize = 64;
 
-const MANDATORY_SECTION_COUNT: usize = 9;
-const MAX_SECTION_COUNT: usize = 10;
+const MANDATORY_SECTION_COUNT: usize = 11;
+const MAX_SECTION_COUNT: usize = 12;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u16)]
@@ -31,7 +33,9 @@ enum SectionId {
     Schemas = 7,
     Imports = 8,
     ManifestContracts = 9,
-    Debug = 10,
+    Templates = 10,
+    Validators = 11,
+    Debug = 12,
 }
 
 impl SectionId {
@@ -45,6 +49,8 @@ impl SectionId {
         Self::Schemas,
         Self::Imports,
         Self::ManifestContracts,
+        Self::Templates,
+        Self::Validators,
     ];
 
     fn from_raw(raw: u16) -> Option<Self> {
@@ -58,7 +64,9 @@ impl SectionId {
             7 => Some(Self::Schemas),
             8 => Some(Self::Imports),
             9 => Some(Self::ManifestContracts),
-            10 => Some(Self::Debug),
+            10 => Some(Self::Templates),
+            11 => Some(Self::Validators),
+            12 => Some(Self::Debug),
             _ => None,
         }
     }
@@ -114,7 +122,7 @@ impl Default for ArtifactMetadata {
     fn default() -> Self {
         Self {
             bytecode_version: BYTECODE_VERSION,
-            language_version: SemanticVersion::new(0, 1, 0),
+            language_version: SemanticVersion::new(0, 1, 1),
             compiler_version: SemanticVersion::new(0, 1, 0),
             target_profile: TargetProfile::Portable,
         }
@@ -157,6 +165,155 @@ pub fn canonical_value_type_bytes(value_type: &ValueType) -> Vec<u8> {
 #[must_use]
 pub fn compute_strict_schema_digest(schema: &StrictSchema) -> [u8; 32] {
     sha256(&canonical_value_type_bytes(&schema.value_type))
+}
+
+/// Compute the effective directional entry contract digest, including every
+/// nominal invariant reachable through that direction's explicit sites.
+#[must_use]
+pub fn compute_entry_contract_digest(
+    schema: &StrictSchema,
+    sites: &[EntryValidatorSite],
+    definitions: &[RecordInvariantDefinition],
+) -> [u8; 32] {
+    let mut output = b"ALLEN-ENTRY-CONTRACT\0\x01".to_vec();
+    let ty = canonical_value_type_bytes(&schema.value_type);
+    put_canonical_count(&mut output, ty.len());
+    output.extend_from_slice(&ty);
+    put_canonical_count(&mut output, sites.len());
+    for site in sites {
+        put_canonical_count(&mut output, site.path.len());
+        encode_canonical_validator_path(&mut output, &site.path);
+        let Some(definition) = definitions.get(site.invariant as usize) else {
+            output.push(0xff);
+            continue;
+        };
+        put_canonical_text(&mut output, &definition.identity);
+        put_canonical_count(&mut output, definition.fields.len());
+        for field in &definition.fields {
+            put_canonical_text(&mut output, &field.name);
+            encode_canonical_value_type(&mut output, &field.value_type);
+        }
+        encode_canonical_validator_expr(&mut output, &definition.predicate);
+    }
+    sha256(&output)
+}
+
+/// Build the exhaustive structural-record provenance table for one entry
+/// direction from compiler-owned nominal validator sites.
+///
+/// # Errors
+///
+/// Returns an artifact error when a site does not name a valid invariant or
+/// the schema contains an invalid enum reference.
+pub fn compute_entry_record_provenance(
+    schema: &StrictSchema,
+    enums: &[EnumType],
+    sites: &[EntryValidatorSite],
+    definitions: &[RecordInvariantDefinition],
+) -> Result<Vec<EntryRecordProvenance>, ArtifactError> {
+    let mut paths = Vec::new();
+    collect_record_paths(
+        &schema.value_type,
+        enums,
+        &mut Vec::new(),
+        &mut BTreeSet::new(),
+        &mut paths,
+    )?;
+    paths
+        .into_iter()
+        .map(|path| {
+            let identity = sites
+                .iter()
+                .find(|site| site.path == path)
+                .map(|site| {
+                    definitions
+                        .get(site.invariant as usize)
+                        .map(|definition| definition.identity.clone())
+                        .ok_or_else(|| noncanonical("entry validator invariant is out of range"))
+                })
+                .transpose()?;
+            Ok(EntryRecordProvenance { path, identity })
+        })
+        .collect()
+}
+
+fn encode_canonical_validator_path(output: &mut Vec<u8>, path: &[EntryValidatorPathSegment]) {
+    for segment in path {
+        match segment {
+            EntryValidatorPathSegment::Field(index) => {
+                output.push(0);
+                output.extend_from_slice(&index.to_le_bytes());
+            }
+            EntryValidatorPathSegment::ListElement => output.push(1),
+            EntryValidatorPathSegment::MapKey => output.push(2),
+            EntryValidatorPathSegment::MapValue => output.push(3),
+            EntryValidatorPathSegment::TupleElement(index) => {
+                output.push(4);
+                output.extend_from_slice(&index.to_le_bytes());
+            }
+            EntryValidatorPathSegment::OptionSome => output.push(5),
+            EntryValidatorPathSegment::ResultOk => output.push(6),
+            EntryValidatorPathSegment::ResultError => output.push(7),
+            EntryValidatorPathSegment::EnumPayload { variant, element } => {
+                output.push(8);
+                output.extend_from_slice(&variant.to_le_bytes());
+                output.extend_from_slice(&element.to_le_bytes());
+            }
+            EntryValidatorPathSegment::NewtypeValue => output.push(9),
+        }
+    }
+}
+
+fn encode_canonical_validator_expr(output: &mut Vec<u8>, expression: &ValidatorExpr) {
+    match expression {
+        ValidatorExpr::Bool(value) => {
+            output.push(0);
+            output.push(u8::from(*value));
+        }
+        ValidatorExpr::Field { field, value_type } => {
+            output.push(1);
+            output.extend_from_slice(&field.to_le_bytes());
+            encode_canonical_value_type(output, value_type);
+        }
+        ValidatorExpr::Not(value) => {
+            output.push(2);
+            encode_canonical_validator_expr(output, value);
+        }
+        ValidatorExpr::BoolBinary {
+            operation,
+            left,
+            right,
+        } => {
+            output.push(3);
+            output.push(match operation {
+                BoolBinaryOp::And => 0,
+                BoolBinaryOp::Or => 1,
+            });
+            encode_canonical_validator_expr(output, left);
+            encode_canonical_validator_expr(output, right);
+        }
+        ValidatorExpr::Compare {
+            operation,
+            left,
+            right,
+        } => {
+            output.push(4);
+            output.push(compare_op_tag(*operation));
+            encode_canonical_validator_expr(output, left);
+            encode_canonical_validator_expr(output, right);
+        }
+    }
+}
+
+const fn compare_op_tag(operation: CompareOp) -> u8 {
+    match operation {
+        CompareOp::Equal => 0,
+        CompareOp::NotEqual => 1,
+        CompareOp::Less => 2,
+        CompareOp::LessEqual => 3,
+        CompareOp::Greater => 4,
+        CompareOp::GreaterEqual => 5,
+    }
 }
 
 fn encode_canonical_value_type(output: &mut Vec<u8>, value_type: &ValueType) {
@@ -230,6 +387,16 @@ fn encode_canonical_value_type(output: &mut Vec<u8>, value_type: &ValueType) {
         ValueType::Workspace => output.push(18),
         ValueType::ExternalFsAccess => output.push(19),
         ValueType::SubAgent => output.push(20),
+        ValueType::Newtype { name, underlying } => {
+            output.push(21);
+            put_canonical_text(output, name);
+            encode_canonical_value_type(output, underlying);
+        }
+        ValueType::Range => output.push(22),
+        ValueType::Sequence(value) => {
+            output.push(23);
+            encode_canonical_value_type(output, value);
+        }
     }
 }
 
@@ -241,12 +408,24 @@ fn put_canonical_text(output: &mut Vec<u8>, text: &str) {
     put_canonical_count(output, text.len());
     output.extend_from_slice(text.as_bytes());
 }
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub struct EntryRecordProvenance {
+    pub path: Vec<EntryValidatorPathSegment>,
+    pub identity: Option<String>,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct EntryContract {
     pub name: String,
     pub function: FunctionId,
     pub input_schema: u32,
     pub output_schema: u32,
+    pub input_validators: Vec<EntryValidatorSite>,
+    pub output_validators: Vec<EntryValidatorSite>,
+    pub input_record_provenance: Vec<EntryRecordProvenance>,
+    pub output_record_provenance: Vec<EntryRecordProvenance>,
+    pub input_contract_digest: [u8; 32],
+    pub output_contract_digest: [u8; 32],
 }
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ImportContract {
@@ -266,6 +445,8 @@ pub struct ManifestContract {
     pub optional_capabilities: Vec<String>,
     pub limits: Vec<(String, u64)>,
     pub https_origins: Vec<String>,
+    pub exec_commands: Vec<String>,
+    pub exec_environment: Vec<String>,
     pub required_tools: Vec<ToolContract>,
     pub tool_contract_digest: [u8; 32],
 }
@@ -293,6 +474,8 @@ pub struct Artifact {
     pub entries: Vec<EntryContract>,
     pub imports: Vec<ImportContract>,
     pub manifest: Option<ManifestContract>,
+    pub templates: Vec<TemplateResource>,
+    pub record_invariants: Vec<RecordInvariantDefinition>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -343,6 +526,14 @@ impl Artifact {
             SectionSummary {
                 name: "manifest_contracts",
                 entries: usize::from(self.manifest.is_some()),
+            },
+            SectionSummary {
+                name: "templates",
+                entries: self.templates.len(),
+            },
+            SectionSummary {
+                name: "record_invariants",
+                entries: self.record_invariants.len(),
             },
         ];
         summaries.push(SectionSummary {
@@ -436,6 +627,7 @@ pub struct VerifiedArtifact {
     imports: Vec<ImportContract>,
     manifest: Option<ManifestContract>,
     content_digest: [u8; 32],
+    record_invariants: Vec<RecordInvariantDefinition>,
 }
 
 impl VerifiedArtifact {
@@ -470,6 +662,16 @@ impl VerifiedArtifact {
     }
 
     #[must_use]
+    pub fn templates(&self) -> &[TemplateResource] {
+        self.module.templates()
+    }
+
+    #[must_use]
+    pub fn record_invariants(&self) -> &[RecordInvariantDefinition] {
+        &self.record_invariants
+    }
+
+    #[must_use]
     pub const fn manifest(&self) -> Option<&ManifestContract> {
         self.manifest.as_ref()
     }
@@ -489,6 +691,8 @@ impl VerifiedArtifact {
             entries: self.entries.clone(),
             imports: self.imports.clone(),
             manifest: self.manifest.clone(),
+            templates: self.module.templates().to_vec(),
+            record_invariants: self.record_invariants.clone(),
         };
         artifact.section_summaries()
     }
@@ -889,7 +1093,20 @@ fn validate_encode_model(artifact: &Artifact, limits: &DecodeLimits) -> Result<(
     {
         return Err(noncanonical("HTTPS origin is not canonical"));
     }
+    if manifest
+        .exec_commands
+        .iter()
+        .any(|pattern| !is_canonical_exec_pattern(pattern))
+        || manifest
+            .exec_environment
+            .iter()
+            .any(|name| !is_canonical_exec_environment_name(name))
+    {
+        return Err(noncanonical("exec contract is not canonical"));
+    }
     validate_tools(artifact, manifest)?;
+    validate_templates(artifact)?;
+    validate_record_invariants(artifact)?;
     for function in &artifact.module.functions {
         for instruction in &function.code {
             let Some(output) = crate::typed_response_output_type(function, instruction) else {
@@ -957,6 +1174,14 @@ fn validate_encode_model(artifact: &Artifact, limits: &DecodeLimits) -> Result<(
                     .windows(2)
                     .all(|pair| pair[0] < pair[1])
                 || !manifest
+                    .exec_commands
+                    .windows(2)
+                    .all(|pair| pair[0] < pair[1])
+                || !manifest
+                    .exec_environment
+                    .windows(2)
+                    .all(|pair| pair[0] < pair[1])
+                || !manifest
                     .required_tools
                     .windows(2)
                     .all(|pair| pair[0].name < pair[1].name)
@@ -969,6 +1194,7 @@ fn validate_encode_model(artifact: &Artifact, limits: &DecodeLimits) -> Result<(
         || artifact.module.effect_sets.len() > limits.table_entries
         || artifact.module.functions.len() > limits.functions
         || artifact.module.async_functions.len() > limits.functions
+        || artifact.templates.len() > limits.table_entries
     {
         return Err(limit("artifact model table"));
     }
@@ -1017,6 +1243,512 @@ fn validate_encode_model(artifact: &Artifact, limits: &DecodeLimits) -> Result<(
     Ok(())
 }
 
+fn validate_record_invariants(artifact: &Artifact) -> Result<(), ArtifactError> {
+    if !artifact
+        .record_invariants
+        .windows(2)
+        .all(|pair| pair[0].identity.as_bytes() < pair[1].identity.as_bytes())
+    {
+        return Err(noncanonical(
+            "record invariant identities must be unique and sorted",
+        ));
+    }
+    for definition in &artifact.record_invariants {
+        if !is_record_invariant_identity(&definition.identity) {
+            return Err(noncanonical("record invariant identity is invalid"));
+        }
+        if !definition
+            .fields
+            .windows(2)
+            .all(|pair| pair[0].name < pair[1].name)
+        {
+            return Err(noncanonical("record invariant definition is not canonical"));
+        }
+        let mut nodes = 0usize;
+        let result = validator_expr_type(&definition.predicate, definition, &mut nodes)?;
+        if result != ValueType::Bool || nodes > 256 {
+            return Err(noncanonical(
+                "record invariant predicate must be bounded Bool",
+            ));
+        }
+    }
+    for entry in &artifact.entries {
+        let input = &artifact.schemas[entry.input_schema as usize];
+        let output = &artifact.schemas[entry.output_schema as usize];
+        validate_entry_validator_sites(
+            &entry.input_validators,
+            &entry.input_record_provenance,
+            input,
+            artifact,
+            entry.input_contract_digest,
+        )?;
+        validate_entry_validator_sites(
+            &entry.output_validators,
+            &entry.output_record_provenance,
+            output,
+            artifact,
+            entry.output_contract_digest,
+        )?;
+    }
+    Ok(())
+}
+
+fn validator_expr_type(
+    expression: &ValidatorExpr,
+    definition: &RecordInvariantDefinition,
+    nodes: &mut usize,
+) -> Result<ValueType, ArtifactError> {
+    *nodes = nodes.saturating_add(1);
+    if *nodes > 256 {
+        return Err(noncanonical("record invariant exceeds 256 AST nodes"));
+    }
+    Ok(match expression {
+        ValidatorExpr::Bool(_) => ValueType::Bool,
+        ValidatorExpr::Field { field, value_type } => {
+            let expected = definition
+                .fields
+                .get(*field as usize)
+                .ok_or_else(|| noncanonical("validator field is out of range"))?;
+            if &expected.value_type != value_type || !validator_scalar_type(value_type) {
+                return Err(noncanonical("validator field type is invalid"));
+            }
+            value_type.clone()
+        }
+        ValidatorExpr::Not(value) => {
+            if validator_expr_type(value, definition, nodes)? != ValueType::Bool {
+                return Err(noncanonical("validator not operand is not Bool"));
+            }
+            ValueType::Bool
+        }
+        ValidatorExpr::BoolBinary { left, right, .. } => {
+            if validator_expr_type(left, definition, nodes)? != ValueType::Bool
+                || validator_expr_type(right, definition, nodes)? != ValueType::Bool
+            {
+                return Err(noncanonical("validator boolean operands are not Bool"));
+            }
+            ValueType::Bool
+        }
+        ValidatorExpr::Compare {
+            operation,
+            left,
+            right,
+        } => {
+            let left = validator_expr_type(left, definition, nodes)?;
+            let right = validator_expr_type(right, definition, nodes)?;
+            if left != right
+                || !validator_scalar_type(&left)
+                || matches!(
+                    operation,
+                    CompareOp::Less
+                        | CompareOp::LessEqual
+                        | CompareOp::Greater
+                        | CompareOp::GreaterEqual
+                ) && !left.is_ordered()
+            {
+                return Err(noncanonical("validator comparison types are invalid"));
+            }
+            ValueType::Bool
+        }
+    })
+}
+
+fn validator_scalar_type(value_type: &ValueType) -> bool {
+    match value_type {
+        ValueType::Bool
+        | ValueType::Int
+        | ValueType::Float
+        | ValueType::String
+        | ValueType::Bytes => true,
+        ValueType::Newtype { underlying, .. } => validator_scalar_type(underlying),
+        _ => false,
+    }
+}
+
+fn validate_entry_validator_sites(
+    sites: &[EntryValidatorSite],
+    provenance: &[EntryRecordProvenance],
+    schema: &StrictSchema,
+    artifact: &Artifact,
+    digest: [u8; 32],
+) -> Result<(), ArtifactError> {
+    let mut record_paths = Vec::new();
+    collect_record_paths(
+        &schema.value_type,
+        &artifact.module.enum_types,
+        &mut Vec::new(),
+        &mut BTreeSet::new(),
+        &mut record_paths,
+    )?;
+    if provenance
+        .iter()
+        .map(|record| &record.path)
+        .ne(record_paths.iter())
+    {
+        return Err(noncanonical(
+            "entry record provenance must cover every structural record path",
+        ));
+    }
+    let mut required_sites = Vec::new();
+    for record in provenance {
+        if let Some(identity) = &record.identity {
+            if !is_record_invariant_identity(identity) {
+                return Err(noncanonical("entry record provenance identity is invalid"));
+            }
+            if let Ok(invariant) = artifact
+                .record_invariants
+                .binary_search_by(|definition| definition.identity.cmp(identity))
+            {
+                required_sites.push(EntryValidatorSite {
+                    path: record.path.clone(),
+                    invariant: u32::try_from(invariant)
+                        .map_err(|_| limit("record invariant table"))?,
+                });
+            }
+        }
+    }
+    if !sites.windows(2).all(|pair| pair[0] < pair[1]) {
+        return Err(noncanonical(
+            "entry validator sites must be unique and sorted",
+        ));
+    }
+    if sites != required_sites {
+        return Err(noncanonical(
+            "entry validator sites do not match nominal boundary provenance",
+        ));
+    }
+    for site in sites {
+        let definition = artifact
+            .record_invariants
+            .get(site.invariant as usize)
+            .ok_or_else(|| noncanonical("entry validator invariant is out of range"))?;
+        let target =
+            validator_path_type(&schema.value_type, &site.path, &artifact.module.enum_types)?;
+        if target != ValueType::Record(definition.fields.clone()) {
+            return Err(noncanonical("entry validator path target type is invalid"));
+        }
+    }
+    if digest != compute_entry_contract_digest(schema, sites, &artifact.record_invariants) {
+        return Err(noncanonical("entry validator contract digest is invalid"));
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_lines)]
+fn collect_record_paths(
+    value_type: &ValueType,
+    enums: &[EnumType],
+    path: &mut Vec<EntryValidatorPathSegment>,
+    active_enums: &mut BTreeSet<u32>,
+    paths: &mut Vec<Vec<EntryValidatorPathSegment>>,
+) -> Result<(), ArtifactError> {
+    match value_type {
+        ValueType::Record(fields) => {
+            paths.push(path.clone());
+            for (index, field) in fields.iter().enumerate() {
+                path.push(EntryValidatorPathSegment::Field(
+                    u32::try_from(index).map_err(|_| limit("record field table"))?,
+                ));
+                collect_record_paths(&field.value_type, enums, path, active_enums, paths)?;
+                path.pop();
+            }
+        }
+        ValueType::List(value) => {
+            path.push(EntryValidatorPathSegment::ListElement);
+            collect_record_paths(value, enums, path, active_enums, paths)?;
+            path.pop();
+        }
+        ValueType::Map(key, value) => {
+            for (segment, child) in [
+                (EntryValidatorPathSegment::MapKey, key.as_ref()),
+                (EntryValidatorPathSegment::MapValue, value.as_ref()),
+            ] {
+                path.push(segment);
+                collect_record_paths(child, enums, path, active_enums, paths)?;
+                path.pop();
+            }
+        }
+        ValueType::Tuple(values) => {
+            for (index, value) in values.iter().enumerate() {
+                path.push(EntryValidatorPathSegment::TupleElement(
+                    u32::try_from(index).map_err(|_| limit("tuple element table"))?,
+                ));
+                collect_record_paths(value, enums, path, active_enums, paths)?;
+                path.pop();
+            }
+        }
+        ValueType::Enum(id) => {
+            if !active_enums.insert(*id) {
+                return Err(noncanonical("recursive enum types are not supported"));
+            }
+            let enumeration = enums
+                .get(*id as usize)
+                .ok_or_else(|| noncanonical("entry schema enum is out of range"))?;
+            for (variant_index, variant) in enumeration.variants.iter().enumerate() {
+                match &variant.payload {
+                    EnumPayloadType::Unit => {}
+                    EnumPayloadType::Tuple(values) => {
+                        for (element, value) in values.iter().enumerate() {
+                            path.push(EntryValidatorPathSegment::EnumPayload {
+                                variant: u32::try_from(variant_index)
+                                    .map_err(|_| limit("enum variant table"))?,
+                                element: u32::try_from(element)
+                                    .map_err(|_| limit("enum payload table"))?,
+                            });
+                            collect_record_paths(value, enums, path, active_enums, paths)?;
+                            path.pop();
+                        }
+                    }
+                    EnumPayloadType::Record(fields) => {
+                        for (element, field) in fields.iter().enumerate() {
+                            path.push(EntryValidatorPathSegment::EnumPayload {
+                                variant: u32::try_from(variant_index)
+                                    .map_err(|_| limit("enum variant table"))?,
+                                element: u32::try_from(element)
+                                    .map_err(|_| limit("enum payload table"))?,
+                            });
+                            collect_record_paths(
+                                &field.value_type,
+                                enums,
+                                path,
+                                active_enums,
+                                paths,
+                            )?;
+                            path.pop();
+                        }
+                    }
+                }
+            }
+            active_enums.remove(id);
+        }
+        ValueType::Newtype { underlying, .. } => {
+            path.push(EntryValidatorPathSegment::NewtypeValue);
+            collect_record_paths(underlying, enums, path, active_enums, paths)?;
+            path.pop();
+        }
+        ValueType::Option(value) => {
+            path.push(EntryValidatorPathSegment::OptionSome);
+            collect_record_paths(value, enums, path, active_enums, paths)?;
+            path.pop();
+        }
+        ValueType::Result(ok, error) => {
+            for (segment, child) in [
+                (EntryValidatorPathSegment::ResultOk, ok.as_ref()),
+                (EntryValidatorPathSegment::ResultError, error.as_ref()),
+            ] {
+                path.push(segment);
+                collect_record_paths(child, enums, path, active_enums, paths)?;
+                path.pop();
+            }
+        }
+        ValueType::Future(value) | ValueType::Task(value) | ValueType::Sequence(value) => {
+            collect_record_paths(value, enums, path, active_enums, paths)?;
+        }
+        ValueType::Function {
+            parameters,
+            return_type,
+            ..
+        } => {
+            for value in parameters {
+                collect_record_paths(value, enums, path, active_enums, paths)?;
+            }
+            collect_record_paths(return_type, enums, path, active_enums, paths)?;
+        }
+        ValueType::Int
+        | ValueType::Bool
+        | ValueType::Float
+        | ValueType::String
+        | ValueType::Bytes
+        | ValueType::Unit
+        | ValueType::Never
+        | ValueType::Workspace
+        | ValueType::ExternalFsAccess
+        | ValueType::SubAgent
+        | ValueType::Range
+        | ValueType::Unknown => {}
+    }
+    Ok(())
+}
+
+#[allow(clippy::match_same_arms)]
+fn validator_path_type(
+    root: &ValueType,
+    path: &[EntryValidatorPathSegment],
+    enums: &[EnumType],
+) -> Result<ValueType, ArtifactError> {
+    let mut current = root.clone();
+    for segment in path {
+        current = match (segment, current) {
+            (EntryValidatorPathSegment::Field(index), ValueType::Record(fields)) => fields
+                .get(*index as usize)
+                .map(|field| field.value_type.clone()),
+            (EntryValidatorPathSegment::ListElement, ValueType::List(value)) => Some(*value),
+            (EntryValidatorPathSegment::MapKey, ValueType::Map(key, _)) => Some(*key),
+            (EntryValidatorPathSegment::MapValue, ValueType::Map(_, value)) => Some(*value),
+            (EntryValidatorPathSegment::TupleElement(index), ValueType::Tuple(values)) => {
+                values.get(*index as usize).cloned()
+            }
+            (EntryValidatorPathSegment::OptionSome, ValueType::Option(value)) => Some(*value),
+            (EntryValidatorPathSegment::ResultOk, ValueType::Result(value, _)) => Some(*value),
+            (EntryValidatorPathSegment::ResultError, ValueType::Result(_, value)) => Some(*value),
+            (EntryValidatorPathSegment::NewtypeValue, ValueType::Newtype { underlying, .. }) => {
+                Some(*underlying)
+            }
+            (EntryValidatorPathSegment::EnumPayload { variant, element }, ValueType::Enum(id)) => {
+                enums
+                    .get(id as usize)
+                    .and_then(|enumeration| enumeration.variants.get(*variant as usize))
+                    .and_then(|variant| match &variant.payload {
+                        EnumPayloadType::Unit => None,
+                        EnumPayloadType::Tuple(values) => values.get(*element as usize).cloned(),
+                        EnumPayloadType::Record(fields) => fields
+                            .get(*element as usize)
+                            .map(|field| field.value_type.clone()),
+                    })
+            }
+            _ => None,
+        }
+        .ok_or_else(|| noncanonical("entry validator path is invalid"))?;
+    }
+    Ok(current)
+}
+
+fn validate_templates(artifact: &Artifact) -> Result<(), ArtifactError> {
+    if !artifact
+        .templates
+        .windows(2)
+        .all(|pair| pair[0].identity.as_bytes() < pair[1].identity.as_bytes())
+    {
+        return Err(noncanonical(
+            "template identities must be unique and sorted by UTF-8 bytes",
+        ));
+    }
+    for template in &artifact.templates {
+        if !is_template_identity(&template.identity) || template.content.len() > 1_048_576 {
+            return Err(noncanonical("template identity or content is invalid"));
+        }
+        if !template
+            .holes
+            .windows(2)
+            .all(|pair| pair[0].name.as_bytes() < pair[1].name.as_bytes())
+            || template.holes.iter().any(|hole| {
+                !is_source_identifier(&hole.name)
+                    || template_scalar_name(&hole.value_type).is_none()
+            })
+        {
+            return Err(noncanonical(
+                "template hole signatures must be valid, unique, and sorted",
+            ));
+        }
+        if template.digest != compute_template_digest(&template.content, &template.holes) {
+            return Err(noncanonical(
+                "template content digest does not match its signature",
+            ));
+        }
+        let derived_markers = derive_template_markers(&template.content, &template.holes)?;
+        if derived_markers != template.markers {
+            return Err(noncanonical(
+                "template marker table does not match the content grammar",
+            ));
+        }
+        let bytes = template.content.as_bytes();
+        let mut previous_end = 0usize;
+        let mut used = vec![false; template.holes.len()];
+        for marker in &template.markers {
+            let start = usize::try_from(marker.start)
+                .map_err(|_| noncanonical("template marker range is invalid"))?;
+            let end = usize::try_from(marker.end)
+                .map_err(|_| noncanonical("template marker range is invalid"))?;
+            let hole = template
+                .holes
+                .get(marker.hole as usize)
+                .ok_or_else(|| noncanonical("template marker hole is out of range"))?;
+            let expected = format!("{{{{{}}}}}", hole.name);
+            if start < previous_end
+                || start >= end
+                || end > bytes.len()
+                || &bytes[start..end] != expected.as_bytes()
+            {
+                return Err(noncanonical(
+                    "template markers must be ordered whole markers",
+                ));
+            }
+            used[marker.hole as usize] = true;
+            previous_end = end;
+        }
+        if used.iter().any(|used| !used) {
+            return Err(noncanonical("every template hole must have a marker"));
+        }
+    }
+    Ok(())
+}
+
+fn derive_template_markers(
+    content: &str,
+    holes: &[TemplateHole],
+) -> Result<Vec<TemplateMarker>, ArtifactError> {
+    let bytes = content.as_bytes();
+    let mut markers = Vec::new();
+    let mut used = vec![false; holes.len()];
+    let mut cursor = 0usize;
+    while cursor + 1 < bytes.len() {
+        match (bytes[cursor], bytes[cursor + 1]) {
+            (b'{', b'{') => {
+                let marker_start = cursor;
+                let hole_start = cursor + 2;
+                cursor = hole_start;
+                let mut hole_end = None;
+                while cursor + 1 < bytes.len() {
+                    match (bytes[cursor], bytes[cursor + 1]) {
+                        (b'}', b'}') => {
+                            hole_end = Some(cursor);
+                            break;
+                        }
+                        (b'{', b'{') => {
+                            return Err(noncanonical(
+                                "template contains a nested or malformed marker",
+                            ));
+                        }
+                        _ => cursor += 1,
+                    }
+                }
+                let hole_end = hole_end
+                    .ok_or_else(|| noncanonical("template contains an unmatched '{{' marker"))?;
+                let hole = &content[hole_start..hole_end];
+                if !is_source_identifier(hole) {
+                    return Err(noncanonical("template marker is not a source identifier"));
+                }
+                let index = holes
+                    .binary_search_by(|candidate| candidate.name.as_str().cmp(hole))
+                    .map_err(|_| noncanonical("template content uses an undeclared hole"))?;
+                used[index] = true;
+                let marker_end = hole_end + 2;
+                markers.push(TemplateMarker {
+                    start: u32::try_from(marker_start).map_err(|_| limit("template marker"))?,
+                    end: u32::try_from(marker_end).map_err(|_| limit("template marker"))?,
+                    hole: u32::try_from(index).map_err(|_| limit("template marker"))?,
+                });
+                cursor = marker_end;
+            }
+            (b'}', b'}') => return Err(noncanonical("template contains an unmatched '}}' marker")),
+            _ => cursor += 1,
+        }
+    }
+    if used.iter().any(|used| !used) {
+        return Err(noncanonical("template declares an unused hole"));
+    }
+    Ok(markers)
+}
+
+fn is_template_identity(value: &str) -> bool {
+    let Some(rest) = value.strip_prefix("pkg://") else {
+        return false;
+    };
+    let Some((package, name)) = rest.split_once("/templates/") else {
+        return false;
+    };
+    is_package_identity(package) && is_source_identifier(name) && !name.contains('/')
+}
+
 fn boundary_forbidden(value: &ValueType) -> bool {
     !crate::is_strict_schema_type(value)
 }
@@ -1051,7 +1783,44 @@ fn is_supported_capability(capability: &str) -> bool {
             | "sub_agent.run"
             | "sub_agent.message"
             | "sub_agent.ask"
+            | "exec.run"
     )
+}
+
+fn is_canonical_exec_pattern(pattern: &str) -> bool {
+    if pattern.is_empty()
+        || pattern.starts_with(' ')
+        || pattern.ends_with(' ')
+        || pattern.contains("  ")
+    {
+        return false;
+    }
+    let tokens = pattern.split(' ').collect::<Vec<_>>();
+    let Some(executable) = tokens.first() else {
+        return false;
+    };
+    if executable.contains('/') || *executable == "*" {
+        return false;
+    }
+    tokens.iter().enumerate().all(|(index, token)| {
+        let final_wildcard = *token == "*" && index + 1 == tokens.len();
+        !token.is_empty()
+            && (!token.contains('*') || final_wildcard)
+            && (final_wildcard
+                || !token
+                    .bytes()
+                    .any(|byte| !byte.is_ascii_graphic() || matches!(byte, b'\'' | b'"' | b'\\')))
+    })
+}
+
+fn is_canonical_exec_environment_name(name: &str) -> bool {
+    let mut bytes = name.bytes();
+    bytes.next().is_some_and(|first| {
+        (first.is_ascii_alphabetic() || first == b'_')
+            && bytes.all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+            && !name.eq_ignore_ascii_case("LC_ALL")
+            && !name.eq_ignore_ascii_case("TZ")
+    })
 }
 
 fn validate_tools(artifact: &Artifact, manifest: &ManifestContract) -> Result<(), ArtifactError> {
@@ -1263,6 +2032,35 @@ pub fn compute_tool_contract_digest(tools: &[ToolContract]) -> [u8; 32] {
     }
     json.push_str("]}");
     sha256(json.as_bytes())
+}
+
+/// Compute the package-loader-compatible digest for one template resource.
+#[must_use]
+pub fn compute_template_digest(content: &str, holes: &[TemplateHole]) -> [u8; 32] {
+    let mut bytes = b"allen-template-resource-v1\0".to_vec();
+    template_hash_item(&mut bytes, b"content", content.as_bytes());
+    for hole in holes {
+        let scalar = template_scalar_name(&hole.value_type).unwrap_or("");
+        template_hash_item(&mut bytes, hole.name.as_bytes(), scalar.as_bytes());
+    }
+    sha256(&bytes)
+}
+
+fn template_hash_item(output: &mut Vec<u8>, name: &[u8], value: &[u8]) {
+    output.extend_from_slice(&u64::try_from(name.len()).unwrap_or(u64::MAX).to_be_bytes());
+    output.extend_from_slice(name);
+    output.extend_from_slice(&u64::try_from(value.len()).unwrap_or(u64::MAX).to_be_bytes());
+    output.extend_from_slice(value);
+}
+
+fn template_scalar_name(value_type: &ValueType) -> Option<&'static str> {
+    match value_type {
+        ValueType::Bool => Some("Bool"),
+        ValueType::Int => Some("Int"),
+        ValueType::Float => Some("Float"),
+        ValueType::String => Some("String"),
+        _ => None,
+    }
 }
 
 fn lower_hex(bytes: &[u8]) -> String {
@@ -1571,6 +2369,19 @@ fn validate_contract_graph(
             "executable package symbol is not reachable from the manifest package",
         ));
     }
+    for template in &artifact.templates {
+        let Some(rest) = template.identity.strip_prefix("pkg://") else {
+            return Err(noncanonical("template identity is malformed"));
+        };
+        let Some((identity, _)) = rest.split_once("/templates/") else {
+            return Err(noncanonical("template identity is malformed"));
+        };
+        if !reachable.contains(identity) {
+            return Err(noncanonical(
+                "template resource package is not reachable from the manifest package",
+            ));
+        }
+    }
     for enum_type in &artifact.module.enum_types {
         if artifact_uses_agent_transcript(artifact)
             && enum_type == &crate::transcript_part_enum_type()
@@ -1656,6 +2467,19 @@ fn is_type_identifier(value: &str) -> bool {
     })
 }
 
+fn is_record_invariant_identity(value: &str) -> bool {
+    let Some((module, type_name)) = value.rsplit_once("::") else {
+        return false;
+    };
+    let Some(rest) = module.strip_prefix("pkg://") else {
+        return false;
+    };
+    let Some((package, path)) = rest.split_once('/') else {
+        return false;
+    };
+    is_type_identifier(type_name) && is_package_identity(package) && is_package_module_path(path)
+}
+
 fn instruction_operand_count(instruction: &Instruction) -> Result<usize, ArtifactError> {
     let count = match instruction {
         Instruction::ListNew { elements, .. }
@@ -1682,6 +2506,10 @@ fn instruction_operand_count(instruction: &Instruction) -> Result<usize, Artifac
             arguments: elements,
             ..
         }
+        | Instruction::StandardCall {
+            arguments: elements,
+            ..
+        }
         | Instruction::CapabilityInspect {
             arguments: elements,
             ..
@@ -1693,11 +2521,45 @@ fn instruction_operand_count(instruction: &Instruction) -> Result<usize, Artifac
         | Instruction::CheckedIntCall {
             arguments: elements,
             ..
+        }
+        | Instruction::CollectionCall {
+            arguments: elements,
+            ..
+        }
+        | Instruction::TemplateRender {
+            arguments: elements,
+            ..
         } => elements.len(),
+        Instruction::ListLiteralBuild { items, .. } => items.len(),
+        Instruction::ListCombinator { initial, .. } => 4 + usize::from(initial.is_some()),
+        Instruction::TryOption { .. }
+        | Instruction::RangeNew { .. }
+        | Instruction::SequenceMap { .. }
+        | Instruction::SequenceFilter { .. }
+        | Instruction::SequenceFind { .. }
+        | Instruction::SequenceAny { .. }
+        | Instruction::SequenceAll { .. }
+        | Instruction::SequenceTake { .. } => 2,
+        Instruction::RangeStart { .. }
+        | Instruction::RangeEnd { .. }
+        | Instruction::RangeInclusive { .. }
+        | Instruction::SequenceFromList { .. }
+        | Instruction::SequenceToList { .. } => 1,
         Instruction::MapNew { entries, .. } => entries
             .len()
             .checked_mul(2)
             .ok_or_else(|| limit("operands"))?,
+        Instruction::MapLiteralBuild { items, .. } => {
+            items.iter().try_fold(0usize, |count, item| {
+                count
+                    .checked_add(match item {
+                        MapLiteralItem::Entry { .. } => 2,
+                        MapLiteralItem::Spread(_) => 1,
+                    })
+                    .ok_or_else(|| limit("operands"))
+            })?
+        }
+        Instruction::SliceGet { .. } | Instruction::SequenceFold { .. } => 3,
         Instruction::RecordNew { fields, .. } => fields
             .len()
             .checked_mul(2)
@@ -1732,7 +2594,9 @@ fn artifact_value_types(artifact: &Artifact) -> Vec<&ValueType> {
         types.extend(&function.registers);
         types.push(&function.return_type);
         for instruction in &function.code {
-            if let Instruction::Narrow { target, .. } = instruction {
+            if let Instruction::Narrow { target, .. } | Instruction::Decode { target, .. } =
+                instruction
+            {
                 types.push(target);
             }
         }
@@ -1833,6 +2697,14 @@ fn encode_sections(
                 string_ids,
             )?,
         },
+        Section {
+            id: SectionId::Templates,
+            payload: encode_templates(&artifact.templates, string_ids)?,
+        },
+        Section {
+            id: SectionId::Validators,
+            payload: encode_validators(&artifact.record_invariants, string_ids, type_ids)?,
+        },
     ]);
     if let Some(debug) = &artifact.debug {
         sections.push(Section {
@@ -1900,7 +2772,7 @@ pub fn decode(bytes: &[u8], limits: &DecodeLimits) -> Result<DecodedArtifact, Ar
     if !(MANDATORY_SECTION_COUNT..=MAX_SECTION_COUNT).contains(&section_count) {
         return Err(ArtifactError::new(
             ArtifactErrorCode::MissingSection,
-            "artifact must contain nine mandatory sections and optional debug",
+            "artifact must contain eleven mandatory sections and optional debug",
         ));
     }
     if header.u32()? != 0 {
@@ -1935,9 +2807,12 @@ pub fn decode(bytes: &[u8], limits: &DecodeLimits) -> Result<DecodedArtifact, Ar
     let (entry, entries) = decode_entries(sections[5].1, &strings, limits, &model_budget)?;
     let schemas = decode_schemas(sections[6].1, &types, limits, &model_budget)?;
     let imports = decode_imports(sections[7].1, &strings, limits, &model_budget)?;
+    let templates = decode_templates(sections[9].1, &strings, limits, &model_budget)?;
+    let record_invariants =
+        decode_validators(sections[10].1, &strings, &types, limits, &model_budget)?;
     let debug = if section_count == MAX_SECTION_COUNT {
         Some(decode_debug(
-            sections[9].1,
+            sections[11].1,
             &strings,
             limits,
             &model_budget,
@@ -1965,6 +2840,8 @@ pub fn decode(bytes: &[u8], limits: &DecodeLimits) -> Result<DecodedArtifact, Ar
         entries,
         imports,
         manifest: Some(manifest),
+        templates,
+        record_invariants,
     };
     validate_string_table(&artifact, &strings)?;
     validate_debug_shape(artifact.debug.as_ref())?;
@@ -2028,6 +2905,8 @@ pub fn decode_and_verify(
         entries,
         imports,
         manifest,
+        templates,
+        record_invariants,
     } = artifact;
     let tool_contracts = manifest
         .as_ref()
@@ -2054,9 +2933,10 @@ pub fn decode_and_verify(
         .transpose()?
         .unwrap_or_default();
     let tool_contracts = manifest.as_ref().map(|_| tool_contracts.as_slice());
-    let module = verify_internal(unverified_module, tool_contracts).map_err(|error| {
-        ArtifactError::new(ArtifactErrorCode::VerificationFailed, error.to_string())
-    })?;
+    let module =
+        verify_internal(unverified_module, tool_contracts, Some(templates)).map_err(|error| {
+            ArtifactError::new(ArtifactErrorCode::VerificationFailed, error.to_string())
+        })?;
     Ok(VerifiedArtifact {
         metadata,
         module,
@@ -2066,6 +2946,7 @@ pub fn decode_and_verify(
         imports,
         manifest,
         content_digest,
+        record_invariants,
     })
 }
 
@@ -2143,7 +3024,9 @@ fn validate_verifier_complexity(
             .iter()
             .try_fold(0_usize, |total, instruction| {
                 let successors = match instruction {
-                    Instruction::Return { .. } | Instruction::Stop { .. } => 0,
+                    Instruction::Return { .. }
+                    | Instruction::Stop { .. }
+                    | Instruction::Fail { .. } => 0,
                     Instruction::BranchBool { .. } => 2,
                     Instruction::SwitchEnum { arms, .. } => arms.len(),
                     _ => 1,
@@ -2246,11 +3129,14 @@ fn collect_strings(artifact: &Artifact) -> Vec<String> {
     }
     for function in &artifact.module.functions {
         strings.insert(function.name.clone());
+        strings.extend(function.parameter_names.iter().cloned());
         for value_type in function.registers.iter().chain([&function.return_type]) {
             collect_type_strings(value_type, &mut strings);
         }
         for instruction in &function.code {
-            if let Instruction::Narrow { target, .. } = instruction {
+            if let Instruction::Narrow { target, .. } | Instruction::Decode { target, .. } =
+                instruction
+            {
                 collect_type_strings(target, &mut strings);
             }
         }
@@ -2263,6 +3149,13 @@ fn collect_strings(artifact: &Artifact) -> Vec<String> {
     }
     for entry in &artifact.entries {
         strings.insert(entry.name.clone());
+        strings.extend(
+            entry
+                .input_record_provenance
+                .iter()
+                .chain(&entry.output_record_provenance)
+                .filter_map(|record| record.identity.clone()),
+        );
     }
     for import in &artifact.imports {
         strings.extend([
@@ -2283,6 +3176,8 @@ fn collect_strings(artifact: &Artifact) -> Vec<String> {
         strings.extend(manifest.optional_capabilities.iter().cloned());
         strings.extend(manifest.limits.iter().map(|(name, _)| name.clone()));
         strings.extend(manifest.https_origins.iter().cloned());
+        strings.extend(manifest.exec_commands.iter().cloned());
+        strings.extend(manifest.exec_environment.iter().cloned());
         for tool in &manifest.required_tools {
             strings.extend([
                 tool.name.clone(),
@@ -2292,7 +3187,32 @@ fn collect_strings(artifact: &Artifact) -> Vec<String> {
             ]);
         }
     }
+    for template in &artifact.templates {
+        strings.insert(template.identity.clone());
+        strings.extend(template.holes.iter().map(|hole| hole.name.clone()));
+    }
+    for definition in &artifact.record_invariants {
+        strings.insert(definition.identity.clone());
+        for field in &definition.fields {
+            strings.insert(field.name.clone());
+            collect_type_strings(&field.value_type, &mut strings);
+        }
+        collect_validator_expr_strings(&definition.predicate, &mut strings);
+    }
     strings.into_iter().collect()
+}
+
+fn collect_validator_expr_strings(expression: &ValidatorExpr, strings: &mut BTreeSet<String>) {
+    match expression {
+        ValidatorExpr::Field { value_type, .. } => collect_type_strings(value_type, strings),
+        ValidatorExpr::Not(value) => collect_validator_expr_strings(value, strings),
+        ValidatorExpr::BoolBinary { left, right, .. }
+        | ValidatorExpr::Compare { left, right, .. } => {
+            collect_validator_expr_strings(left, strings);
+            collect_validator_expr_strings(right, strings);
+        }
+        ValidatorExpr::Bool(_) => {}
+    }
 }
 
 fn collect_types(artifact: &Artifact) -> Vec<ValueType> {
@@ -2312,7 +3232,9 @@ fn collect_types(artifact: &Artifact) -> Vec<ValueType> {
         types.extend(function.registers.iter().cloned());
         types.push(function.return_type.clone());
         for instruction in &function.code {
-            if let Instruction::Narrow { target, .. } = instruction {
+            if let Instruction::Narrow { target, .. } | Instruction::Decode { target, .. } =
+                instruction
+            {
                 types.push(target.clone());
             }
         }
@@ -2323,7 +3245,35 @@ fn collect_types(artifact: &Artifact) -> Vec<ValueType> {
             .iter()
             .map(|schema| schema.value_type.clone()),
     );
+    types.extend(
+        artifact
+            .templates
+            .iter()
+            .flat_map(|template| template.holes.iter().map(|hole| hole.value_type.clone())),
+    );
+    for definition in &artifact.record_invariants {
+        types.extend(
+            definition
+                .fields
+                .iter()
+                .map(|field| field.value_type.clone()),
+        );
+        collect_validator_expr_types(&definition.predicate, &mut types);
+    }
     types
+}
+
+fn collect_validator_expr_types(expression: &ValidatorExpr, types: &mut Vec<ValueType>) {
+    match expression {
+        ValidatorExpr::Field { value_type, .. } => types.push(value_type.clone()),
+        ValidatorExpr::Not(value) => collect_validator_expr_types(value, types),
+        ValidatorExpr::BoolBinary { left, right, .. }
+        | ValidatorExpr::Compare { left, right, .. } => {
+            collect_validator_expr_types(left, types);
+            collect_validator_expr_types(right, types);
+        }
+        ValidatorExpr::Bool(_) => {}
+    }
 }
 
 fn type_key(
@@ -2340,7 +3290,10 @@ fn type_node_count(value_type: &ValueType) -> Result<usize, ArtifactError> {
         ValueType::List(value)
         | ValueType::Option(value)
         | ValueType::Future(value)
-        | ValueType::Task(value) => type_node_count(value)?,
+        | ValueType::Task(value)
+        | ValueType::Newtype {
+            underlying: value, ..
+        } => type_node_count(value)?,
         ValueType::Map(left, right) | ValueType::Result(left, right) => type_node_count(left)?
             .checked_add(type_node_count(right)?)
             .ok_or_else(|| limit("expanded type nodes"))?,
@@ -2378,6 +3331,10 @@ fn type_owned_bytes(value_type: &ValueType) -> Result<usize, ArtifactError> {
         | ValueType::Option(value)
         | ValueType::Future(value)
         | ValueType::Task(value) => type_owned_bytes(value)?,
+        ValueType::Newtype { name, underlying } => name
+            .len()
+            .checked_add(type_owned_bytes(underlying)?)
+            .ok_or_else(|| limit("decoded model bytes"))?,
         ValueType::Map(left, right) | ValueType::Result(left, right) => type_owned_bytes(left)?
             .checked_add(type_owned_bytes(right)?)
             .ok_or_else(|| limit("decoded model bytes"))?,
@@ -2447,7 +3404,12 @@ fn collect_type_strings(value_type: &ValueType, strings: &mut BTreeSet<String>) 
         ValueType::List(value)
         | ValueType::Option(value)
         | ValueType::Future(value)
-        | ValueType::Task(value) => collect_type_strings(value, strings),
+        | ValueType::Task(value)
+        | ValueType::Sequence(value) => collect_type_strings(value, strings),
+        ValueType::Newtype { name, underlying } => {
+            strings.insert(name.clone());
+            collect_type_strings(underlying, strings);
+        }
         ValueType::Map(left, right) | ValueType::Result(left, right) => {
             collect_type_strings(left, strings);
             collect_type_strings(right, strings);
@@ -2484,6 +3446,7 @@ fn collect_type_strings(value_type: &ValueType, strings: &mut BTreeSet<String>) 
         | ValueType::Workspace
         | ValueType::ExternalFsAccess
         | ValueType::SubAgent
+        | ValueType::Range
         | ValueType::Unknown => {}
     }
 }
@@ -2604,6 +3567,28 @@ fn encode_functions(
     for function in functions {
         put_u32(&mut output, string_id(strings, &function.name)?);
         encode_registers(&mut output, &function.parameters)?;
+        put_count(
+            &mut output,
+            function.parameter_names.len(),
+            "function parameter names",
+        )?;
+        for name in &function.parameter_names {
+            put_u32(&mut output, string_id(strings, name)?);
+        }
+        put_count(
+            &mut output,
+            function.parameter_default_digests.len(),
+            "function parameter default digests",
+        )?;
+        for digest in &function.parameter_default_digests {
+            match digest {
+                None => output.push(0),
+                Some(digest) => {
+                    output.push(1);
+                    output.extend_from_slice(digest);
+                }
+            }
+        }
         encode_registers(&mut output, &function.captures)?;
         put_count(
             &mut output,
@@ -2656,8 +3641,143 @@ fn encode_entries(
         put_u32(&mut output, entry.function);
         put_u32(&mut output, entry.input_schema);
         put_u32(&mut output, entry.output_schema);
+        encode_validator_sites(&mut output, &entry.input_validators)?;
+        encode_validator_sites(&mut output, &entry.output_validators)?;
+        encode_record_provenance(&mut output, &entry.input_record_provenance, strings)?;
+        encode_record_provenance(&mut output, &entry.output_record_provenance, strings)?;
+        output.extend_from_slice(&entry.input_contract_digest);
+        output.extend_from_slice(&entry.output_contract_digest);
     }
     Ok(output)
+}
+
+fn encode_record_provenance(
+    output: &mut Vec<u8>,
+    records: &[EntryRecordProvenance],
+    strings: &BTreeMap<&str, u32>,
+) -> Result<(), ArtifactError> {
+    put_count(output, records.len(), "entry record provenance")?;
+    for record in records {
+        encode_validator_path(output, &record.path)?;
+        match &record.identity {
+            Some(identity) => {
+                output.push(1);
+                put_u32(output, string_id(strings, identity)?);
+            }
+            None => output.push(0),
+        }
+    }
+    Ok(())
+}
+
+fn encode_validator_sites(
+    output: &mut Vec<u8>,
+    sites: &[EntryValidatorSite],
+) -> Result<(), ArtifactError> {
+    put_count(output, sites.len(), "entry validator sites")?;
+    for site in sites {
+        put_u32(output, site.invariant);
+        encode_validator_path(output, &site.path)?;
+    }
+    Ok(())
+}
+
+fn encode_validator_path(
+    output: &mut Vec<u8>,
+    path: &[EntryValidatorPathSegment],
+) -> Result<(), ArtifactError> {
+    put_count(output, path.len(), "entry validator path")?;
+    for segment in path {
+        match segment {
+            EntryValidatorPathSegment::Field(index) => {
+                output.push(0);
+                put_u32(output, *index);
+            }
+            EntryValidatorPathSegment::ListElement => output.push(1),
+            EntryValidatorPathSegment::MapKey => output.push(2),
+            EntryValidatorPathSegment::MapValue => output.push(3),
+            EntryValidatorPathSegment::TupleElement(index) => {
+                output.push(4);
+                put_u32(output, *index);
+            }
+            EntryValidatorPathSegment::OptionSome => output.push(5),
+            EntryValidatorPathSegment::ResultOk => output.push(6),
+            EntryValidatorPathSegment::ResultError => output.push(7),
+            EntryValidatorPathSegment::EnumPayload { variant, element } => {
+                output.push(8);
+                put_u32(output, *variant);
+                put_u32(output, *element);
+            }
+            EntryValidatorPathSegment::NewtypeValue => output.push(9),
+        }
+    }
+    Ok(())
+}
+
+fn encode_validators(
+    definitions: &[RecordInvariantDefinition],
+    strings: &BTreeMap<&str, u32>,
+    types: &BTreeMap<Vec<u8>, u32>,
+) -> Result<Vec<u8>, ArtifactError> {
+    let mut output = Vec::new();
+    put_count(&mut output, definitions.len(), "record invariants")?;
+    for definition in definitions {
+        put_u32(&mut output, string_id(strings, &definition.identity)?);
+        put_count(&mut output, definition.fields.len(), "invariant fields")?;
+        for field in &definition.fields {
+            put_u32(&mut output, string_id(strings, &field.name)?);
+            put_u32(&mut output, type_id(&field.value_type, strings, types)?);
+        }
+        encode_validator_expr(&mut output, &definition.predicate, strings, types)?;
+    }
+    Ok(output)
+}
+
+fn encode_validator_expr(
+    output: &mut Vec<u8>,
+    expression: &ValidatorExpr,
+    strings: &BTreeMap<&str, u32>,
+    types: &BTreeMap<Vec<u8>, u32>,
+) -> Result<(), ArtifactError> {
+    match expression {
+        ValidatorExpr::Bool(value) => {
+            output.push(0);
+            output.push(u8::from(*value));
+        }
+        ValidatorExpr::Field { field, value_type } => {
+            output.push(1);
+            put_u32(output, *field);
+            put_u32(output, type_id(value_type, strings, types)?);
+        }
+        ValidatorExpr::Not(value) => {
+            output.push(2);
+            encode_validator_expr(output, value, strings, types)?;
+        }
+        ValidatorExpr::BoolBinary {
+            operation,
+            left,
+            right,
+        } => {
+            output.push(3);
+            output.push(match operation {
+                BoolBinaryOp::And => 0,
+                BoolBinaryOp::Or => 1,
+            });
+            encode_validator_expr(output, left, strings, types)?;
+            encode_validator_expr(output, right, strings, types)?;
+        }
+        ValidatorExpr::Compare {
+            operation,
+            left,
+            right,
+        } => {
+            output.push(4);
+            output.push(compare_op_tag(*operation));
+            encode_validator_expr(output, left, strings, types)?;
+            encode_validator_expr(output, right, strings, types)?;
+        }
+    }
+    Ok(())
 }
 
 fn encode_schemas(
@@ -2710,6 +3830,15 @@ fn encode_manifest(
     for origin in &value.https_origins {
         put_u32(&mut o, string_id(strings, origin)?);
     }
+    for (label, list) in [
+        ("exec commands", &value.exec_commands),
+        ("exec environment", &value.exec_environment),
+    ] {
+        put_u32(&mut o, to_u32(list.len(), label)?);
+        for item in list {
+            put_u32(&mut o, string_id(strings, item)?);
+        }
+    }
     put_u32(
         &mut o,
         to_u32(value.required_tools.len(), "required tools")?,
@@ -2732,6 +3861,37 @@ fn encode_manifest(
     }
     o.extend_from_slice(&value.tool_contract_digest);
     Ok(o)
+}
+
+fn encode_templates(
+    templates: &[TemplateResource],
+    strings: &BTreeMap<&str, u32>,
+) -> Result<Vec<u8>, ArtifactError> {
+    let mut output = Vec::new();
+    put_count(&mut output, templates.len(), "template table")?;
+    for template in templates {
+        put_u32(&mut output, string_id(strings, &template.identity)?);
+        put_bytes(&mut output, template.content.as_bytes(), "template content")?;
+        output.extend_from_slice(&template.digest);
+        put_count(&mut output, template.holes.len(), "template hole table")?;
+        for hole in &template.holes {
+            put_u32(&mut output, string_id(strings, &hole.name)?);
+            output.push(match hole.value_type {
+                ValueType::Bool => 0,
+                ValueType::Int => 1,
+                ValueType::Float => 2,
+                ValueType::String => 3,
+                _ => return Err(noncanonical("template hole type is not a supported scalar")),
+            });
+        }
+        put_count(&mut output, template.markers.len(), "template marker table")?;
+        for marker in &template.markers {
+            put_u32(&mut output, marker.start);
+            put_u32(&mut output, marker.end);
+            put_u32(&mut output, marker.hole);
+        }
+    }
+    Ok(output)
 }
 
 fn encode_debug(
@@ -2845,6 +4005,16 @@ fn encode_type(
         ValueType::Workspace => output.push(18),
         ValueType::ExternalFsAccess => output.push(19),
         ValueType::SubAgent => output.push(20),
+        ValueType::Newtype { name, underlying } => {
+            output.push(21);
+            put_u32(output, string_id(strings, name)?);
+            encode_type(output, underlying, strings)?;
+        }
+        ValueType::Range => output.push(22),
+        ValueType::Sequence(value) => {
+            output.push(23);
+            encode_type(output, value, strings)?;
+        }
     }
     Ok(())
 }
@@ -2862,6 +4032,47 @@ fn encode_pairs(output: &mut Vec<u8>, pairs: &[(Register, Register)]) -> Result<
     for (left, right) in pairs {
         put_u16(output, *left);
         put_u16(output, *right);
+    }
+    Ok(())
+}
+
+fn encode_list_literal_items(
+    output: &mut Vec<u8>,
+    items: &[ListLiteralItem],
+) -> Result<(), ArtifactError> {
+    put_count(output, items.len(), "list literal item table")?;
+    for item in items {
+        match item {
+            ListLiteralItem::Element(register) => {
+                output.push(0);
+                put_u16(output, *register);
+            }
+            ListLiteralItem::Spread(register) => {
+                output.push(1);
+                put_u16(output, *register);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn encode_map_literal_items(
+    output: &mut Vec<u8>,
+    items: &[MapLiteralItem],
+) -> Result<(), ArtifactError> {
+    put_count(output, items.len(), "map literal item table")?;
+    for item in items {
+        match item {
+            MapLiteralItem::Entry { key, value } => {
+                output.push(0);
+                put_u16(output, *key);
+                put_u16(output, *value);
+            }
+            MapLiteralItem::Spread(register) => {
+                output.push(1);
+                put_u16(output, *register);
+            }
+        }
     }
     Ok(())
 }
@@ -2995,6 +4206,11 @@ fn encode_instruction(
             put_u16(output, *destination);
             encode_registers(output, elements)?;
         }
+        Instruction::ListLiteralBuild { destination, items } => {
+            output.push(58);
+            put_u16(output, *destination);
+            encode_list_literal_items(output, items)?;
+        }
         Instruction::MapNew {
             destination,
             entries,
@@ -3002,6 +4218,11 @@ fn encode_instruction(
             output.push(10);
             put_u16(output, *destination);
             encode_pairs(output, entries)?;
+        }
+        Instruction::MapLiteralBuild { destination, items } => {
+            output.push(59);
+            put_u16(output, *destination);
+            encode_map_literal_items(output, items)?;
         }
         Instruction::TupleNew {
             destination,
@@ -3105,6 +4326,14 @@ fn encode_instruction(
             put_u16(output, *destination);
             put_u16(output, *source);
         }
+        Instruction::TryOption {
+            destination,
+            source,
+        } => {
+            output.push(57);
+            put_u16(output, *destination);
+            put_u16(output, *source);
+        }
         Instruction::ToUnknown {
             destination,
             source,
@@ -3119,6 +4348,16 @@ fn encode_instruction(
             target,
         } => {
             output.push(23);
+            put_u16(output, *destination);
+            put_u16(output, *source);
+            put_u32(output, type_id(target, strings, type_ids)?);
+        }
+        Instruction::Decode {
+            destination,
+            source,
+            target,
+        } => {
+            output.push(54);
             put_u16(output, *destination);
             put_u16(output, *source);
             put_u32(output, type_id(target, strings, type_ids)?);
@@ -3197,6 +4436,10 @@ fn encode_instruction(
             output.push(33);
             put_u16(output, *reason);
         }
+        Instruction::Fail { reason } => {
+            output.push(50);
+            put_u16(output, *reason);
+        }
         Instruction::TaskSnapshot {
             destination,
             source,
@@ -3235,6 +4478,7 @@ fn encode_instruction(
                 crate::EffectOperation::SubAgentMessage => 15,
                 crate::EffectOperation::SubAgentAsk => 16,
                 crate::EffectOperation::Search => 17,
+                crate::EffectOperation::ExecRun => 18,
             });
             encode_registers(output, arguments)?;
         }
@@ -3246,6 +4490,22 @@ fn encode_instruction(
             output.push(43);
             put_u16(output, *destination);
             output.push(string_operation(*operation));
+            encode_registers(output, arguments)?;
+        }
+        Instruction::StandardCall {
+            destination,
+            operation,
+            arguments,
+        } => {
+            output.push(47);
+            put_u16(output, *destination);
+            output.push(match operation {
+                StandardOperation::ToInt => 0,
+                StandardOperation::FloatFormat => 1,
+                StandardOperation::TimeFormatUtc => 2,
+                StandardOperation::TimeParseUtc => 3,
+                StandardOperation::TimeBucket => 4,
+            });
             encode_registers(output, arguments)?;
         }
         Instruction::CapabilityInspect {
@@ -3273,6 +4533,9 @@ fn encode_instruction(
                 SafeCollectionOperation::ListTrySet => 1,
                 SafeCollectionOperation::BytesGet => 2,
                 SafeCollectionOperation::MapGet => 3,
+                SafeCollectionOperation::MapInsert => 4,
+                SafeCollectionOperation::MapRemove => 5,
+                SafeCollectionOperation::MapKeys => 6,
             });
             encode_registers(output, arguments)?;
         }
@@ -3293,6 +4556,79 @@ fn encode_instruction(
             });
             encode_registers(output, arguments)?;
         }
+        Instruction::CollectionCall {
+            destination,
+            operation,
+            arguments,
+        } => {
+            output.push(48);
+            put_u16(output, *destination);
+            output.push(match operation {
+                CollectionOperation::Zip => 0,
+                CollectionOperation::ListMin => 1,
+                CollectionOperation::ListMax => 2,
+                CollectionOperation::ListSumInt => 3,
+                CollectionOperation::ListSumFloat => 4,
+            });
+            encode_registers(output, arguments)?;
+        }
+        Instruction::ListFold {
+            destination,
+            values,
+            initial,
+            callback,
+        } => {
+            output.push(49);
+            put_u16(output, *destination);
+            put_u16(output, *values);
+            put_u16(output, *initial);
+            put_u16(output, *callback);
+        }
+        Instruction::ListCombinator {
+            destination,
+            operation,
+            values,
+            initial,
+            callback,
+            callback_result,
+        } => {
+            output.push(56);
+            put_u16(output, *destination);
+            output.push(match operation {
+                ListCombinator::Map => 0,
+                ListCombinator::Filter => 1,
+                ListCombinator::FlatMap => 2,
+                ListCombinator::FilterMap => 3,
+                ListCombinator::Find => 4,
+                ListCombinator::Any => 5,
+                ListCombinator::All => 6,
+                ListCombinator::Partition => 7,
+                ListCombinator::Scan => 8,
+            });
+            put_u16(output, *values);
+            output.push(u8::from(initial.is_some()));
+            if let Some(initial) = initial {
+                put_u16(output, *initial);
+            }
+            put_u16(output, *callback);
+            put_u16(output, *callback_result);
+        }
+        Instruction::NewtypeWrap {
+            destination,
+            source,
+        } => {
+            output.push(51);
+            put_u16(output, *destination);
+            put_u16(output, *source);
+        }
+        Instruction::NewtypeUnwrap {
+            destination,
+            source,
+        } => {
+            output.push(52);
+            put_u16(output, *destination);
+            put_u16(output, *source);
+        }
         Instruction::ToolInvoke {
             destination,
             tool,
@@ -3302,6 +4638,16 @@ fn encode_instruction(
             put_u16(output, *destination);
             put_u32(output, *tool);
             put_u16(output, *input);
+        }
+        Instruction::TemplateRender {
+            destination,
+            template,
+            arguments,
+        } => {
+            output.push(55);
+            put_u16(output, *destination);
+            put_u32(output, *template);
+            encode_registers(output, arguments)?;
         }
         Instruction::Length {
             destination,
@@ -3343,6 +4689,133 @@ fn encode_instruction(
             put_u16(output, *map);
             put_u16(output, *index);
         }
+        Instruction::RangeNew {
+            destination,
+            start,
+            end,
+            inclusive,
+        } => {
+            output.push(60);
+            put_u16(output, *destination);
+            put_u16(output, *start);
+            put_u16(output, *end);
+            output.push(u8::from(*inclusive));
+        }
+        Instruction::RangeStart { destination, range } => {
+            output.push(71);
+            put_u16(output, *destination);
+            put_u16(output, *range);
+        }
+        Instruction::RangeEnd { destination, range } => {
+            output.push(72);
+            put_u16(output, *destination);
+            put_u16(output, *range);
+        }
+        Instruction::RangeInclusive { destination, range } => {
+            output.push(73);
+            put_u16(output, *destination);
+            put_u16(output, *range);
+        }
+        Instruction::SliceGet {
+            destination,
+            collection,
+            start,
+            end,
+        } => {
+            output.push(61);
+            put_u16(output, *destination);
+            put_u16(output, *collection);
+            put_u16(output, *start);
+            put_u16(output, *end);
+        }
+        Instruction::SequenceFromList {
+            destination,
+            values,
+        } => {
+            output.push(62);
+            put_u16(output, *destination);
+            put_u16(output, *values);
+        }
+        Instruction::SequenceMap {
+            destination,
+            sequence,
+            callback,
+        } => {
+            output.push(63);
+            put_u16(output, *destination);
+            put_u16(output, *sequence);
+            put_u16(output, *callback);
+        }
+        Instruction::SequenceFilter {
+            destination,
+            sequence,
+            callback,
+        } => {
+            output.push(64);
+            put_u16(output, *destination);
+            put_u16(output, *sequence);
+            put_u16(output, *callback);
+        }
+        Instruction::SequenceTake {
+            destination,
+            sequence,
+            count,
+        } => {
+            output.push(65);
+            put_u16(output, *destination);
+            put_u16(output, *sequence);
+            put_u16(output, *count);
+        }
+        Instruction::SequenceFind {
+            destination,
+            sequence,
+            callback,
+        } => {
+            output.push(66);
+            put_u16(output, *destination);
+            put_u16(output, *sequence);
+            put_u16(output, *callback);
+        }
+        Instruction::SequenceAny {
+            destination,
+            sequence,
+            callback,
+        } => {
+            output.push(67);
+            put_u16(output, *destination);
+            put_u16(output, *sequence);
+            put_u16(output, *callback);
+        }
+        Instruction::SequenceAll {
+            destination,
+            sequence,
+            callback,
+        } => {
+            output.push(68);
+            put_u16(output, *destination);
+            put_u16(output, *sequence);
+            put_u16(output, *callback);
+        }
+        Instruction::SequenceFold {
+            destination,
+            sequence,
+            initial,
+            callback,
+        } => {
+            output.push(69);
+            put_u16(output, *destination);
+            put_u16(output, *sequence);
+            put_u16(output, *initial);
+            put_u16(output, *callback);
+        }
+        Instruction::SequenceToList {
+            destination,
+            sequence,
+        } => {
+            output.push(70);
+            put_u16(output, *destination);
+            put_u16(output, *sequence);
+        }
     }
     Ok(())
 }
@@ -3371,6 +4844,7 @@ const fn string_operation(operation: StringOperation) -> u8 {
         StringOperation::TrimAscii => 10,
         StringOperation::FromUtf8 => 11,
         StringOperation::TemplateConcat => 12,
+        StringOperation::Replace => 13,
     }
 }
 
@@ -3571,6 +5045,34 @@ fn decode_functions(
     for _ in 0..count {
         let name = reader.string_ref(strings)?.to_owned();
         let parameters = reader.registers(limits.registers_per_function)?;
+        let parameter_name_count =
+            reader.count(limits.registers_per_function, "function parameter names")?;
+        let mut parameter_names = Vec::with_capacity(parameter_name_count);
+        for _ in 0..parameter_name_count {
+            parameter_names.push(reader.string_ref(strings)?.to_owned());
+        }
+        let default_digest_count = reader.count(
+            limits.registers_per_function,
+            "function parameter default digests",
+        )?;
+        if default_digest_count != parameters.len() {
+            return Err(noncanonical(
+                "function parameter default digests must match parameter arity",
+            ));
+        }
+        let mut parameter_default_digests = Vec::with_capacity(default_digest_count);
+        for _ in 0..default_digest_count {
+            parameter_default_digests.push(match reader.u8()? {
+                0 => None,
+                1 => {
+                    reader.charge_model_bytes(32)?;
+                    let mut digest = [0; 32];
+                    digest.copy_from_slice(reader.take(32)?);
+                    Some(digest)
+                }
+                _ => return Err(invalid_scalar("function parameter default digest")),
+            });
+        }
         let captures = reader.registers(limits.registers_per_function)?;
         let register_count = reader.count(limits.registers_per_function, "registers")?;
         reader.charge_items::<ValueType>(register_count)?;
@@ -3589,6 +5091,8 @@ fn decode_functions(
         functions.push(Function {
             name,
             parameters,
+            parameter_names,
+            parameter_default_digests,
             captures,
             registers,
             return_type,
@@ -3639,10 +5143,164 @@ fn decode_entries(
             function: reader.u32()?,
             input_schema: reader.u32()?,
             output_schema: reader.u32()?,
+            input_validators: decode_validator_sites(&mut reader, limits)?,
+            output_validators: decode_validator_sites(&mut reader, limits)?,
+            input_record_provenance: decode_record_provenance(&mut reader, strings, limits)?,
+            output_record_provenance: decode_record_provenance(&mut reader, strings, limits)?,
+            input_contract_digest: {
+                let mut digest = [0; 32];
+                digest.copy_from_slice(reader.take(32)?);
+                digest
+            },
+            output_contract_digest: {
+                let mut digest = [0; 32];
+                digest.copy_from_slice(reader.take(32)?);
+                digest
+            },
         });
     }
     reader.finish()?;
     Ok((0, entries))
+}
+
+fn decode_record_provenance(
+    reader: &mut Reader<'_>,
+    strings: &[String],
+    limits: &DecodeLimits,
+) -> Result<Vec<EntryRecordProvenance>, ArtifactError> {
+    let count = reader.count(limits.table_entries, "entry record provenance")?;
+    reader.charge_items::<EntryRecordProvenance>(count)?;
+    let mut records = Vec::with_capacity(count);
+    for _ in 0..count {
+        let path = decode_validator_path(reader)?;
+        let identity = match reader.u8()? {
+            0 => None,
+            1 => Some(reader.string_ref(strings)?.to_owned()),
+            _ => return Err(invalid_scalar("entry record provenance identity")),
+        };
+        records.push(EntryRecordProvenance { path, identity });
+    }
+    Ok(records)
+}
+
+fn decode_validator_sites(
+    reader: &mut Reader<'_>,
+    limits: &DecodeLimits,
+) -> Result<Vec<EntryValidatorSite>, ArtifactError> {
+    let count = reader.count(limits.table_entries, "entry validator sites")?;
+    reader.charge_items::<EntryValidatorSite>(count)?;
+    let mut sites = Vec::with_capacity(count);
+    for _ in 0..count {
+        let invariant = reader.u32()?;
+        let path = decode_validator_path(reader)?;
+        sites.push(EntryValidatorSite { path, invariant });
+    }
+    Ok(sites)
+}
+
+fn decode_validator_path(
+    reader: &mut Reader<'_>,
+) -> Result<Vec<EntryValidatorPathSegment>, ArtifactError> {
+    let path_count = reader.count(MAX_VALUE_NESTING, "entry validator path")?;
+    let mut path = Vec::with_capacity(path_count);
+    for _ in 0..path_count {
+        path.push(match reader.u8()? {
+            0 => EntryValidatorPathSegment::Field(reader.u32()?),
+            1 => EntryValidatorPathSegment::ListElement,
+            2 => EntryValidatorPathSegment::MapKey,
+            3 => EntryValidatorPathSegment::MapValue,
+            4 => EntryValidatorPathSegment::TupleElement(reader.u32()?),
+            5 => EntryValidatorPathSegment::OptionSome,
+            6 => EntryValidatorPathSegment::ResultOk,
+            7 => EntryValidatorPathSegment::ResultError,
+            8 => EntryValidatorPathSegment::EnumPayload {
+                variant: reader.u32()?,
+                element: reader.u32()?,
+            },
+            9 => EntryValidatorPathSegment::NewtypeValue,
+            _ => return Err(invalid_scalar("entry validator path segment")),
+        });
+    }
+    Ok(path)
+}
+
+fn decode_validators(
+    payload: &[u8],
+    strings: &[String],
+    types: &[ValueType],
+    limits: &DecodeLimits,
+    budget: &DecodeBudget,
+) -> Result<Vec<RecordInvariantDefinition>, ArtifactError> {
+    let mut reader = Reader::with_budget(payload, limits, budget);
+    let count = reader.count(limits.table_entries, "record invariants")?;
+    reader.charge_items::<RecordInvariantDefinition>(count)?;
+    let mut definitions = Vec::with_capacity(count);
+    for _ in 0..count {
+        let identity = reader.string_ref(strings)?.to_owned();
+        let field_count = reader.count(limits.table_entries, "invariant fields")?;
+        let mut fields = Vec::with_capacity(field_count);
+        for _ in 0..field_count {
+            fields.push(RecordField {
+                name: reader.string_ref(strings)?.to_owned(),
+                value_type: reader.type_ref(types)?,
+            });
+        }
+        let mut nodes = 0usize;
+        let predicate = decode_validator_expr(&mut reader, types, &mut nodes)?;
+        definitions.push(RecordInvariantDefinition {
+            identity,
+            fields,
+            predicate,
+        });
+    }
+    reader.finish()?;
+    Ok(definitions)
+}
+
+fn decode_validator_expr(
+    reader: &mut Reader<'_>,
+    types: &[ValueType],
+    nodes: &mut usize,
+) -> Result<ValidatorExpr, ArtifactError> {
+    *nodes = nodes.saturating_add(1);
+    if *nodes > 256 {
+        return Err(limit("validator expression nodes"));
+    }
+    Ok(match reader.u8()? {
+        0 => ValidatorExpr::Bool(match reader.u8()? {
+            0 => false,
+            1 => true,
+            _ => return Err(invalid_scalar("validator bool")),
+        }),
+        1 => ValidatorExpr::Field {
+            field: reader.u32()?,
+            value_type: reader.type_ref(types)?,
+        },
+        2 => ValidatorExpr::Not(Box::new(decode_validator_expr(reader, types, nodes)?)),
+        3 => ValidatorExpr::BoolBinary {
+            operation: match reader.u8()? {
+                0 => BoolBinaryOp::And,
+                1 => BoolBinaryOp::Or,
+                _ => return Err(invalid_scalar("validator bool operation")),
+            },
+            left: Box::new(decode_validator_expr(reader, types, nodes)?),
+            right: Box::new(decode_validator_expr(reader, types, nodes)?),
+        },
+        4 => ValidatorExpr::Compare {
+            operation: match reader.u8()? {
+                0 => CompareOp::Equal,
+                1 => CompareOp::NotEqual,
+                2 => CompareOp::Less,
+                3 => CompareOp::LessEqual,
+                4 => CompareOp::Greater,
+                5 => CompareOp::GreaterEqual,
+                _ => return Err(invalid_scalar("validator comparison")),
+            },
+            left: Box::new(decode_validator_expr(reader, types, nodes)?),
+            right: Box::new(decode_validator_expr(reader, types, nodes)?),
+        },
+        _ => return Err(invalid_scalar("validator expression")),
+    })
 }
 
 fn decode_schemas(
@@ -3733,6 +5391,17 @@ fn decode_manifest(
     for _ in 0..n {
         https_origins.push(r.string_ref(strings)?.to_owned());
     }
+    let read_exec_list = |r: &mut Reader<'_>, label| -> Result<Vec<String>, ArtifactError> {
+        let count = r.count(limits.table_entries, label)?;
+        r.charge_items::<String>(count)?;
+        let mut values = Vec::with_capacity(count);
+        for _ in 0..count {
+            values.push(r.string_ref(strings)?.to_owned());
+        }
+        Ok(values)
+    };
+    let exec_commands = read_exec_list(&mut r, "exec commands")?;
+    let exec_environment = read_exec_list(&mut r, "exec environment")?;
     let n = r.count(limits.table_entries, "required tools")?;
     r.charge_items::<ToolContract>(n)?;
     let mut required_tools = Vec::with_capacity(n);
@@ -3774,9 +5443,71 @@ fn decode_manifest(
         optional_capabilities,
         limits: limitsv,
         https_origins,
+        exec_commands,
+        exec_environment,
         required_tools,
         tool_contract_digest,
     })
+}
+
+fn decode_templates(
+    payload: &[u8],
+    strings: &[String],
+    limits: &DecodeLimits,
+    budget: &DecodeBudget,
+) -> Result<Vec<TemplateResource>, ArtifactError> {
+    let mut reader = Reader::with_budget(payload, limits, budget);
+    let count = reader.count(limits.table_entries, "template table")?;
+    reader.charge_items::<TemplateResource>(count)?;
+    let mut templates = Vec::with_capacity(count);
+    for _ in 0..count {
+        let identity = reader.string_ref(strings)?.to_owned();
+        let content_len = reader.count(limits.string_bytes, "template content")?;
+        reader.charge_model_bytes(content_len)?;
+        let content = std::str::from_utf8(reader.take(content_len)?)
+            .map_err(|_| {
+                ArtifactError::new(
+                    ArtifactErrorCode::InvalidUtf8,
+                    "template content is not valid UTF-8",
+                )
+            })?
+            .to_owned();
+        let mut digest = [0; 32];
+        digest.copy_from_slice(reader.take(32)?);
+        let hole_count = reader.count(limits.table_entries, "template hole table")?;
+        reader.charge_items::<TemplateHole>(hole_count)?;
+        let mut holes = Vec::with_capacity(hole_count);
+        for _ in 0..hole_count {
+            let name = reader.string_ref(strings)?.to_owned();
+            let value_type = match reader.u8()? {
+                0 => ValueType::Bool,
+                1 => ValueType::Int,
+                2 => ValueType::Float,
+                3 => ValueType::String,
+                _ => return Err(invalid_scalar("template hole type")),
+            };
+            holes.push(TemplateHole { name, value_type });
+        }
+        let marker_count = reader.count(limits.table_entries, "template marker table")?;
+        reader.charge_items::<TemplateMarker>(marker_count)?;
+        let mut markers = Vec::with_capacity(marker_count);
+        for _ in 0..marker_count {
+            markers.push(TemplateMarker {
+                start: reader.u32()?,
+                end: reader.u32()?,
+                hole: reader.u32()?,
+            });
+        }
+        templates.push(TemplateResource {
+            identity,
+            content,
+            digest,
+            holes,
+            markers,
+        });
+    }
+    reader.finish()?;
+    Ok(templates)
 }
 
 fn decode_debug(
@@ -4108,6 +5839,12 @@ impl<'a> Reader<'a> {
             18 => ValueType::Workspace,
             19 => ValueType::ExternalFsAccess,
             20 => ValueType::SubAgent,
+            21 => ValueType::Newtype {
+                name: self.string_ref(strings)?.to_owned(),
+                underlying: Box::new(self.value_type(strings, depth + 1)?),
+            },
+            22 => ValueType::Range,
+            23 => ValueType::Sequence(Box::new(self.value_type(strings, depth + 1)?)),
             _ => return Err(invalid_scalar("value type tag")),
         })
     }
@@ -4179,7 +5916,20 @@ impl<'a> Reader<'a> {
                     10 => StringOperation::TrimAscii,
                     11 => StringOperation::FromUtf8,
                     12 => StringOperation::TemplateConcat,
+                    13 => StringOperation::Replace,
                     _ => return Err(invalid_scalar("String operation")),
+                },
+                arguments: self.operand_registers(&mut operand_budget)?,
+            },
+            47 => Instruction::StandardCall {
+                destination: self.u16()?,
+                operation: match self.u8()? {
+                    0 => StandardOperation::ToInt,
+                    1 => StandardOperation::FloatFormat,
+                    2 => StandardOperation::TimeFormatUtc,
+                    3 => StandardOperation::TimeParseUtc,
+                    4 => StandardOperation::TimeBucket,
+                    _ => return Err(invalid_scalar("standard operation")),
                 },
                 arguments: self.operand_registers(&mut operand_budget)?,
             },
@@ -4199,6 +5949,9 @@ impl<'a> Reader<'a> {
                     1 => SafeCollectionOperation::ListTrySet,
                     2 => SafeCollectionOperation::BytesGet,
                     3 => SafeCollectionOperation::MapGet,
+                    4 => SafeCollectionOperation::MapInsert,
+                    5 => SafeCollectionOperation::MapRemove,
+                    6 => SafeCollectionOperation::MapKeys,
                     _ => return Err(invalid_scalar("safe collection operation")),
                 },
                 arguments: self.operand_registers(&mut operand_budget)?,
@@ -4216,6 +5969,53 @@ impl<'a> Reader<'a> {
                 },
                 arguments: self.operand_registers(&mut operand_budget)?,
             },
+            48 => Instruction::CollectionCall {
+                destination: self.u16()?,
+                operation: match self.u8()? {
+                    0 => CollectionOperation::Zip,
+                    1 => CollectionOperation::ListMin,
+                    2 => CollectionOperation::ListMax,
+                    3 => CollectionOperation::ListSumInt,
+                    4 => CollectionOperation::ListSumFloat,
+                    _ => return Err(invalid_scalar("collection operation")),
+                },
+                arguments: self.operand_registers(&mut operand_budget)?,
+            },
+            49 => Instruction::ListFold {
+                destination: self.u16()?,
+                values: self.u16()?,
+                initial: self.u16()?,
+                callback: self.u16()?,
+            },
+            56 => {
+                let destination = self.u16()?;
+                let operation = match self.u8()? {
+                    0 => ListCombinator::Map,
+                    1 => ListCombinator::Filter,
+                    2 => ListCombinator::FlatMap,
+                    3 => ListCombinator::FilterMap,
+                    4 => ListCombinator::Find,
+                    5 => ListCombinator::Any,
+                    6 => ListCombinator::All,
+                    7 => ListCombinator::Partition,
+                    8 => ListCombinator::Scan,
+                    _ => return Err(invalid_scalar("list combinator operation")),
+                };
+                let values = self.u16()?;
+                let initial = match self.u8()? {
+                    0 => None,
+                    1 => Some(self.u16()?),
+                    _ => return Err(invalid_scalar("list combinator initial flag")),
+                };
+                Instruction::ListCombinator {
+                    destination,
+                    operation,
+                    values,
+                    initial,
+                    callback: self.u16()?,
+                    callback_result: self.u16()?,
+                }
+            }
             4 => Instruction::IntNegate {
                 destination: self.u16()?,
                 source: self.u16()?,
@@ -4248,6 +6048,24 @@ impl<'a> Reader<'a> {
                 destination: self.u16()?,
                 elements: self.operand_registers(&mut operand_budget)?,
             },
+            58 => {
+                let destination = self.u16()?;
+                let count =
+                    self.count(self.limits.operands_per_instruction, "list literal items")?;
+                Self::charge_operands(&mut operand_budget, count, 1)?;
+                self.charge_items::<ListLiteralItem>(count)?;
+                let mut items = Vec::with_capacity(count);
+                for _ in 0..count {
+                    let kind = self.u8()?;
+                    let register = self.u16()?;
+                    items.push(match kind {
+                        0 => ListLiteralItem::Element(register),
+                        1 => ListLiteralItem::Spread(register),
+                        _ => return Err(invalid_scalar("list literal item")),
+                    });
+                }
+                Instruction::ListLiteralBuild { destination, items }
+            }
             10 => {
                 let destination = self.u16()?;
                 let count = self.count(self.limits.operands_per_instruction, "operands")?;
@@ -4262,6 +6080,103 @@ impl<'a> Reader<'a> {
                     entries,
                 }
             }
+            59 => {
+                let destination = self.u16()?;
+                let count =
+                    self.count(self.limits.operands_per_instruction, "map literal items")?;
+                self.charge_items::<MapLiteralItem>(count)?;
+                let mut items = Vec::with_capacity(count);
+                for _ in 0..count {
+                    let kind = self.u8()?;
+                    items.push(match kind {
+                        0 => {
+                            Self::charge_operands(&mut operand_budget, 2, 1)?;
+                            MapLiteralItem::Entry {
+                                key: self.u16()?,
+                                value: self.u16()?,
+                            }
+                        }
+                        1 => {
+                            Self::charge_operands(&mut operand_budget, 1, 1)?;
+                            MapLiteralItem::Spread(self.u16()?)
+                        }
+                        _ => return Err(invalid_scalar("map literal item")),
+                    });
+                }
+                Instruction::MapLiteralBuild { destination, items }
+            }
+            60 => Instruction::RangeNew {
+                destination: self.u16()?,
+                start: self.u16()?,
+                end: self.u16()?,
+                inclusive: match self.u8()? {
+                    0 => false,
+                    1 => true,
+                    _ => return Err(invalid_scalar("range inclusive flag")),
+                },
+            },
+            71 => Instruction::RangeStart {
+                destination: self.u16()?,
+                range: self.u16()?,
+            },
+            72 => Instruction::RangeEnd {
+                destination: self.u16()?,
+                range: self.u16()?,
+            },
+            73 => Instruction::RangeInclusive {
+                destination: self.u16()?,
+                range: self.u16()?,
+            },
+            61 => Instruction::SliceGet {
+                destination: self.u16()?,
+                collection: self.u16()?,
+                start: self.u16()?,
+                end: self.u16()?,
+            },
+            62 => Instruction::SequenceFromList {
+                destination: self.u16()?,
+                values: self.u16()?,
+            },
+            63 => Instruction::SequenceMap {
+                destination: self.u16()?,
+                sequence: self.u16()?,
+                callback: self.u16()?,
+            },
+            64 => Instruction::SequenceFilter {
+                destination: self.u16()?,
+                sequence: self.u16()?,
+                callback: self.u16()?,
+            },
+            65 => Instruction::SequenceTake {
+                destination: self.u16()?,
+                sequence: self.u16()?,
+                count: self.u16()?,
+            },
+            66 => Instruction::SequenceFind {
+                destination: self.u16()?,
+                sequence: self.u16()?,
+                callback: self.u16()?,
+            },
+            67 => Instruction::SequenceAny {
+                destination: self.u16()?,
+                sequence: self.u16()?,
+                callback: self.u16()?,
+            },
+            68 => Instruction::SequenceAll {
+                destination: self.u16()?,
+                sequence: self.u16()?,
+                callback: self.u16()?,
+            },
+            69 => Instruction::SequenceFold {
+                destination: self.u16()?,
+                sequence: self.u16()?,
+                initial: self.u16()?,
+                callback: self.u16()?,
+            },
+            70 => Instruction::SequenceToList {
+                destination: self.u16()?,
+                sequence: self.u16()?,
+            },
             11 => Instruction::TupleNew {
                 destination: self.u16()?,
                 elements: self.operand_registers(&mut operand_budget)?,
@@ -4337,11 +6252,20 @@ impl<'a> Reader<'a> {
                 destination: self.u16()?,
                 source: self.u16()?,
             },
+            57 => Instruction::TryOption {
+                destination: self.u16()?,
+                source: self.u16()?,
+            },
             22 => Instruction::ToUnknown {
                 destination: self.u16()?,
                 source: self.u16()?,
             },
             23 => Instruction::Narrow {
+                destination: self.u16()?,
+                source: self.u16()?,
+                target: self.type_ref(types)?,
+            },
+            54 => Instruction::Decode {
                 destination: self.u16()?,
                 source: self.u16()?,
                 target: self.type_ref(types)?,
@@ -4383,6 +6307,17 @@ impl<'a> Reader<'a> {
             33 => Instruction::Stop {
                 reason: self.u16()?,
             },
+            50 => Instruction::Fail {
+                reason: self.u16()?,
+            },
+            51 => Instruction::NewtypeWrap {
+                destination: self.u16()?,
+                source: self.u16()?,
+            },
+            52 => Instruction::NewtypeUnwrap {
+                destination: self.u16()?,
+                source: self.u16()?,
+            },
             34 => Instruction::TaskSnapshot {
                 destination: self.u16()?,
                 source: self.u16()?,
@@ -4411,6 +6346,7 @@ impl<'a> Reader<'a> {
                     15 => crate::EffectOperation::SubAgentMessage,
                     16 => crate::EffectOperation::SubAgentAsk,
                     17 => crate::EffectOperation::Search,
+                    18 => crate::EffectOperation::ExecRun,
                     _ => return Err(invalid_scalar("effect operation")),
                 },
                 arguments: self.operand_registers(&mut operand_budget)?,
@@ -4419,6 +6355,11 @@ impl<'a> Reader<'a> {
                 destination: self.u16()?,
                 tool: self.u32()?,
                 input: self.u16()?,
+            },
+            55 => Instruction::TemplateRender {
+                destination: self.u16()?,
+                template: self.u32()?,
+                arguments: self.operand_registers(&mut operand_budget)?,
             },
             38 => Instruction::Length {
                 destination: self.u16()?,
@@ -4737,6 +6678,7 @@ fn sha256(input: &[u8]) -> [u8; 32] {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::decode_error_type;
 
     fn artifact(debug: bool) -> Artifact {
         Artifact {
@@ -4751,6 +6693,8 @@ mod tests {
                 functions: vec![Function {
                     name: "pkg/x74657374/x302e312e30/x737263/x6d61696e.allen::main".to_owned(),
                     parameters: Vec::new(),
+                    parameter_names: Vec::new(),
+                    parameter_default_digests: Vec::new(),
                     captures: Vec::new(),
                     registers: vec![ValueType::Unit],
                     return_type: ValueType::Unit,
@@ -4784,8 +6728,28 @@ mod tests {
                 function: 0,
                 input_schema: 0,
                 output_schema: 0,
+                input_validators: Vec::new(),
+                output_validators: Vec::new(),
+                input_record_provenance: Vec::new(),
+                output_record_provenance: Vec::new(),
+                input_contract_digest: compute_entry_contract_digest(
+                    &StrictSchema {
+                        value_type: ValueType::Unit,
+                    },
+                    &[],
+                    &[],
+                ),
+                output_contract_digest: compute_entry_contract_digest(
+                    &StrictSchema {
+                        value_type: ValueType::Unit,
+                    },
+                    &[],
+                    &[],
+                ),
             }],
             imports: Vec::new(),
+            templates: Vec::new(),
+            record_invariants: Vec::new(),
             manifest: Some(ManifestContract {
                 package: "test".to_owned(),
                 version: "0.1.0".to_owned(),
@@ -4794,9 +6758,71 @@ mod tests {
                 optional_capabilities: Vec::new(),
                 limits: Vec::new(),
                 https_origins: Vec::new(),
+                exec_commands: Vec::new(),
+                exec_environment: Vec::new(),
                 required_tools: Vec::new(),
                 tool_contract_digest: compute_tool_contract_digest(&[]),
             }),
+        }
+    }
+
+    #[test]
+    fn parameter_name_metadata_round_trips_and_rejects_malformed_contracts() {
+        let mut model = artifact(false);
+        model.module.functions[0].parameters = vec![0];
+        model.module.functions[0].parameter_names = vec!["value".to_owned()];
+        model.module.functions[0].parameter_default_digests = vec![None];
+        let bytes = encode(&model).expect("parameter metadata encodes");
+        let decoded = decode_and_verify(&bytes, &DecodeLimits::default())
+            .expect("parameter metadata decodes and verifies");
+        assert_eq!(
+            decoded.verified_module().module().functions[0].parameter_names,
+            ["value"]
+        );
+
+        model.module.functions[0].parameter_names.clear();
+        let error = decode_and_verify(
+            &encode(&model).expect("arity-mismatched artifact encodes"),
+            &DecodeLimits::default(),
+        )
+        .expect_err("parameter-name arity mismatch is rejected");
+        assert_eq!(error.code(), ArtifactErrorCode::VerificationFailed);
+
+        model.module.functions[0].parameter_names = vec!["not-valid".to_owned()];
+        let error = decode_and_verify(
+            &encode(&model).expect("malformed-name artifact encodes"),
+            &DecodeLimits::default(),
+        )
+        .expect_err("noncanonical parameter name is rejected");
+        assert_eq!(error.code(), ArtifactErrorCode::VerificationFailed);
+    }
+
+    fn refresh_entry_contract_digests(artifact: &mut Artifact) {
+        for entry in &mut artifact.entries {
+            entry.input_record_provenance = compute_entry_record_provenance(
+                &artifact.schemas[entry.input_schema as usize],
+                &artifact.module.enum_types,
+                &entry.input_validators,
+                &artifact.record_invariants,
+            )
+            .unwrap();
+            entry.output_record_provenance = compute_entry_record_provenance(
+                &artifact.schemas[entry.output_schema as usize],
+                &artifact.module.enum_types,
+                &entry.output_validators,
+                &artifact.record_invariants,
+            )
+            .unwrap();
+            entry.input_contract_digest = compute_entry_contract_digest(
+                &artifact.schemas[entry.input_schema as usize],
+                &entry.input_validators,
+                &artifact.record_invariants,
+            );
+            entry.output_contract_digest = compute_entry_contract_digest(
+                &artifact.schemas[entry.output_schema as usize],
+                &entry.output_validators,
+                &artifact.record_invariants,
+            );
         }
     }
 
@@ -4843,8 +6869,199 @@ mod tests {
         assert_eq!(decoded.artifact(), &model);
         assert_eq!(decoded.canonical_bytes().unwrap(), bytes);
         assert_eq!(decoded.content_digest(), &sha256(&bytes[HEADER_SIZE..]));
-        assert_eq!(decoded.section_summaries().len(), 11);
+        assert_eq!(decoded.section_summaries().len(), 13);
         decode_and_verify(&bytes, &DecodeLimits::default()).unwrap();
+    }
+
+    #[test]
+    fn list_combinator_instruction_round_trips() {
+        let mut model = artifact(false);
+        let function = &mut model.module.functions[0];
+        function.registers = vec![
+            ValueType::List(Box::new(ValueType::Int)),
+            ValueType::Function {
+                parameters: vec![ValueType::Int],
+                return_type: Box::new(ValueType::Int),
+                effects: 0,
+            },
+            ValueType::Int,
+            ValueType::List(Box::new(ValueType::Int)),
+        ];
+        function.return_type = ValueType::List(Box::new(ValueType::Int));
+        function.code = vec![
+            Instruction::ListCombinator {
+                destination: 3,
+                operation: ListCombinator::Map,
+                values: 0,
+                initial: None,
+                callback: 1,
+                callback_result: 2,
+            },
+            Instruction::Return { source: 3 },
+        ];
+        model.schemas.push(StrictSchema {
+            value_type: ValueType::List(Box::new(ValueType::Int)),
+        });
+        model.entries[0].output_schema = 1;
+        refresh_entry_contract_digests(&mut model);
+
+        let bytes = encode(&model).expect("list combinator artifact encodes");
+        let decoded =
+            decode(&bytes, &DecodeLimits::default()).expect("list combinator artifact decodes");
+        assert_eq!(decoded.artifact(), &model);
+    }
+
+    #[test]
+    fn range_slice_and_sequence_instructions_round_trip() {
+        let mut model = artifact(false);
+        let function = &mut model.module.functions[0];
+        function.registers = vec![
+            ValueType::Int,
+            ValueType::Int,
+            ValueType::Int,
+            ValueType::Range,
+            ValueType::List(Box::new(ValueType::Int)),
+            ValueType::Option(Box::new(ValueType::List(Box::new(ValueType::Int)))),
+            ValueType::Sequence(Box::new(ValueType::Int)),
+            ValueType::Function {
+                parameters: vec![ValueType::Int],
+                return_type: Box::new(ValueType::Int),
+                effects: 0,
+            },
+            ValueType::Sequence(Box::new(ValueType::Int)),
+            ValueType::List(Box::new(ValueType::Int)),
+            ValueType::Option(Box::new(ValueType::Int)),
+            ValueType::Bool,
+        ];
+        function.code = vec![
+            Instruction::RangeNew {
+                destination: 3,
+                start: 0,
+                end: 1,
+                inclusive: false,
+            },
+            Instruction::RangeStart {
+                destination: 0,
+                range: 3,
+            },
+            Instruction::RangeEnd {
+                destination: 1,
+                range: 3,
+            },
+            Instruction::RangeInclusive {
+                destination: 2,
+                range: 3,
+            },
+            Instruction::SliceGet {
+                destination: 5,
+                collection: 4,
+                start: 0,
+                end: 1,
+            },
+            Instruction::SequenceFromList {
+                destination: 6,
+                values: 4,
+            },
+            Instruction::SequenceMap {
+                destination: 8,
+                sequence: 6,
+                callback: 7,
+            },
+            Instruction::SequenceFilter {
+                destination: 6,
+                sequence: 8,
+                callback: 7,
+            },
+            Instruction::SequenceTake {
+                destination: 8,
+                sequence: 6,
+                count: 0,
+            },
+            Instruction::SequenceFind {
+                destination: 10,
+                sequence: 8,
+                callback: 7,
+            },
+            Instruction::SequenceAny {
+                destination: 11,
+                sequence: 8,
+                callback: 7,
+            },
+            Instruction::SequenceAll {
+                destination: 11,
+                sequence: 8,
+                callback: 7,
+            },
+            Instruction::SequenceFold {
+                destination: 0,
+                sequence: 8,
+                initial: 0,
+                callback: 7,
+            },
+            Instruction::SequenceToList {
+                destination: 9,
+                sequence: 8,
+            },
+            Instruction::Return { source: 0 },
+        ];
+        let bytes = encode(&model).expect("L3 substrate artifact encodes");
+        let decoded = decode(&bytes, &DecodeLimits::default()).expect("L3 substrate decodes");
+        assert_eq!(decoded.artifact(), &model);
+    }
+
+    #[test]
+    fn try_option_instruction_round_trips() {
+        let mut model = artifact(false);
+        let function = &mut model.module.functions[0];
+        function.registers = vec![ValueType::Option(Box::new(ValueType::Int)), ValueType::Int];
+        function.return_type = ValueType::Option(Box::new(ValueType::Int));
+        function.code = vec![
+            Instruction::TryOption {
+                destination: 1,
+                source: 0,
+            },
+            Instruction::Return { source: 0 },
+        ];
+        model.schemas.push(StrictSchema {
+            value_type: ValueType::Option(Box::new(ValueType::Int)),
+        });
+        model.entries[0].output_schema = 1;
+        refresh_entry_contract_digests(&mut model);
+
+        let bytes = encode(&model).expect("try option artifact encodes");
+        let decoded =
+            decode(&bytes, &DecodeLimits::default()).expect("try option artifact decodes");
+        assert_eq!(decoded.artifact(), &model);
+    }
+
+    #[test]
+    fn bytecode_v19_exec_manifest_contract_round_trips_and_rejects_tampering() {
+        let mut model = artifact(false);
+        let manifest = model.manifest.as_mut().unwrap();
+        manifest.required_capabilities = vec!["exec.run".to_owned()];
+        manifest.exec_commands = vec!["git show *".to_owned(), "git status".to_owned()];
+        manifest.exec_environment = vec!["GIT_CONFIG_NOSYSTEM".to_owned(), "HOME".to_owned()];
+        let bytes = encode(&model).unwrap();
+        let decoded = decode_and_verify(&bytes, &DecodeLimits::default()).unwrap();
+        assert_eq!(
+            decoded.manifest().unwrap(),
+            model.manifest.as_ref().unwrap()
+        );
+        assert_eq!(decoded.metadata().bytecode_version, 19);
+
+        let mut unsorted = model.clone();
+        unsorted.manifest.as_mut().unwrap().exec_commands.reverse();
+        assert_eq!(
+            encode(&unsorted).unwrap_err().code(),
+            ArtifactErrorCode::NonCanonical
+        );
+
+        let mut invalid = model;
+        invalid.manifest.as_mut().unwrap().exec_commands = vec!["/usr/bin/git status".to_owned()];
+        assert_eq!(
+            encode(&invalid).unwrap_err().code(),
+            ArtifactErrorCode::NonCanonical
+        );
     }
 
     #[test]
@@ -4916,7 +7133,7 @@ mod tests {
         );
 
         let mut unknown = bytes;
-        unknown[HEADER_SIZE] = 11;
+        unknown[HEADER_SIZE] = 13;
         redigest(&mut unknown);
         assert_eq!(
             decode(&unknown, &DecodeLimits::default())
@@ -4930,7 +7147,7 @@ mod tests {
     fn artifact_profile_and_section_structure_are_rejected_stably() {
         let original = encode(&artifact(false)).unwrap();
         let mut unsupported_version = original.clone();
-        unsupported_version[10..12].copy_from_slice(&14_u16.to_le_bytes());
+        unsupported_version[10..12].copy_from_slice(&(BYTECODE_VERSION + 1).to_le_bytes());
         assert_eq!(
             decode(&unsupported_version, &DecodeLimits::default())
                 .unwrap_err()
@@ -5192,5 +7409,487 @@ mod tests {
         let error =
             decode_and_verify(&encode(&invalid).unwrap(), &DecodeLimits::default()).unwrap_err();
         assert_eq!(error.code(), ArtifactErrorCode::InvalidDebug);
+    }
+
+    #[test]
+    fn fail_instruction_round_trips_and_rejects_a_non_string_reason() {
+        let mut model = artifact(false);
+        model.module.constants = vec![Constant::String("failed".to_owned())];
+        model.module.functions[0] = Function {
+            name: "pkg/x74657374/x302e312e30/x737263/x6d61696e.allen::main".to_owned(),
+            parameters: Vec::new(),
+            parameter_names: Vec::new(),
+            parameter_default_digests: Vec::new(),
+            captures: Vec::new(),
+            registers: vec![ValueType::String],
+            return_type: ValueType::String,
+            effects: 0,
+            code: vec![
+                Instruction::Const {
+                    destination: 0,
+                    constant: 0,
+                },
+                Instruction::Fail { reason: 0 },
+            ],
+        };
+        model.schemas.push(StrictSchema {
+            value_type: ValueType::String,
+        });
+        model.entries[0].output_schema = 1;
+        refresh_entry_contract_digests(&mut model);
+
+        let bytes = encode(&model).expect("Fail artifact encodes");
+        let decoded = decode_and_verify(&bytes, &DecodeLimits::default())
+            .expect("Fail artifact decodes and verifies");
+        assert_eq!(decoded.verified_module().module(), &model.module);
+
+        model.module.constants[0] = Constant::Int(1);
+        model.module.functions[0].registers[0] = ValueType::Int;
+        let error = decode_and_verify(&encode(&model).unwrap(), &DecodeLimits::default())
+            .expect_err("non-String Fail reason must be rejected after decoding");
+        assert_eq!(error.code(), ArtifactErrorCode::VerificationFailed);
+        assert!(error.message().ends_with(": fail reason"), "{error}");
+    }
+
+    #[test]
+    fn decode_instruction_round_trips_and_verifier_rejects_wrong_contracts() {
+        let mut model = artifact(false);
+        let result = ValueType::Result(Box::new(ValueType::Int), Box::new(decode_error_type()));
+        model.module.constants = vec![Constant::Bytes(b"1".to_vec())];
+        model.module.functions[0] = Function {
+            name: "pkg/x74657374/x302e312e30/x737263/x6d61696e.allen::main".to_owned(),
+            parameters: Vec::new(),
+            parameter_names: Vec::new(),
+            parameter_default_digests: Vec::new(),
+            captures: Vec::new(),
+            registers: vec![ValueType::Bytes, result.clone()],
+            return_type: result.clone(),
+            effects: 0,
+            code: vec![
+                Instruction::Const {
+                    destination: 0,
+                    constant: 0,
+                },
+                Instruction::Decode {
+                    destination: 1,
+                    source: 0,
+                    target: ValueType::Int,
+                },
+                Instruction::Return { source: 1 },
+            ],
+        };
+        model.schemas.push(StrictSchema { value_type: result });
+        model.entries[0].output_schema = 1;
+        refresh_entry_contract_digests(&mut model);
+
+        let bytes = encode(&model).expect("Decode artifact encodes");
+        let decoded = decode_and_verify(&bytes, &DecodeLimits::default())
+            .expect("Decode artifact decodes and verifies");
+        assert_eq!(decoded.verified_module().module(), &model.module);
+
+        model.module.constants[0] = Constant::String("1".to_owned());
+        model.module.functions[0].registers[0] = ValueType::String;
+        let error = decode_and_verify(&encode(&model).unwrap(), &DecodeLimits::default())
+            .expect_err("non-Bytes Decode source must be rejected");
+        assert_eq!(error.code(), ArtifactErrorCode::VerificationFailed);
+        assert!(error.message().ends_with(": decode source"), "{error}");
+    }
+
+    #[test]
+    fn bytecode_v19_round_trips_newtype_identity_and_wrap_operations() {
+        assert_eq!(BYTECODE_VERSION, 19);
+        let mut model = artifact(false);
+        let epoch = ValueType::Newtype {
+            name: "src/main.allen::EpochSeconds".to_owned(),
+            underlying: Box::new(ValueType::Int),
+        };
+        model.module.functions[0] = Function {
+            name: "pkg/x74657374/x302e312e30/x737263/x6d61696e.allen::main".to_owned(),
+            parameters: vec![0],
+            parameter_names: vec!["_arg0".to_owned()],
+            parameter_default_digests: vec![None],
+            captures: Vec::new(),
+            registers: vec![epoch.clone(), ValueType::Int, epoch.clone()],
+            return_type: epoch.clone(),
+            effects: 0,
+            code: vec![
+                Instruction::NewtypeUnwrap {
+                    destination: 1,
+                    source: 0,
+                },
+                Instruction::NewtypeWrap {
+                    destination: 2,
+                    source: 1,
+                },
+                Instruction::Return { source: 2 },
+            ],
+        };
+        model.schemas = vec![StrictSchema {
+            value_type: epoch.clone(),
+        }];
+        model.entries[0].input_schema = 0;
+        model.entries[0].output_schema = 0;
+        refresh_entry_contract_digests(&mut model);
+
+        let bytes = encode(&model).expect("newtype artifact encodes");
+        let decoded = decode_and_verify(&bytes, &DecodeLimits::default())
+            .expect("newtype artifact decodes and verifies");
+        assert_eq!(decoded.verified_module().module(), &model.module);
+        assert_eq!(decoded.schemas()[0].value_type, epoch);
+
+        let mut alternate = model.clone();
+        let retry = ValueType::Newtype {
+            name: "src/main.allen::RetryCount".to_owned(),
+            underlying: Box::new(ValueType::Int),
+        };
+        alternate.module.functions[0].registers[0] = retry.clone();
+        alternate.module.functions[0].registers[2] = retry.clone();
+        alternate.module.functions[0].return_type = retry.clone();
+        alternate.schemas[0].value_type = retry;
+        refresh_entry_contract_digests(&mut alternate);
+        assert_ne!(bytes, encode(&alternate).unwrap());
+
+        let mut invalid = model;
+        let invalid_type = ValueType::Newtype {
+            name: "EpochSeconds".to_owned(),
+            underlying: Box::new(ValueType::Int),
+        };
+        invalid.module.functions[0].registers[0] = invalid_type.clone();
+        invalid.module.functions[0].registers[2] = invalid_type.clone();
+        invalid.module.functions[0].return_type = invalid_type.clone();
+        invalid.schemas[0].value_type = invalid_type;
+        refresh_entry_contract_digests(&mut invalid);
+        assert_eq!(
+            decode_and_verify(&encode(&invalid).unwrap(), &DecodeLimits::default())
+                .unwrap_err()
+                .code(),
+            ArtifactErrorCode::VerificationFailed
+        );
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn record_validator_contract_round_trips_and_rejects_tampering() {
+        let mut model = artifact(false);
+        let record = ValueType::Record(vec![
+            RecordField {
+                name: "max".to_owned(),
+                value_type: ValueType::Int,
+            },
+            RecordField {
+                name: "min".to_owned(),
+                value_type: ValueType::Int,
+            },
+        ]);
+        model.module.constants.clear();
+        model.module.functions[0] = Function {
+            name: "pkg/x74657374/x302e312e30/x737263/x6d61696e.allen::main".to_owned(),
+            parameters: vec![0],
+            parameter_names: vec!["_arg0".to_owned()],
+            parameter_default_digests: vec![None],
+            captures: Vec::new(),
+            registers: vec![record.clone()],
+            return_type: record.clone(),
+            effects: 0,
+            code: vec![Instruction::Return { source: 0 }],
+        };
+        model.schemas[0].value_type = record;
+        model.record_invariants = vec![RecordInvariantDefinition {
+            identity: "pkg://test@0.1.0/src/main.allen::Range".to_owned(),
+            fields: vec![
+                RecordField {
+                    name: "max".to_owned(),
+                    value_type: ValueType::Int,
+                },
+                RecordField {
+                    name: "min".to_owned(),
+                    value_type: ValueType::Int,
+                },
+            ],
+            predicate: ValidatorExpr::Compare {
+                operation: CompareOp::LessEqual,
+                left: Box::new(ValidatorExpr::Field {
+                    field: 1,
+                    value_type: ValueType::Int,
+                }),
+                right: Box::new(ValidatorExpr::Field {
+                    field: 0,
+                    value_type: ValueType::Int,
+                }),
+            },
+        }];
+        let site = EntryValidatorSite {
+            path: Vec::new(),
+            invariant: 0,
+        };
+        model.entries[0].input_validators = vec![site.clone()];
+        model.entries[0].output_validators = vec![site];
+        refresh_entry_contract_digests(&mut model);
+
+        let bytes = encode(&model).expect("record validator artifact encodes");
+        let decoded = decode_and_verify(&bytes, &DecodeLimits::default())
+            .expect("record validator artifact verifies");
+        assert_eq!(decoded.record_invariants(), model.record_invariants);
+        assert_eq!(
+            decoded.entries()[0].input_validators,
+            model.entries[0].input_validators
+        );
+
+        let mut stale_identity = model.clone();
+        stale_identity.record_invariants[0].identity = "main.allen::Range".to_owned();
+        refresh_entry_contract_digests(&mut stale_identity);
+        assert_eq!(
+            encode(&stale_identity).unwrap_err().message(),
+            "record invariant identity is invalid"
+        );
+
+        let mut wrong_path = model.clone();
+        wrong_path.entries[0].input_validators[0]
+            .path
+            .push(EntryValidatorPathSegment::Field(0));
+        refresh_entry_contract_digests(&mut wrong_path);
+        assert_eq!(
+            encode(&wrong_path).unwrap_err().message(),
+            "entry validator sites do not match nominal boundary provenance"
+        );
+
+        let mut wrong_type = model.clone();
+        let ValidatorExpr::Compare { left, .. } = &mut wrong_type.record_invariants[0].predicate
+        else {
+            unreachable!()
+        };
+        *left = Box::new(ValidatorExpr::Field {
+            field: 1,
+            value_type: ValueType::Bool,
+        });
+        refresh_entry_contract_digests(&mut wrong_type);
+        assert_eq!(
+            encode(&wrong_type).unwrap_err().message(),
+            "validator field type is invalid"
+        );
+
+        let mut wrong_digest = model;
+        wrong_digest.entries[0].input_contract_digest[0] ^= 1;
+        assert_eq!(
+            encode(&wrong_digest).unwrap_err().message(),
+            "entry validator contract digest is invalid"
+        );
+
+        let recompute_input_digest = |artifact: &mut Artifact| {
+            artifact.entries[0].input_contract_digest = compute_entry_contract_digest(
+                &artifact.schemas[artifact.entries[0].input_schema as usize],
+                &artifact.entries[0].input_validators,
+                &artifact.record_invariants,
+            );
+        };
+
+        let mut cleared = wrong_digest.clone();
+        cleared.entries[0].input_validators.clear();
+        recompute_input_digest(&mut cleared);
+        assert_eq!(
+            encode(&cleared).unwrap_err().message(),
+            "entry validator sites do not match nominal boundary provenance"
+        );
+
+        let mut cleared_with_provenance = cleared.clone();
+        cleared_with_provenance.entries[0]
+            .input_record_provenance
+            .clear();
+        assert_eq!(
+            encode(&cleared_with_provenance).unwrap_err().message(),
+            "entry record provenance must cover every structural record path"
+        );
+
+        let mut added = wrong_digest.clone();
+        let duplicate = added.entries[0].input_validators[0].clone();
+        added.entries[0].input_validators.push(duplicate);
+        recompute_input_digest(&mut added);
+        assert_eq!(
+            encode(&added).unwrap_err().message(),
+            "entry validator sites must be unique and sorted"
+        );
+
+        let tuple_record = ValueType::Tuple(vec![
+            wrong_digest.schemas[0].value_type.clone(),
+            wrong_digest.schemas[0].value_type.clone(),
+        ]);
+        let mut multiple = wrong_digest;
+        multiple.module.functions[0].parameters = vec![0];
+        multiple.module.functions[0].parameter_names = vec!["_arg0".to_owned()];
+        multiple.module.functions[0].parameter_default_digests = vec![None];
+        multiple.module.functions[0].registers = vec![tuple_record.clone()];
+        multiple.module.functions[0].return_type = tuple_record.clone();
+        multiple.schemas[0].value_type = tuple_record;
+        multiple.entries[0].input_validators = vec![
+            EntryValidatorSite {
+                path: vec![EntryValidatorPathSegment::TupleElement(0)],
+                invariant: 0,
+            },
+            EntryValidatorSite {
+                path: vec![EntryValidatorPathSegment::TupleElement(1)],
+                invariant: 0,
+            },
+        ];
+        multiple.entries[0].output_validators = multiple.entries[0].input_validators.clone();
+        refresh_entry_contract_digests(&mut multiple);
+        encode(&multiple).expect("two nominal validator sites encode");
+
+        let mut omitted = multiple.clone();
+        omitted.entries[0].input_validators.pop();
+        recompute_input_digest(&mut omitted);
+        assert_eq!(
+            encode(&omitted).unwrap_err().message(),
+            "entry validator sites do not match nominal boundary provenance"
+        );
+
+        let mut reordered = multiple;
+        reordered.entries[0].input_validators.reverse();
+        recompute_input_digest(&mut reordered);
+        assert_eq!(
+            encode(&reordered).unwrap_err().message(),
+            "entry validator sites must be unique and sorted"
+        );
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn template_table_round_trips_and_rejects_contract_tampering() {
+        let mut model = artifact(false);
+        let holes = vec![TemplateHole {
+            name: "x".to_owned(),
+            value_type: ValueType::Int,
+        }];
+        model.templates = vec![TemplateResource {
+            identity: "pkg://test@0.1.0/templates/value".to_owned(),
+            content: "x={{x}}".to_owned(),
+            digest: compute_template_digest("x={{x}}", &holes),
+            holes,
+            markers: vec![TemplateMarker {
+                start: 2,
+                end: 7,
+                hole: 0,
+            }],
+        }];
+        model.module.constants = vec![Constant::Int(7)];
+        model.module.functions[0] = Function {
+            name: "pkg/x74657374/x302e312e30/x737263/x6d61696e.allen::main".to_owned(),
+            parameters: Vec::new(),
+            parameter_names: Vec::new(),
+            parameter_default_digests: Vec::new(),
+            captures: Vec::new(),
+            registers: vec![ValueType::Int, ValueType::String],
+            return_type: ValueType::String,
+            effects: 0,
+            code: vec![
+                Instruction::Const {
+                    destination: 0,
+                    constant: 0,
+                },
+                Instruction::TemplateRender {
+                    destination: 1,
+                    template: 0,
+                    arguments: vec![0],
+                },
+                Instruction::Return { source: 1 },
+            ],
+        };
+        model.schemas.push(StrictSchema {
+            value_type: ValueType::String,
+        });
+        model.entries[0].output_schema = 1;
+        refresh_entry_contract_digests(&mut model);
+
+        let bytes = encode(&model).expect("template artifact encodes");
+        let decoded = decode_and_verify(&bytes, &DecodeLimits::default())
+            .expect("template artifact verifies");
+        assert_eq!(decoded.templates(), model.templates);
+        assert!(matches!(
+            decoded.verified_module().module().functions[0].code[1],
+            Instruction::TemplateRender {
+                template: 0,
+                ref arguments,
+                ..
+            } if arguments == &[0]
+        ));
+
+        let mut hidden_extra = model.clone();
+        hidden_extra.templates[0].content = "x={{x}}/{{x}}".to_owned();
+        hidden_extra.templates[0].digest = compute_template_digest(
+            &hidden_extra.templates[0].content,
+            &hidden_extra.templates[0].holes,
+        );
+        assert_eq!(
+            encode(&hidden_extra).unwrap_err().message(),
+            "template marker table does not match the content grammar"
+        );
+
+        let mut omitted_repeated = hidden_extra.clone();
+        omitted_repeated.templates[0].markers = vec![TemplateMarker {
+            start: 2,
+            end: 7,
+            hole: 0,
+        }];
+        assert_eq!(
+            encode(&omitted_repeated).unwrap_err().message(),
+            "template marker table does not match the content grammar"
+        );
+
+        for (content, expected) in [
+            ("x={{x}} {{", "template contains an unmatched '{{' marker"),
+            ("x={{x}} }}", "template contains an unmatched '}}' marker"),
+        ] {
+            let mut unmatched = model.clone();
+            unmatched.templates[0].content = content.to_owned();
+            unmatched.templates[0].digest =
+                compute_template_digest(content, &unmatched.templates[0].holes);
+            assert_eq!(encode(&unmatched).unwrap_err().message(), expected);
+        }
+
+        let mut content = model.clone();
+        content.templates[0].content.push('!');
+        assert_eq!(
+            encode(&content).unwrap_err().code(),
+            ArtifactErrorCode::NonCanonical
+        );
+
+        let mut marker = model.clone();
+        marker.templates[0].markers[0].end = 6;
+        assert_eq!(
+            encode(&marker).unwrap_err().code(),
+            ArtifactErrorCode::NonCanonical
+        );
+
+        let mut signature = model.clone();
+        signature.templates[0].holes.push(TemplateHole {
+            name: "a".to_owned(),
+            value_type: ValueType::Bool,
+        });
+        assert_eq!(
+            encode(&signature).unwrap_err().code(),
+            ArtifactErrorCode::NonCanonical
+        );
+
+        let mut count = model.clone();
+        let Instruction::TemplateRender { arguments, .. } = &mut count.module.functions[0].code[1]
+        else {
+            unreachable!()
+        };
+        arguments.clear();
+        assert_eq!(
+            decode_and_verify(&encode(&count).unwrap(), &DecodeLimits::default())
+                .unwrap_err()
+                .code(),
+            ArtifactErrorCode::VerificationFailed
+        );
+
+        let mut operand_type = model;
+        operand_type.module.constants[0] = Constant::Bool(true);
+        operand_type.module.functions[0].registers[0] = ValueType::Bool;
+        assert_eq!(
+            decode_and_verify(&encode(&operand_type).unwrap(), &DecodeLimits::default(),)
+                .unwrap_err()
+                .code(),
+            ArtifactErrorCode::VerificationFailed
+        );
     }
 }

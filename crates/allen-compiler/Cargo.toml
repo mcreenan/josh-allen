@@ -7,12 +7,10 @@ license.workspace = true
 
 [dependencies]
 allen-bytecode = { path = "../allen-bytecode" }
+allen-vm = { path = "../allen-vm" }
 allen-package = { path = "../allen-package" }
 allen-schema = { path = "../allen-schema" }
 allen-syntax = { path = "../allen-syntax" }
-
-[dev-dependencies]
-allen-vm = { path = "../allen-vm" }
 
 [lints]
 workspace = true

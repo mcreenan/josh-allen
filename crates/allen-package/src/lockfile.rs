@@ -359,7 +359,7 @@ mod tests {
     fn rejects_unknown_duplicate_and_unsorted_lock_data() {
         let digest = format!("sha256:{}", "a".repeat(64));
         let base = format!(
-            "lock_version = 1\nlanguage = \"0.1.0\"\nroot = \"a@1.0.0\"\n\n[[package]]\nname = \"a\"\nversion = \"1.0.0\"\nsource = \".\"\ndigest = \"{digest}\"\ndependencies = []\n"
+            "lock_version = 1\nlanguage = \"0.1.1\"\nroot = \"a@1.0.0\"\n\n[[package]]\nname = \"a\"\nversion = \"1.0.0\"\nsource = \".\"\ndigest = \"{digest}\"\ndependencies = []\n"
         );
         assert!(parse_lockfile(&base).is_ok());
         assert_eq!(

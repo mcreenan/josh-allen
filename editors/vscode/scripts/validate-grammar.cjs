@@ -85,7 +85,11 @@ async function main() {
     "template-strings.allen",
     "unterminated-interpolation.allen",
     "control-flow-and-errors.allen",
-    "templates.allen"
+    "template-resources.allen",
+    "templates.allen",
+    "l1-language.allen",
+    "l2-language.allen",
+    "l3-language.allen"
   ]) {
     let state = null;
     const lines = fs.readFileSync(path.join(root, "fixtures", fixture), "utf8").split("\n");
@@ -134,6 +138,13 @@ async function main() {
   }
 
   assertScope("current.allen", "record", "storage.type.declaration.allen");
+  assertScope("current.allen", "where", "keyword.control.allen");
+  assertScope("current.allen", "newtype", "storage.type.declaration.allen");
+  assertScope("current.allen", "const", "storage.modifier.const.allen");
+  assertScope("current.allen", "test", "keyword.control.allen");
+  assertScope("current.allen", "shared answer", "string.quoted.double.allen");
+  assertScope("current.allen", "SharedAnswer", "entity.name.constant.allen");
+  assertScope("current.allen", "EpochSeconds", "entity.name.type.allen");
   assertScope("current.allen", "Point", "entity.name.type.allen");
   assertScope("current.allen", "import", "keyword.control.allen");
   assertScope("current.allen", "Int", "support.type.allen");
@@ -145,6 +156,8 @@ async function main() {
   assertScope("current.allen", "type", "storage.type.declaration.allen");
   assertScope("current.allen", "Measurements", "entity.name.type.allen");
   assertScope("current.allen", "40", "constant.numeric.allen");
+  assertScope("current.allen", "485_273", "constant.numeric.allen");
+  assertScope("current.allen", "12_345.67_89e+1_0", "constant.numeric.allen");
   assertScope("current.allen", "+", "keyword.operator.allen");
   assertScope("current.allen", "mut", "keyword.control.allen");
   assertScope("current.allen", "if", "keyword.control.allen");
@@ -155,7 +168,7 @@ async function main() {
   assertScope("current.allen", "break", "keyword.control.allen");
   assertScope("current.allen", "continue", "keyword.control.allen");
   assertScope("current.allen", "..", "keyword.operator.allen");
-  for (const operator of ["%", "+=", "-=", "*=", "/=", "%=", "&&", "||"]) {
+  for (const operator of ["%", "+=", "-=", "*=", "/=", "%=", "&&", "||", "??"]) {
     assertScope("operators.allen", operator, "keyword.operator.allen");
   }
   assertScope("spec-preview.allen", "manifest", "keyword.control.allen");
@@ -204,6 +217,25 @@ async function main() {
   assertNotKeywordScoped("control-flow-and-errors.allen", "stop");
   assertScope("templates.allen", "${", "meta.interpolation.allen");
   assertNotCommentScoped("templates.allen", "// text");
+  assertScope("l1-language.allen", "r###\"", "string.quoted.raw.allen");
+  assertScope("l1-language.allen", "r\"", "string.quoted.raw.allen");
+  assertScope("l1-language.allen", "r################\"", "string.quoted.raw.allen");
+  assertScope("l1-language.allen", "\\\\d+", "string.quoted.raw.allen");
+  assertNotCommentScoped("l1-language.allen", "${name}");
+  assertScope("l1-language.allen", "\"\"\"", "string.quoted.multiline.allen");
+  assertScope("l1-language.allen", "${", "meta.interpolation.allen");
+  assertScope("l1-language.allen", "=>", "keyword.operator.allen");
+  assertScope("l1-language.allen", "values", "variable.other.property.allen");
+  assertScope("l2-language.allen", "extension", "keyword.control.allen");
+  assertScope("l2-language.allen", "?.", "keyword.operator.allen");
+  assertScope("l2-language.allen", ">>", "keyword.operator.allen");
+  assertScope("l2-language.allen", "|>", "keyword.operator.allen");
+  assertScope("l2-language.allen", "..", "keyword.operator.allen");
+  assertScope("l3-language.allen", "Range", "support.type.allen");
+  assertScope("l3-language.allen", "Sequence", "support.type.allen");
+  assertScope("l3-language.allen", "..=", "keyword.operator.allen");
+  assertScope("l3-language.allen", "|", "keyword.operator.allen");
+  assertScope("l3-language.allen", "local_score", "entity.name.function.allen");
   assertScope("reserved-future-syntax.allen", "if", "keyword.control.allen");
   assertScope("reserved-future-syntax.allen", "else", "keyword.control.allen");
   for (const identifier of ["try", "catch", "finally", "throw"]) {

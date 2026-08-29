@@ -1,25 +1,171 @@
 use super::{
-    Binary, LowerResult, LoweredElse, LoweredEnumValuePayload, LoweredExpr, LoweredExprKind,
-    LoweredPattern, LoweredTemplatePart, Span, Unary, checked_ident, compiler_error, decode_bytes,
-    decode_string, malformed_node, required, required_ident, span_node, span_token,
+    Binary, LowerResult, LoweredCallArgument, LoweredElse, LoweredEnumValuePayload, LoweredExpr,
+    LoweredExprKind, LoweredListItem, LoweredMapItem, LoweredPattern, LoweredTemplatePart,
+    SourceWordContext, Span, SyntaxLoweringError, Unary, checked_ident, compiler_error,
+    decode_bytes, decode_string, is_forbidden_source_word, malformed_node, required,
+    required_ident, span_node, span_token,
 };
 use allen_bytecode::canonical_float_bits;
 use allen_syntax::{
-    Addition, AnonymousRecord, AstNode, AwaitBlock, Comparison, ConditionalExpression, Conjunction,
-    Disjunction, EnumPattern, EnumRecordConstructor, Equality, Expression, ListLiteral, Literal,
-    MapLiteral, MatchExpression, Multiplication, Pattern, PatternField, Postfix, Primary,
-    PromptExpression, QualifiedEnum, RecordConstructor, RecordPattern, RecordValueField,
-    SyntaxKind, SyntaxNode, SyntaxToken, TemplateInterpolation, TemplateLiteral, TemplateSegment,
-    TupleOrGroup, TypeArgument, Unary as SyntaxUnary,
+    Addition, AnonymousRecord, AstNode, AwaitBlock, CallArgument, Closure, Coalescing, Comparison,
+    Composition, ConditionalExpression, Conjunction, Disjunction, EnumPattern,
+    EnumRecordConstructor, Equality, Expression, ListItem, ListLiteral, Literal, MapItem,
+    MapLiteral, MatchExpression, Multiplication, Pattern, PatternField, PatternOr, PatternPrimary,
+    PatternRange, Pipeline, Postfix, Primary, PromptExpression, QualifiedEnum, Range,
+    RecordConstructor, RecordPattern, RecordValueField, ShortClosure, Slice, SyntaxKind,
+    SyntaxNode, SyntaxToken, TemplateInterpolation, TemplateLiteral, TemplateSegment, TupleOrGroup,
+    TypeArgument, Unary as SyntaxUnary,
 };
 use std::collections::BTreeSet;
 
 pub(super) fn lower_expression(node: &Expression) -> LowerResult<LoweredExpr> {
-    lower_disjunction(&required(
-        node.disjunction(),
-        "expression disjunction",
+    lower_range(&required(node.range(), "expression range", node.syntax())?)
+}
+
+fn lower_range(node: &Range) -> LowerResult<LoweredExpr> {
+    let operands = node.coalescings().collect::<Vec<_>>();
+    let first = required(operands.first().cloned(), "range start", node.syntax())?;
+    let start = lower_coalescing(&first)?;
+    let operator = node.dot_dot_token().or_else(|| node.dot_dot_eq_token());
+    let Some(operator) = operator else {
+        return Ok(start);
+    };
+    let end = lower_coalescing(&required(
+        operands.get(1).cloned(),
+        "range end",
         node.syntax(),
-    )?)
+    )?)?;
+    Ok(LoweredExpr {
+        kind: LoweredExprKind::Range {
+            start: Box::new(start),
+            end: Box::new(end),
+            inclusive: operator.kind() == SyntaxKind::DotDotEq,
+            operator_span: span_token(&operator),
+        },
+        span: span_node(node.syntax()),
+    })
+}
+
+fn lower_coalescing(node: &Coalescing) -> LowerResult<LoweredExpr> {
+    const VALUE: &str = "__allen_coalesced_value";
+
+    let left = lower_pipeline(&required(
+        node.pipeline(),
+        "coalescing left operand",
+        node.syntax(),
+    )?)?;
+    let Some(operator) = node.question_question_token() else {
+        return Ok(left);
+    };
+    let right = lower_coalescing(&required(
+        node.coalescing(),
+        "coalescing right operand",
+        node.syntax(),
+    )?)?;
+    let span = span_node(node.syntax());
+    let pattern_span = span_token(&operator);
+    Ok(LoweredExpr {
+        kind: LoweredExprKind::Match {
+            source: Box::new(left),
+            arms: vec![
+                (
+                    LoweredPattern::Option {
+                        some: false,
+                        payload: None,
+                    },
+                    right,
+                    pattern_span,
+                ),
+                (
+                    LoweredPattern::Option {
+                        some: true,
+                        payload: Some(Box::new(LoweredPattern::Binding {
+                            name: VALUE.to_owned(),
+                            span: pattern_span,
+                        })),
+                    },
+                    LoweredExpr {
+                        kind: LoweredExprKind::Variable(VALUE.to_owned()),
+                        span: pattern_span,
+                    },
+                    pattern_span,
+                ),
+            ],
+        },
+        span,
+    })
+}
+
+fn lower_pipeline(node: &Pipeline) -> LowerResult<LoweredExpr> {
+    fold_call_operator(
+        node.compositions(),
+        node.pipe_gt_tokens()
+            .map(|token| span_token(&token))
+            .collect(),
+        lower_composition,
+        node.syntax(),
+        |left, stage, operator_span| LoweredExprKind::Pipe {
+            left: Box::new(left),
+            stage: Box::new(stage),
+            operator_span,
+        },
+    )
+}
+
+fn lower_composition(node: &Composition) -> LowerResult<LoweredExpr> {
+    let tokens = node.gt_tokens().collect::<Vec<_>>();
+    if tokens.len() % 2 != 0 {
+        return Err(malformed_node("composition operator", node.syntax()));
+    }
+    let operators = tokens
+        .chunks_exact(2)
+        .map(|pair| Span {
+            start: span_token(&pair[0]).start,
+            end: span_token(&pair[1]).end,
+        })
+        .collect();
+    fold_call_operator(
+        node.disjunctions(),
+        operators,
+        lower_disjunction,
+        node.syntax(),
+        |left, right, operator_span| LoweredExprKind::Compose {
+            left: Box::new(left),
+            right: Box::new(right),
+            operator_span,
+        },
+    )
+}
+
+fn fold_call_operator<T>(
+    operands: impl IntoIterator<Item = T>,
+    mut operators: Vec<Span>,
+    lower: impl Fn(&T) -> LowerResult<LoweredExpr>,
+    owner: &SyntaxNode,
+    make: impl Fn(LoweredExpr, LoweredExpr, Span) -> LoweredExprKind,
+) -> LowerResult<LoweredExpr> {
+    let operands = operands.into_iter().collect::<Vec<_>>();
+    operators.sort_by_key(|span| span.start);
+    if operands.len() != operators.len().saturating_add(1) {
+        return Err(malformed_node("call operator operand sequence", owner));
+    }
+    let mut operands = operands.iter();
+    let first = operands
+        .next()
+        .ok_or_else(|| malformed_node("call operator operand", owner))?;
+    let mut expression = lower(first)?;
+    for (operator_span, operand) in operators.into_iter().zip(operands) {
+        let right = lower(operand)?;
+        let span = Span {
+            start: expression.span.start,
+            end: right.span.end,
+        };
+        expression = LoweredExpr {
+            kind: make(expression, right, operator_span),
+            span,
+        };
+    }
+    Ok(expression)
 }
 
 fn lower_disjunction(node: &Disjunction) -> LowerResult<LoweredExpr> {
@@ -179,38 +325,56 @@ fn is_minimum_int_magnitude(node: &SyntaxUnary) -> bool {
         .and_then(|postfix| postfix.primary())
         .and_then(|primary| primary.literal())
         .and_then(|literal| literal.int_literal_token())
-        .is_some_and(|token| token.text() == "9223372036854775808")
+        .is_some_and(|token| {
+            let digits = token
+                .text()
+                .bytes()
+                .filter(|byte| *byte != b'_')
+                .collect::<Vec<_>>();
+            let normalized = &digits[digits
+                .iter()
+                .position(|byte| *byte != b'0')
+                .unwrap_or(digits.len())..];
+            normalized == b"9223372036854775808"
+        })
 }
 
 enum PostfixOperation {
-    Index {
-        opener: SyntaxToken,
-        closer: SyntaxToken,
-        index: Expression,
-    },
+    Slice(Slice),
     Field {
         dot: SyntaxToken,
+        name: SyntaxToken,
+    },
+    OptionalField {
+        operator: SyntaxToken,
         name: SyntaxToken,
     },
     Call {
         opener: SyntaxToken,
         closer: SyntaxToken,
         type_argument: Option<TypeArgument>,
-        arguments: Vec<Expression>,
+        arguments: Vec<CallArgument>,
     },
     Try(SyntaxToken),
+    TrailingClosure(Closure),
+    TrailingShortClosure(ShortClosure),
 }
 
 impl PostfixOperation {
     fn start(&self) -> allen_syntax::TextSize {
         match self {
-            Self::Index { opener, .. } | Self::Call { opener, .. } => opener.text_range().start(),
+            Self::Slice(slice) => slice.syntax().text_range().start(),
+            Self::Call { opener, .. } => opener.text_range().start(),
             Self::Field { dot, .. } => dot.text_range().start(),
+            Self::OptionalField { operator, .. } => operator.text_range().start(),
             Self::Try(token) => token.text_range().start(),
+            Self::TrailingClosure(closure) => closure.syntax().text_range().start(),
+            Self::TrailingShortClosure(closure) => closure.syntax().text_range().start(),
         }
     }
 }
 
+#[allow(clippy::too_many_lines)]
 fn lower_postfix(node: &Postfix) -> LowerResult<LoweredExpr> {
     let primary = required(node.primary(), "postfix primary", node.syntax())?;
     let mut expression = lower_primary(&primary)?;
@@ -219,24 +383,53 @@ fn lower_postfix(node: &Postfix) -> LowerResult<LoweredExpr> {
     for operation in operations {
         let start = expression.span.start;
         match operation {
-            PostfixOperation::Index { closer, index, .. } => {
+            PostfixOperation::Slice(slice) => {
+                let index = lower_expression(&required(
+                    slice.index(),
+                    "slice or index expression",
+                    slice.syntax(),
+                )?)?;
+                let bracket_span = span_node(slice.syntax());
                 expression = LoweredExpr {
-                    kind: LoweredExprKind::Index {
-                        collection: Box::new(expression),
-                        index: Box::new(lower_expression(&index)?),
+                    kind: if matches!(index.kind, LoweredExprKind::Range { .. }) {
+                        LoweredExprKind::Slice {
+                            collection: Box::new(expression),
+                            range: Box::new(index),
+                            bracket_span,
+                        }
+                    } else {
+                        LoweredExprKind::Index {
+                            collection: Box::new(expression),
+                            index: Box::new(index),
+                        }
                     },
                     span: Span {
                         start,
-                        end: span_token(&closer).end,
+                        end: bracket_span.end,
                     },
                 };
             }
             PostfixOperation::Field { name, .. } => {
-                let (field, field_span) = checked_ident(&name, "field name")?;
+                let (field, field_span) = checked_field_name(&name, "field name")?;
                 expression = LoweredExpr {
                     kind: LoweredExprKind::FieldGet {
                         record: Box::new(expression),
                         field,
+                        field_span,
+                    },
+                    span: Span {
+                        start,
+                        end: field_span.end,
+                    },
+                };
+            }
+            PostfixOperation::OptionalField { operator, name } => {
+                let (field, field_span) = checked_field_name(&name, "optional field name")?;
+                expression = LoweredExpr {
+                    kind: LoweredExprKind::OptionalFieldGet {
+                        receiver: Box::new(expression),
+                        field,
+                        operator_span: span_token(&operator),
                         field_span,
                     },
                     span: Span {
@@ -263,7 +456,7 @@ fn lower_postfix(node: &Postfix) -> LowerResult<LoweredExpr> {
                     .collect::<LowerResult<Vec<_>>>()?;
                 let arguments = arguments
                     .iter()
-                    .map(lower_expression)
+                    .map(lower_call_argument)
                     .collect::<LowerResult<_>>()?;
                 expression = LoweredExpr {
                     kind: LoweredExprKind::Call {
@@ -286,6 +479,12 @@ fn lower_postfix(node: &Postfix) -> LowerResult<LoweredExpr> {
                     },
                 };
             }
+            PostfixOperation::TrailingClosure(closure) => {
+                expression = append_trailing_callback(expression, lower_closure(&closure)?)?;
+            }
+            PostfixOperation::TrailingShortClosure(closure) => {
+                expression = append_trailing_callback(expression, lower_short_closure(&closure)?)?;
+            }
         }
     }
     Ok(expression)
@@ -293,37 +492,38 @@ fn lower_postfix(node: &Postfix) -> LowerResult<LoweredExpr> {
 
 fn collect_postfix_operations(node: &Postfix) -> LowerResult<Vec<PostfixOperation>> {
     let mut operations = Vec::new();
-    let brackets = pair_tokens(
-        node.l_bracket_tokens().collect(),
-        node.r_bracket_tokens().collect(),
-        "postfix index delimiters",
-        node.syntax(),
-    )?;
-    let indices = node.indices().collect::<Vec<_>>();
-    if brackets.len() != indices.len() {
-        return Err(malformed_node("postfix index", node.syntax()));
-    }
-    operations.extend(
-        brackets
-            .into_iter()
-            .zip(indices)
-            .map(|((opener, closer), index)| PostfixOperation::Index {
-                opener,
-                closer,
-                index,
-            }),
-    );
+    operations.extend(node.slices().map(PostfixOperation::Slice));
 
-    let dots = node.dot_tokens().collect::<Vec<_>>();
-    let names = node.field_names_tokens().collect::<Vec<_>>();
-    if dots.len() != names.len() {
+    let mut member_operators = node
+        .dot_tokens()
+        .map(|token| (token, false))
+        .chain(node.question_dot_tokens().map(|token| (token, true)))
+        .collect::<Vec<_>>();
+    member_operators.sort_by_key(|(token, _)| token.text_range().start());
+    let names = node
+        .syntax()
+        .children_with_tokens()
+        .filter_map(|element| match element {
+            allen_syntax::SyntaxElement::Token(token) => Some(token),
+            allen_syntax::SyntaxElement::Node(_) => None,
+        })
+        .filter(|token| matches!(token.kind(), SyntaxKind::Ident | SyntaxKind::KwMap))
+        .collect::<Vec<_>>();
+    if member_operators.len() != names.len() {
         return Err(malformed_node("postfix field", node.syntax()));
     }
-    operations.extend(
-        dots.into_iter()
-            .zip(names)
-            .map(|(dot, name)| PostfixOperation::Field { dot, name }),
-    );
+    operations.extend(member_operators.into_iter().zip(names).map(
+        |((operator, optional), name)| {
+            if optional {
+                PostfixOperation::OptionalField { operator, name }
+            } else {
+                PostfixOperation::Field {
+                    dot: operator,
+                    name,
+                }
+            }
+        },
+    ));
 
     let calls = pair_tokens(
         node.l_paren_tokens().collect(),
@@ -331,7 +531,7 @@ fn collect_postfix_operations(node: &Postfix) -> LowerResult<Vec<PostfixOperatio
         "postfix call delimiters",
         node.syntax(),
     )?;
-    let arguments = node.arguments().collect::<Vec<_>>();
+    let arguments = node.call_arguments().collect::<Vec<_>>();
     let type_arguments = node.call_type_arguments().collect::<Vec<_>>();
     let mut previous_call_end = allen_syntax::TextSize::from(0);
     for (opener, closer) in calls {
@@ -365,7 +565,54 @@ fn collect_postfix_operations(node: &Postfix) -> LowerResult<Vec<PostfixOperatio
         previous_call_end = closer.text_range().end();
     }
     operations.extend(node.question_tokens().map(PostfixOperation::Try));
+    operations.extend(node.closures().map(PostfixOperation::TrailingClosure));
+    operations.extend(
+        node.short_closures()
+            .map(PostfixOperation::TrailingShortClosure),
+    );
     Ok(operations)
+}
+
+fn append_trailing_callback(
+    mut call: LoweredExpr,
+    callback: LoweredExpr,
+) -> LowerResult<LoweredExpr> {
+    let call_span = call.span;
+    let callback_span = callback.span;
+    let LoweredExprKind::Call { arguments, .. } = &mut call.kind else {
+        return Err(SyntaxLoweringError::MalformedTree {
+            expected: "trailing callback call",
+            span: callback_span,
+        });
+    };
+    arguments.push(LoweredCallArgument {
+        label: None,
+        value: callback,
+        placeholder: false,
+        trailing: true,
+        preceding_call_span: Some(call_span),
+        span: callback_span,
+    });
+    call.span.end = callback_span.end;
+    Ok(call)
+}
+
+fn checked_field_name(token: &SyntaxToken, expected: &'static str) -> LowerResult<(String, Span)> {
+    if token.kind() == SyntaxKind::KwMap {
+        return Ok((token.text().to_owned(), span_token(token)));
+    }
+    if token.kind() != SyntaxKind::Ident {
+        return checked_ident(token, expected);
+    }
+    let name = token.text().to_owned();
+    if is_forbidden_source_word(&name, SourceWordContext::MemberName) {
+        return Err(compiler_error(
+            "E2020",
+            format!("'{name}' is forbidden; use Option<T> or unknown"),
+            span_token(token),
+        ));
+    }
+    Ok((name, span_token(token)))
 }
 
 fn pair_tokens(
@@ -380,6 +627,34 @@ fn pair_tokens(
         return Err(malformed_node(expected, owner));
     }
     Ok(openers.into_iter().zip(closers).collect())
+}
+
+fn lower_call_argument(node: &CallArgument) -> LowerResult<LoweredCallArgument> {
+    let label = node
+        .argument_label_token()
+        .map(|token| checked_ident(&token, "call argument label"))
+        .transpose()?;
+    let placeholder = node.underscore_token().is_some();
+    let value = if placeholder {
+        LoweredExpr {
+            kind: LoweredExprKind::Variable("_".to_owned()),
+            span: span_node(node.syntax()),
+        }
+    } else {
+        lower_expression(&required(
+            node.value(),
+            "call argument expression",
+            node.syntax(),
+        )?)?
+    };
+    Ok(LoweredCallArgument {
+        label,
+        span: span_node(node.syntax()),
+        value,
+        placeholder,
+        trailing: false,
+        preceding_call_span: None,
+    })
 }
 
 fn lower_primary(node: &Primary) -> LowerResult<LoweredExpr> {
@@ -427,6 +702,8 @@ fn lower_primary(node: &Primary) -> LowerResult<LoweredExpr> {
         lower_conditional(&conditional)
     } else if let Some(closure) = node.closure() {
         lower_closure(&closure)
+    } else if let Some(closure) = node.short_closure() {
+        lower_short_closure(&closure)
     } else if let Some(prompt) = node.prompt_expression() {
         lower_prompt(&prompt)
     } else if let Some(await_block) = node.await_block() {
@@ -436,10 +713,29 @@ fn lower_primary(node: &Primary) -> LowerResult<LoweredExpr> {
     }
 }
 
+fn lower_short_closure(node: &ShortClosure) -> LowerResult<LoweredExpr> {
+    let parameters = node
+        .parameter_names_tokens()
+        .map(|token| checked_ident(&token, "concise lambda parameter"))
+        .collect::<LowerResult<_>>()?;
+    let body = lower_expression(&required(
+        node.body(),
+        "concise lambda body",
+        node.syntax(),
+    )?)?;
+    Ok(LoweredExpr {
+        kind: LoweredExprKind::ShortClosure {
+            parameters,
+            body: Box::new(body),
+        },
+        span: span_node(node.syntax()),
+    })
+}
+
 fn lower_literal(node: &Literal) -> LowerResult<LoweredExpr> {
     if let Some(token) = node.int_literal_token() {
         let span = span_token(&token);
-        let value = token.text().parse::<i64>().map_err(|_| {
+        let value = token.text().replace('_', "").parse::<i64>().map_err(|_| {
             compiler_error(
                 "E3005",
                 "integer literal is out of range unless immediately preceded by '-'",
@@ -454,8 +750,12 @@ fn lower_literal(node: &Literal) -> LowerResult<LoweredExpr> {
         let span = span_token(&token);
         let value = token
             .text()
+            .replace('_', "")
             .parse::<f64>()
             .map_err(|_| compiler_error("E0003", "invalid Float literal", span))?;
+        if !value.is_finite() {
+            return Err(compiler_error("E0003", "invalid Float literal", span));
+        }
         Ok(LoweredExpr {
             kind: LoweredExprKind::Float(canonical_float_bits(value.to_bits())),
             span,
@@ -493,12 +793,15 @@ fn lower_literal(node: &Literal) -> LowerResult<LoweredExpr> {
 }
 
 fn lower_template(node: &TemplateLiteral) -> LowerResult<LoweredExpr> {
-    let opener = required(node.open_backtick_token(), "template opener", node.syntax())?;
-    let closer = required(
-        node.close_backtick_token(),
-        "template closer",
-        node.syntax(),
-    )?;
+    let opener = node
+        .open_backtick_token()
+        .or_else(|| node.open_multiline_delimiter_token())
+        .ok_or_else(|| malformed_node("template opener", node.syntax()))?;
+    let closer = node
+        .close_backtick_token()
+        .or_else(|| node.close_multiline_delimiter_token())
+        .ok_or_else(|| malformed_node("template closer", node.syntax()))?;
+    let multiline = opener.kind() == SyntaxKind::MultilineStringDelimiter;
     let mut segments = node.template_segments().collect::<Vec<_>>();
     segments.sort_by_key(|segment| segment.syntax().text_range().start());
     let mut interpolations = node.template_interpolations().collect::<Vec<_>>();
@@ -540,6 +843,9 @@ fn lower_template(node: &TemplateLiteral) -> LowerResult<LoweredExpr> {
             end: u32::from(closer.text_range().start()) as usize,
         },
     });
+    if multiline {
+        trim_multiline_template(&mut parts, span_node(node.syntax()))?;
+    }
     Ok(LoweredExpr {
         kind: LoweredExprKind::Template(parts),
         span: Span {
@@ -547,6 +853,101 @@ fn lower_template(node: &TemplateLiteral) -> LowerResult<LoweredExpr> {
             end: span_token(&closer).end,
         },
     })
+}
+
+fn trim_multiline_template(parts: &mut [LoweredTemplatePart], span: Span) -> LowerResult<()> {
+    let literal_indexes = parts
+        .iter()
+        .enumerate()
+        .filter_map(|(index, part)| {
+            matches!(part, LoweredTemplatePart::Literal { .. }).then_some(index)
+        })
+        .collect::<Vec<_>>();
+    for index in &literal_indexes {
+        if let LoweredTemplatePart::Literal { value, .. } = &mut parts[*index] {
+            *value = value.replace("\r\n", "\n").replace('\r', "\n");
+        }
+    }
+    if let Some(first) = literal_indexes.first() {
+        if let LoweredTemplatePart::Literal { value, .. } = &mut parts[*first] {
+            *value = value.strip_prefix('\n').unwrap_or(value).to_owned();
+        }
+    }
+    let mut closing_indentation = String::new();
+    if let Some(last) = literal_indexes.last() {
+        if let LoweredTemplatePart::Literal { value, .. } = &mut parts[*last] {
+            value
+                .rsplit_once('\n')
+                .map_or_else(|| value.as_str(), |(_, indentation)| indentation)
+                .clone_into(&mut closing_indentation);
+            if !closing_indentation
+                .bytes()
+                .all(|byte| matches!(byte, b' ' | b'\t'))
+            {
+                return Err(compiler_error(
+                    "E3005",
+                    "multiline string closing delimiter must begin on its own line",
+                    span,
+                ));
+            }
+            let without_closing_indent = value.trim_end_matches([' ', '\t']);
+            *value = without_closing_indent
+                .strip_suffix('\n')
+                .unwrap_or(without_closing_indent)
+                .to_owned();
+        }
+    }
+
+    let indentation = parts
+        .iter()
+        .filter_map(|part| match part {
+            LoweredTemplatePart::Literal { value, .. } => Some(value),
+            LoweredTemplatePart::Interpolation(_) => None,
+        })
+        .flat_map(|value| value.split('\n'))
+        .filter(|line| !line.trim_matches([' ', '\t']).is_empty())
+        .map(|line| {
+            line.bytes()
+                .take_while(|byte| matches!(byte, b' ' | b'\t'))
+                .count()
+        })
+        .min();
+    let Some(indentation) = indentation else {
+        return Ok(());
+    };
+    let closing_width = closing_indentation.len();
+    if indentation < closing_width {
+        return Err(compiler_error(
+            "E3005",
+            "multiline string content is less indented than its closing delimiter",
+            span,
+        ));
+    }
+    let indentation = indentation.min(closing_width);
+    if indentation == 0 {
+        return Ok(());
+    }
+    for index in literal_indexes {
+        let LoweredTemplatePart::Literal { value, .. } = &mut parts[index] else {
+            continue;
+        };
+        *value = value
+            .split('\n')
+            .map(|line| {
+                let prefix = line
+                    .bytes()
+                    .take_while(|byte| matches!(byte, b' ' | b'\t'))
+                    .count();
+                if !line.trim_matches([' ', '\t']).is_empty() && prefix >= indentation {
+                    &line[indentation..]
+                } else {
+                    line
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+    }
+    Ok(())
 }
 
 fn decode_template_segment(node: &TemplateSegment) -> LowerResult<String> {
@@ -600,7 +1001,7 @@ fn lower_enum_record_constructor(node: &EnumRecordConstructor) -> LowerResult<Lo
 fn lower_qualified_enum(node: &QualifiedEnum) -> LowerResult<LoweredExpr> {
     let (name, name_span) = required_ident(node.enum_name_token(), "enum name", node.syntax())?;
     let (field, field_span) =
-        required_ident(node.variant_name_token(), "variant name", node.syntax())?;
+        required_member_name(node.variant_name_token(), "variant name", node.syntax())?;
     let record = LoweredExpr {
         kind: LoweredExprKind::Variable(name),
         span: name_span,
@@ -615,13 +1016,41 @@ fn lower_qualified_enum(node: &QualifiedEnum) -> LowerResult<LoweredExpr> {
     })
 }
 
+fn required_member_name(
+    token: Option<SyntaxToken>,
+    expected: &'static str,
+    owner: &SyntaxNode,
+) -> LowerResult<(String, Span)> {
+    let token = token.ok_or_else(|| malformed_node(expected, owner))?;
+    checked_field_name(&token, expected)
+}
+
 fn lower_record_constructor(node: &RecordConstructor) -> LowerResult<LoweredExpr> {
     let (name, _) = required_ident(node.ident_token(), "record name", node.syntax())?;
+    let fields = lower_record_value_fields(node.record_value_fields())?;
+    if let Some(update) = node.record_update_base() {
+        let spread = required(
+            update.dot_dot_token(),
+            "record update spread",
+            update.syntax(),
+        )?;
+        let base = lower_expression(&required(
+            update.base(),
+            "record update base",
+            update.syntax(),
+        )?)?;
+        return Ok(LoweredExpr {
+            kind: LoweredExprKind::RecordUpdate {
+                name,
+                base: Box::new(base),
+                spread_span: span_token(&spread),
+                fields,
+            },
+            span: span_node(node.syntax()),
+        });
+    }
     Ok(LoweredExpr {
-        kind: LoweredExprKind::Record {
-            name,
-            fields: lower_record_value_fields(node.record_value_fields())?,
-        },
+        kind: LoweredExprKind::Record { name, fields },
         span: span_node(node.syntax()),
     })
 }
@@ -639,11 +1068,31 @@ fn lower_anonymous_record(node: &AnonymousRecord) -> LowerResult<LoweredExpr> {
     } else {
         "$anonymous"
     };
-    Ok(LoweredExpr {
-        kind: LoweredExprKind::Record {
+    let kind = if let Some(update) = node.record_update_base() {
+        let spread = required(
+            update.dot_dot_token(),
+            "record update spread",
+            update.syntax(),
+        )?;
+        let base = lower_expression(&required(
+            update.base(),
+            "record update base",
+            update.syntax(),
+        )?)?;
+        LoweredExprKind::RecordUpdate {
+            name: name.to_owned(),
+            base: Box::new(base),
+            spread_span: span_token(&spread),
+            fields,
+        }
+    } else {
+        LoweredExprKind::Record {
             name: name.to_owned(),
             fields,
-        },
+        }
+    };
+    Ok(LoweredExpr {
+        kind,
         span: span_node(node.syntax()),
     })
 }
@@ -671,30 +1120,73 @@ fn lower_record_value_fields(
 }
 
 fn lower_list(node: &ListLiteral) -> LowerResult<LoweredExpr> {
+    let items = node
+        .list_items()
+        .map(|item| lower_list_item(&item))
+        .collect::<LowerResult<Vec<_>>>()?;
+    if items.iter().any(|item| item.spread) {
+        return Ok(LoweredExpr {
+            kind: LoweredExprKind::ListWithSpread(items),
+            span: span_node(node.syntax()),
+        });
+    }
     Ok(LoweredExpr {
-        kind: LoweredExprKind::List(
-            node.expressions()
-                .map(|expression| lower_expression(&expression))
-                .collect::<LowerResult<_>>()?,
-        ),
+        kind: LoweredExprKind::List(items.into_iter().map(|item| item.value).collect()),
+        span: span_node(node.syntax()),
+    })
+}
+
+fn lower_list_item(node: &ListItem) -> LowerResult<LoweredListItem> {
+    let spread = node.dot_dot_token().is_some();
+    let expression = if spread { node.spread() } else { node.value() };
+    Ok(LoweredListItem {
+        spread,
+        value: lower_expression(&required(expression, "list item", node.syntax())?)?,
         span: span_node(node.syntax()),
     })
 }
 
 fn lower_map(node: &MapLiteral) -> LowerResult<LoweredExpr> {
-    let keys = node.keys().collect::<Vec<_>>();
-    let values = node.values().collect::<Vec<_>>();
-    if keys.len() != values.len() {
-        return Err(malformed_node("map key/value pairs", node.syntax()));
-    }
-    let entries = keys
+    let items = node
+        .map_items()
+        .map(|item| lower_map_item(&item))
+        .collect::<LowerResult<Vec<_>>>()?;
+    if items
         .iter()
-        .zip(values.iter())
-        .map(|(key, value)| Ok((lower_expression(key)?, lower_expression(value)?)))
+        .any(|item| matches!(item, LoweredMapItem::Spread { .. }))
+    {
+        return Ok(LoweredExpr {
+            kind: LoweredExprKind::MapWithSpread(items),
+            span: span_node(node.syntax()),
+        });
+    }
+    let entries = items
+        .into_iter()
+        .map(|item| match item {
+            LoweredMapItem::Entry { key, value, .. } => Ok((key, value)),
+            LoweredMapItem::Spread { .. } => {
+                Err(malformed_node("ordinary map entry", node.syntax()))
+            }
+        })
         .collect::<LowerResult<_>>()?;
     Ok(LoweredExpr {
         kind: LoweredExprKind::Map(entries),
         span: span_node(node.syntax()),
+    })
+}
+
+fn lower_map_item(node: &MapItem) -> LowerResult<LoweredMapItem> {
+    let span = span_node(node.syntax());
+    if node.dot_dot_token().is_some() {
+        return Ok(LoweredMapItem::Spread {
+            value: lower_expression(&required(node.spread(), "map spread", node.syntax())?)?,
+            span,
+        });
+    }
+    Ok(LoweredMapItem::Entry {
+        key: lower_expression(&required(node.key(), "map entry key", node.syntax())?)?,
+        value: lower_expression(&required(node.value(), "map entry value", node.syntax())?)?,
+        span,
     })
 }
 
@@ -747,39 +1239,152 @@ fn lower_match(node: &MatchExpression) -> LowerResult<LoweredExpr> {
 
 fn lower_pattern(node: &Pattern) -> LowerResult<(LoweredPattern, Span)> {
     let span = span_node(node.syntax());
+    let pattern = lower_pattern_or(&required(node.pattern_or(), "OR pattern", node.syntax())?)?;
+    Ok((pattern, span))
+}
+
+fn lower_pattern_or(node: &PatternOr) -> LowerResult<LoweredPattern> {
+    let alternatives = node
+        .pattern_primaries()
+        .map(|pattern| lower_pattern_primary(&pattern))
+        .collect::<LowerResult<Vec<_>>>()?;
+    if alternatives.len() == 1 {
+        return Ok(alternatives.into_iter().next().expect("one alternative"));
+    }
+    if alternatives.is_empty() {
+        return Err(malformed_node("OR pattern alternative", node.syntax()));
+    }
+    Ok(LoweredPattern::Or {
+        alternatives,
+        operator_spans: node.pipe_tokens().map(|token| span_token(&token)).collect(),
+    })
+}
+
+fn lower_pattern_primary(node: &PatternPrimary) -> LowerResult<LoweredPattern> {
     let pattern = if node.some_token().is_some() {
         LoweredPattern::Option {
             some: true,
-            binding: node
-                .binding_name_token()
-                .map(|token| checked_ident(&token, "option pattern binding").map(|value| value.0))
-                .transpose()?,
+            payload: Some(Box::new(
+                lower_pattern(&required(
+                    node.pattern(),
+                    "option payload pattern",
+                    node.syntax(),
+                )?)?
+                .0,
+            )),
         }
     } else if node.ok_token().is_some() || node.err_token().is_some() {
         LoweredPattern::Result {
             ok: node.ok_token().is_some(),
-            binding: node
-                .binding_name_token()
-                .map(|token| checked_ident(&token, "result pattern binding").map(|value| value.0))
-                .transpose()?,
+            payload: Box::new(
+                lower_pattern(&required(
+                    node.pattern(),
+                    "result payload pattern",
+                    node.syntax(),
+                )?)?
+                .0,
+            ),
         }
     } else if node.none_token().is_some() {
         LoweredPattern::Option {
             some: false,
-            binding: None,
+            payload: None,
         }
     } else if node.underscore_token().is_some() {
         LoweredPattern::Wildcard
     } else if node.true_token().is_some() || node.false_token().is_some() {
         LoweredPattern::Bool(node.true_token().is_some())
+    } else if let Some(token) = node.binding_name_token() {
+        let (name, span) = checked_ident(&token, "pattern binding")?;
+        LoweredPattern::Binding { name, span }
     } else if let Some(record) = node.record_pattern() {
         lower_record_pattern(&record)?
     } else if let Some(enumeration) = node.enum_pattern() {
         lower_enum_pattern(&enumeration)?
+    } else if let Some(range) = node.pattern_range() {
+        lower_pattern_range(&range)?
     } else {
-        return Err(malformed_node("pattern alternative", node.syntax()));
+        return Err(malformed_node("primary pattern alternative", node.syntax()));
     };
-    Ok((pattern, span))
+    Ok(pattern)
+}
+
+fn lower_pattern_range(node: &PatternRange) -> LowerResult<LoweredPattern> {
+    let literals = node.literals().collect::<Vec<_>>();
+    let operator = required(
+        node.dot_dot_token().or_else(|| node.dot_dot_eq_token()),
+        "range-pattern operator",
+        node.syntax(),
+    )?;
+    let operator_span = span_token(&operator);
+    let minus_spans = node
+        .minus_tokens()
+        .map(|token| span_token(&token))
+        .collect::<Vec<_>>();
+    let start = lower_pattern_range_endpoint(
+        &required(
+            literals.first().cloned(),
+            "range-pattern start literal",
+            node.syntax(),
+        )?,
+        minus_spans
+            .iter()
+            .find(|span| span.start < operator_span.start)
+            .copied(),
+    )?;
+    let end = lower_pattern_range_endpoint(
+        &required(
+            literals.get(1).cloned(),
+            "range-pattern end literal",
+            node.syntax(),
+        )?,
+        minus_spans
+            .iter()
+            .find(|span| span.start >= operator_span.end)
+            .copied(),
+    )?;
+    Ok(LoweredPattern::Range {
+        start,
+        end,
+        inclusive: operator.kind() == SyntaxKind::DotDotEq,
+        operator_span,
+    })
+}
+
+fn lower_pattern_range_endpoint(
+    literal: &Literal,
+    minus_span: Option<Span>,
+) -> LowerResult<LoweredExpr> {
+    let Some(minus_span) = minus_span else {
+        return lower_literal(literal);
+    };
+    let token = required(
+        literal.int_literal_token(),
+        "Int range-pattern endpoint after '-'",
+        literal.syntax(),
+    )?;
+    let literal_span = span_token(&token);
+    let magnitude =
+        token.text().replace('_', "").parse::<u64>().map_err(|_| {
+            compiler_error("E3005", "integer literal is out of range", literal_span)
+        })?;
+    let value = if magnitude == (i64::MAX as u64) + 1 {
+        i64::MIN
+    } else {
+        i64::try_from(magnitude)
+            .ok()
+            .and_then(i64::checked_neg)
+            .ok_or_else(|| {
+                compiler_error("E3005", "integer literal is out of range", literal_span)
+            })?
+    };
+    Ok(LoweredExpr {
+        kind: LoweredExprKind::Int(value),
+        span: Span {
+            start: minus_span.start,
+            end: literal_span.end,
+        },
+    })
 }
 
 fn lower_record_pattern(node: &RecordPattern) -> LowerResult<LoweredPattern> {
@@ -797,18 +1402,9 @@ fn lower_enum_pattern(node: &EnumPattern) -> LowerResult<LoweredPattern> {
         "enum pattern variant",
         node.syntax(),
     )?;
-    let mut binding_tokens = node.binding_names_tokens().collect::<Vec<_>>();
-    binding_tokens.extend(node.underscore_tokens());
-    binding_tokens.sort_by_key(|token| token.text_range().start());
-    let bindings = binding_tokens
-        .into_iter()
-        .map(|token| {
-            if token.kind() == SyntaxKind::Underscore {
-                Ok(None)
-            } else {
-                checked_ident(&token, "enum pattern binding").map(|value| Some(value.0))
-            }
-        })
+    let patterns = node
+        .patterns()
+        .map(|pattern| lower_pattern(&pattern).map(|value| value.0))
         .collect::<LowerResult<_>>()?;
     let fields = node
         .l_brace_token()
@@ -818,30 +1414,35 @@ fn lower_enum_pattern(node: &EnumPattern) -> LowerResult<LoweredPattern> {
     Ok(LoweredPattern::Enum {
         name,
         variant,
-        bindings,
+        patterns,
         fields,
     })
 }
 
 fn lower_pattern_fields(
     fields: impl IntoIterator<Item = PatternField>,
-) -> LowerResult<Vec<(String, Span, Option<String>)>> {
+) -> LowerResult<Vec<(String, Span, Box<LoweredPattern>)>> {
     fields
         .into_iter()
         .map(|field| {
             let (name, span) =
                 required_ident(field.field_name_token(), "pattern field", field.syntax())?;
-            let binding = if field.colon_token().is_some() {
-                field
-                    .binding_name_token()
-                    .map(|token| {
-                        checked_ident(&token, "pattern field binding").map(|value| value.0)
-                    })
-                    .transpose()?
+            let pattern = if field.colon_token().is_some() {
+                Box::new(
+                    lower_pattern(&required(
+                        field.pattern(),
+                        "record field pattern",
+                        field.syntax(),
+                    )?)?
+                    .0,
+                )
             } else {
-                Some(name.clone())
+                Box::new(LoweredPattern::Binding {
+                    name: name.clone(),
+                    span,
+                })
             };
-            Ok((name, span, binding))
+            Ok((name, span, pattern))
         })
         .collect()
 }

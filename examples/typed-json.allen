@@ -1,0 +1,21 @@
+manifest {
+  language: "0.1"
+  entry: main
+  capabilities: []
+}
+
+record IncrementInput {
+  value: Int
+}
+
+record IncrementOutput {
+  incremented: Int
+  original: Int
+}
+
+export fn main(input: IncrementInput) returns IncrementOutput {
+  IncrementOutput {
+    incremented: input.value + 1,
+    original: input.value,
+  }
+}

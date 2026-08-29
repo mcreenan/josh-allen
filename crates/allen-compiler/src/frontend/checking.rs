@@ -66,7 +66,10 @@ pub(super) struct LocalBinding {
 }
 
 pub(super) fn is_affine(value_type: &ValueType) -> bool {
-    matches!(value_type, ValueType::Future(_) | ValueType::Task(_))
+    matches!(
+        value_type,
+        ValueType::Future(_) | ValueType::Task(_) | ValueType::Sequence(_)
+    )
 }
 
 pub(super) fn expected_type_diagnostic_code(label: &str) -> &'static str {
@@ -88,6 +91,7 @@ pub(super) fn validate_declared_type_shapes(
     enum_spans: &[(String, Span)],
     record_shapes: &[(ValueType, String, Span)],
     alias_shapes: &[(ValueType, String, Span)],
+    newtype_shapes: &[(ValueType, String, Span)],
 ) -> Result<(), Diagnostic> {
     let enum_depths = calculate_enum_depths(enum_types).map_err(|error| {
         let id = match error {
@@ -129,6 +133,18 @@ pub(super) fn validate_declared_type_shapes(
             return Err(Diagnostic::new(
                 "E2012",
                 "type alias nesting exceeds the language limit",
+                *span,
+            )
+            .with_source(source));
+        }
+    }
+    for (value_type, source, span) in newtype_shapes {
+        if max_expanded_type_depth(value_type, &enum_depths)
+            .is_none_or(|depth| depth > MAX_VALUE_NESTING)
+        {
+            return Err(Diagnostic::new(
+                "E2012",
+                "newtype underlying nesting exceeds the language limit",
                 *span,
             )
             .with_source(source));
@@ -206,7 +222,12 @@ pub(super) fn enum_expanded_type_depth(
         ValueType::List(element)
         | ValueType::Option(element)
         | ValueType::Future(element)
-        | ValueType::Task(element) => Ok(add_depth(enum_expanded_type_depth(
+        | ValueType::Task(element)
+        | ValueType::Sequence(element)
+        | ValueType::Newtype {
+            underlying: element,
+            ..
+        } => Ok(add_depth(enum_expanded_type_depth(
             element, enum_types, depths, marks,
         )?)),
         ValueType::Map(key, value) | ValueType::Result(key, value) => Ok(add_depth(
@@ -238,6 +259,7 @@ pub(super) fn enum_expanded_type_depth(
         | ValueType::Float
         | ValueType::String
         | ValueType::Bytes
+        | ValueType::Range
         | ValueType::ExternalFsAccess
         | ValueType::SubAgent
         | ValueType::Unit
@@ -262,7 +284,12 @@ pub(super) fn max_expanded_type_depth(
             ValueType::List(element)
             | ValueType::Option(element)
             | ValueType::Future(element)
-            | ValueType::Task(element) => {
+            | ValueType::Task(element)
+            | ValueType::Sequence(element)
+            | ValueType::Newtype {
+                underlying: element,
+                ..
+            } => {
                 let depth = add_depth(depth);
                 maximum = maximum.max(depth);
                 pending.push((element, depth));
@@ -298,6 +325,7 @@ pub(super) fn max_expanded_type_depth(
             | ValueType::Float
             | ValueType::String
             | ValueType::Bytes
+            | ValueType::Range
             | ValueType::ExternalFsAccess
             | ValueType::Unit
             | ValueType::Never
@@ -315,8 +343,9 @@ const fn add_depth(depth: usize) -> usize {
 
 pub(super) fn contains_affine(value_type: &ValueType) -> bool {
     match value_type {
-        ValueType::Future(_) | ValueType::Task(_) => true,
+        ValueType::Future(_) | ValueType::Task(_) | ValueType::Sequence(_) => true,
         ValueType::List(value) | ValueType::Option(value) => contains_affine(value),
+        ValueType::Newtype { underlying, .. } => contains_affine(underlying),
         ValueType::Map(key, value) | ValueType::Result(key, value) => {
             contains_affine(key) || contains_affine(value)
         }
@@ -334,6 +363,7 @@ pub(super) fn contains_affine(value_type: &ValueType) -> bool {
         | ValueType::Float
         | ValueType::String
         | ValueType::Bytes
+        | ValueType::Range
         | ValueType::Unit
         | ValueType::Never
         | ValueType::Enum(_)
@@ -350,7 +380,9 @@ pub(super) fn contains_workspace(value_type: &ValueType) -> bool {
         ValueType::List(value)
         | ValueType::Option(value)
         | ValueType::Future(value)
-        | ValueType::Task(value) => contains_workspace(value),
+        | ValueType::Task(value)
+        | ValueType::Sequence(value) => contains_workspace(value),
+        ValueType::Newtype { underlying, .. } => contains_workspace(underlying),
         ValueType::Map(key, value) | ValueType::Result(key, value) => {
             contains_workspace(key) || contains_workspace(value)
         }
@@ -368,6 +400,7 @@ pub(super) fn contains_workspace(value_type: &ValueType) -> bool {
         | ValueType::Float
         | ValueType::String
         | ValueType::Bytes
+        | ValueType::Range
         | ValueType::Unit
         | ValueType::Never
         | ValueType::Enum(_)
@@ -393,7 +426,9 @@ pub(super) fn contains_sub_agent(value_type: &ValueType) -> bool {
         ValueType::List(value)
         | ValueType::Option(value)
         | ValueType::Future(value)
-        | ValueType::Task(value) => contains_sub_agent(value),
+        | ValueType::Task(value)
+        | ValueType::Sequence(value) => contains_sub_agent(value),
+        ValueType::Newtype { underlying, .. } => contains_sub_agent(underlying),
         ValueType::Map(key, value) | ValueType::Result(key, value) => {
             contains_sub_agent(key) || contains_sub_agent(value)
         }
@@ -416,7 +451,9 @@ pub(super) fn contains_stored_sub_agent(value_type: &ValueType) -> bool {
         ValueType::List(value)
         | ValueType::Option(value)
         | ValueType::Future(value)
-        | ValueType::Task(value) => contains_stored_sub_agent(value),
+        | ValueType::Task(value)
+        | ValueType::Sequence(value) => contains_stored_sub_agent(value),
+        ValueType::Newtype { underlying, .. } => contains_stored_sub_agent(underlying),
         ValueType::Map(key, value) | ValueType::Result(key, value) => {
             contains_stored_sub_agent(key) || contains_stored_sub_agent(value)
         }
@@ -430,11 +467,43 @@ pub(super) fn contains_stored_sub_agent(value_type: &ValueType) -> bool {
         | ValueType::Float
         | ValueType::String
         | ValueType::Bytes
+        | ValueType::Range
         | ValueType::Unit
         | ValueType::Never
         | ValueType::Enum(_)
         | ValueType::ExternalFsAccess
         | ValueType::Workspace
         | ValueType::Unknown => false,
+    }
+}
+
+pub(super) fn valid_newtype_underlying(value_type: &ValueType) -> bool {
+    match value_type {
+        ValueType::Never
+        | ValueType::Unknown
+        | ValueType::Function { .. }
+        | ValueType::Future(_)
+        | ValueType::Task(_)
+        | ValueType::Sequence(_)
+        | ValueType::Workspace
+        | ValueType::ExternalFsAccess
+        | ValueType::SubAgent => false,
+        ValueType::List(value) | ValueType::Option(value) => valid_newtype_underlying(value),
+        ValueType::Map(key, value) | ValueType::Result(key, value) => {
+            valid_newtype_underlying(key) && valid_newtype_underlying(value)
+        }
+        ValueType::Tuple(values) => values.iter().all(valid_newtype_underlying),
+        ValueType::Record(fields) => fields
+            .iter()
+            .all(|field| valid_newtype_underlying(&field.value_type)),
+        ValueType::Newtype { underlying, .. } => valid_newtype_underlying(underlying),
+        ValueType::Int
+        | ValueType::Bool
+        | ValueType::Float
+        | ValueType::String
+        | ValueType::Bytes
+        | ValueType::Range
+        | ValueType::Unit
+        | ValueType::Enum(_) => true,
     }
 }

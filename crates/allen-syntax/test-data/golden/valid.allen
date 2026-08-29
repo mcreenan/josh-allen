@@ -1,7 +1,8 @@
 // pi π stays in trivia
 /* nested /* snow 雪 */ comment */
 import {thing as alias} from "pkg/é";
-record Box { value: List<String>, }
+record Box { value: List<String>, } where { true }
+newtype EpochSeconds = Int
 fn render() returns String {
   let text = "héllo\n";
   let bytes = b"A\x42";
@@ -22,5 +23,9 @@ fn classify(value: Reading) returns Int {
     false => 0,
     _ => 0
   }
+}
+test "classifies empty" effects [] {
+  let value = classify(Reading.Empty);
+  ()
 }
 export type Texts = List<String>

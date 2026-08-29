@@ -18,13 +18,15 @@ use crate::lockfile::{
     parse_lockfile,
 };
 use crate::manifest::{
-    Manifest, SUPPORTED_LANGUAGE, normalize_dependency_path, parse_exact_version,
+    Manifest, SUPPORTED_LANGUAGE, TemplateDeclaration, is_source_identifier,
+    normalize_dependency_path, normalize_template_path, parse_exact_version,
     parse_language_requirement, parse_manifest, parse_version_requirement,
 };
 use crate::{Lockfile, PackageError, PackageErrorCode};
 
 const MANIFEST_FILE: &str = "allen.toml";
 const SOURCE_DIRECTORY: &str = "src";
+const MAX_TEMPLATE_BYTES: u64 = 1_048_576;
 
 /// Finite package graph and source loading limits.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -94,6 +96,68 @@ pub struct ResolvedPackage {
     pub manifest: Manifest,
     pub dependencies: Vec<ResolvedDependency>,
     pub modules: Vec<SourceModule>,
+    templates: Vec<LoadedTemplate>,
+}
+
+impl ResolvedPackage {
+    /// Iterate over loaded template names in canonical order.
+    #[must_use]
+    pub fn template_names(&self) -> impl ExactSizeIterator<Item = &str> {
+        self.templates.iter().map(|template| template.name.as_str())
+    }
+
+    /// Return one loaded template's canonical package-relative path.
+    #[must_use]
+    pub fn template_path(&self, name: &str) -> Option<&str> {
+        self.template_by_name(name)
+            .map(|template| template.path.as_str())
+    }
+
+    /// Return one loaded template's byte-exact UTF-8 content.
+    #[must_use]
+    pub fn template_content(&self, name: &str) -> Option<&[u8]> {
+        self.template_by_name(name)
+            .map(|template| template.content.as_bytes())
+    }
+
+    /// Return one loaded template's digest over content and hole signature.
+    #[must_use]
+    pub fn template_digest(&self, name: &str) -> Option<&str> {
+        self.template_by_name(name)
+            .map(|template| template.digest.as_str())
+    }
+
+    /// Return one loaded template's canonical ordered hole signature.
+    #[must_use]
+    pub fn template_holes(&self, name: &str) -> Option<&[(String, String)]> {
+        self.template_by_name(name)
+            .map(|template| template.holes.as_slice())
+    }
+
+    /// Return whole-marker byte ranges and names in source order.
+    #[must_use]
+    pub fn template_markers(&self, name: &str) -> Option<&[(usize, usize, String)]> {
+        self.template_by_name(name)
+            .map(|template| template.markers.as_slice())
+    }
+
+    fn template_by_name(&self, name: &str) -> Option<&LoadedTemplate> {
+        let index = self
+            .templates
+            .binary_search_by(|template| template.name.as_str().cmp(name))
+            .ok()?;
+        self.templates.get(index)
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct LoadedTemplate {
+    name: String,
+    path: String,
+    content: String,
+    digest: String,
+    holes: Vec<(String, String)>,
+    markers: Vec<(usize, usize, String)>,
 }
 
 /// A verified, deterministic package graph ready for compilation.
@@ -171,6 +235,37 @@ pub fn load_verified_root_package(
     lock_text: Option<&str>,
     limits: &LoadLimits,
 ) -> Result<LoadedPackage, PackageError> {
+    load_verified_root_package_inner(manifest_text, sources, None, lock_text, limits)
+}
+
+/// Verify one normalized, root-only in-memory package and its exact resources.
+///
+/// Resource keys are canonical package-relative paths. The resource set must
+/// exactly match the root manifest's declared templates. Dependencies remain
+/// unsupported because this snapshot proves one root package only.
+///
+/// # Errors
+///
+/// Returns the same stable manifest, source, template, limit, and lock errors
+/// as the filesystem loader.
+pub fn load_verified_root_package_with_resources(
+    manifest_text: &str,
+    sources: &BTreeMap<String, String>,
+    resources: &BTreeMap<String, Vec<u8>>,
+    lock_text: Option<&str>,
+    limits: &LoadLimits,
+) -> Result<LoadedPackage, PackageError> {
+    load_verified_root_package_inner(manifest_text, sources, Some(resources), lock_text, limits)
+}
+
+#[allow(clippy::too_many_lines)]
+fn load_verified_root_package_inner(
+    manifest_text: &str,
+    sources: &BTreeMap<String, String>,
+    resources: Option<&BTreeMap<String, Vec<u8>>>,
+    lock_text: Option<&str>,
+    limits: &LoadLimits,
+) -> Result<LoadedPackage, PackageError> {
     validate_limits(limits)?;
     if u64::try_from(manifest_text.len()).unwrap_or(u64::MAX) > limits.manifest_bytes {
         return Err(PackageError::new(
@@ -178,7 +273,7 @@ pub fn load_verified_root_package(
             "manifest exceeds the configured byte limit",
         ));
     }
-    let total_source_bytes = sources.values().try_fold(
+    let mut total_source_bytes = sources.values().try_fold(
         u64::try_from(manifest_text.len()).unwrap_or(u64::MAX),
         |total, source| {
             total
@@ -191,13 +286,31 @@ pub fn load_verified_root_package(
                 })
         },
     )?;
+    if let Some(resources) = resources {
+        total_source_bytes =
+            resources
+                .values()
+                .try_fold(total_source_bytes, |total, resource| {
+                    total
+                        .checked_add(u64::try_from(resource.len()).unwrap_or(u64::MAX))
+                        .ok_or_else(|| {
+                            PackageError::new(
+                                PackageErrorCode::SourceBytesLimit,
+                                "package resource byte count overflow",
+                            )
+                        })
+                })?;
+    }
     if total_source_bytes > limits.source_bytes {
         return Err(PackageError::new(
             PackageErrorCode::SourceBytesLimit,
             "package graph exceeds its source byte limit",
         ));
     }
-    if sources.len() > limits.modules || sources.len() > limits.filesystem_entries {
+    let resource_count = resources.map_or(0, BTreeMap::len);
+    if sources.len() > limits.modules
+        || sources.len().saturating_add(resource_count) > limits.filesystem_entries
+    {
         return Err(PackageError::new(
             PackageErrorCode::ModuleLimit,
             "source graph exceeds its module limit",
@@ -236,12 +349,27 @@ pub fn load_verified_root_package(
         validate_memory_source_path(path, limits)?;
         raw_modules.push((path.clone(), source.clone()));
     }
+    validate_template_path_collisions(
+        &manifest,
+        raw_modules.iter().map(|(path, _)| path.as_str()),
+    )?;
+    let templates = if let Some(resources) = resources {
+        load_memory_templates(&manifest, resources, limits)?
+    } else {
+        if !manifest.template_declarations().is_empty() {
+            return Err(PackageError::new(
+                PackageErrorCode::InvalidManifest,
+                "in-memory root packages cannot contain external templates",
+            ));
+        }
+        Vec::new()
+    };
     validate_entry_modules(&manifest, &raw_modules)?;
     let id = PackageId {
         name: manifest.package.name.clone(),
         version: manifest.package.version.clone(),
     };
-    let digest = content_digest(manifest_text.as_bytes(), &raw_modules);
+    let digest = content_digest(manifest_text.as_bytes(), &raw_modules, &templates);
     let modules = raw_modules
         .into_iter()
         .map(|(path, source)| SourceModule {
@@ -258,6 +386,7 @@ pub fn load_verified_root_package(
         manifest,
         dependencies: Vec::new(),
         modules: modules.clone(),
+        templates,
     };
     let lockfile = lockfile_from_parts(id.canonical(), vec![locked_package(&package)]);
     if let Some(text) = lock_text {
@@ -311,6 +440,74 @@ fn validate_memory_source_path(path: &str, limits: &LoadLimits) -> Result<(), Pa
         ));
     }
     Ok(())
+}
+
+fn load_memory_templates(
+    manifest: &Manifest,
+    resources: &BTreeMap<String, Vec<u8>>,
+    limits: &LoadLimits,
+) -> Result<Vec<LoadedTemplate>, PackageError> {
+    let declared_paths = manifest
+        .template_declarations()
+        .iter()
+        .map(|template| template.path.as_str())
+        .collect::<BTreeSet<_>>();
+    for path in resources.keys() {
+        if path.len() > limits.path_bytes
+            || normalize_template_path(path).as_deref() != Ok(path.as_str())
+            || path.split('/').count().saturating_sub(1) > limits.module_depth
+        {
+            return Err(PackageError::new(
+                PackageErrorCode::InvalidManifest,
+                "package resource path is not canonical",
+            ));
+        }
+    }
+    let supplied_paths = resources
+        .keys()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
+    if supplied_paths != declared_paths {
+        return Err(PackageError::new(
+            PackageErrorCode::InvalidManifest,
+            "package resources do not exactly match declared templates",
+        ));
+    }
+
+    let mut templates = Vec::with_capacity(manifest.template_declarations().len());
+    for declaration in manifest.template_declarations() {
+        let bytes = resources
+            .get(&declaration.path)
+            .expect("resource paths matched template declarations");
+        if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > MAX_TEMPLATE_BYTES {
+            return Err(PackageError::new(
+                PackageErrorCode::SourceBytesLimit,
+                "template resource exceeds the configured byte limit",
+            ));
+        }
+        let content = String::from_utf8(bytes.clone()).map_err(|_| {
+            PackageError::new(
+                PackageErrorCode::InvalidManifest,
+                "template content is not UTF-8",
+            )
+        })?;
+        let markers = validate_template_content(declaration, &content)?;
+        let holes = declaration
+            .holes
+            .iter()
+            .map(|(name, value_type)| (name.clone(), value_type.clone()))
+            .collect::<Vec<_>>();
+        let digest = template_digest(content.as_bytes(), &holes);
+        templates.push(LoadedTemplate {
+            name: declaration.name.clone(),
+            path: declaration.path.clone(),
+            content,
+            digest,
+            holes,
+            markers,
+        });
+    }
+    Ok(templates)
 }
 
 fn load_unlocked(root: &Path, limits: &LoadLimits) -> Result<LoadedPackage, PackageError> {
@@ -452,7 +649,12 @@ impl GraphLoader {
         }
         let raw_modules = self.load_modules(&directory, &directory_path)?;
         validate_entry_modules(&manifest, &raw_modules)?;
-        let digest = content_digest(&manifest_bytes, &raw_modules);
+        validate_template_path_collisions(
+            &manifest,
+            raw_modules.iter().map(|(path, _)| path.as_str()),
+        )?;
+        let templates = self.load_templates(&directory, &directory_path, &manifest)?;
+        let digest = content_digest(&manifest_bytes, &raw_modules, &templates);
 
         self.active.push(source.to_owned());
         self.identities.insert(id.clone(), source.to_owned());
@@ -496,6 +698,7 @@ impl GraphLoader {
                 manifest,
                 dependencies,
                 modules,
+                templates,
             },
         );
         Ok(id)
@@ -549,6 +752,57 @@ impl GraphLoader {
         Ok(modules)
     }
 
+    fn load_templates(
+        &mut self,
+        package: &Dir,
+        package_path: &Path,
+        manifest: &Manifest,
+    ) -> Result<Vec<LoadedTemplate>, PackageError> {
+        let mut templates = Vec::with_capacity(manifest.template_declarations().len());
+        for declaration in manifest.template_declarations() {
+            if declaration.path.len() > self.limits.path_bytes
+                || declaration.path.split('/').count().saturating_sub(1) > self.limits.module_depth
+            {
+                return Err(PackageError::at(
+                    PackageErrorCode::ModuleLimit,
+                    package_path.join(&declaration.path),
+                    "template path exceeds package load limits",
+                ));
+            }
+            self.charge_filesystem_entry()?;
+            let maximum = MAX_TEMPLATE_BYTES.min(self.remaining_bytes());
+            let bytes = read_template_file(package, package_path, &declaration.path, maximum)?;
+            self.charge_source_bytes(u64::try_from(bytes.len()).unwrap_or(u64::MAX))?;
+            let content = String::from_utf8(bytes).map_err(|_| {
+                PackageError::at(
+                    PackageErrorCode::InvalidManifest,
+                    package_path.join(&declaration.path),
+                    "template content is not UTF-8",
+                )
+            })?;
+            let markers =
+                validate_template_content(declaration, &content).map_err(|mut error| {
+                    error.path = Some(package_path.join(&declaration.path));
+                    error
+                })?;
+            let holes = declaration
+                .holes
+                .iter()
+                .map(|(name, value_type)| (name.clone(), value_type.clone()))
+                .collect::<Vec<_>>();
+            let digest = template_digest(content.as_bytes(), &holes);
+            templates.push(LoadedTemplate {
+                name: declaration.name.clone(),
+                path: declaration.path.clone(),
+                content,
+                digest,
+                holes,
+                markers,
+            });
+        }
+        Ok(templates)
+    }
+
     #[allow(clippy::case_sensitive_file_extension_comparisons)]
     fn walk_source(
         &mut self,
@@ -571,18 +825,7 @@ impl GraphLoader {
             .map_err(|error| io_error(display_directory, error))?
         {
             let entry = entry.map_err(|error| io_error(display_directory, error))?;
-            self.filesystem_entries = self.filesystem_entries.checked_add(1).ok_or_else(|| {
-                PackageError::new(
-                    PackageErrorCode::ModuleLimit,
-                    "filesystem entry count overflow",
-                )
-            })?;
-            if self.filesystem_entries > self.limits.filesystem_entries {
-                return Err(PackageError::new(
-                    PackageErrorCode::ModuleLimit,
-                    "source graph exceeds its filesystem entry limit",
-                ));
-            }
+            self.charge_filesystem_entry()?;
             let name = entry.file_name().into_string().map_err(|_| {
                 PackageError::at(
                     PackageErrorCode::InvalidDependency,
@@ -661,6 +904,22 @@ impl GraphLoader {
             .saturating_sub(self.total_source_bytes)
     }
 
+    fn charge_filesystem_entry(&mut self) -> Result<(), PackageError> {
+        self.filesystem_entries = self.filesystem_entries.checked_add(1).ok_or_else(|| {
+            PackageError::new(
+                PackageErrorCode::ModuleLimit,
+                "filesystem entry count overflow",
+            )
+        })?;
+        if self.filesystem_entries > self.limits.filesystem_entries {
+            return Err(PackageError::new(
+                PackageErrorCode::ModuleLimit,
+                "source graph exceeds its filesystem entry limit",
+            ));
+        }
+        Ok(())
+    }
+
     fn charge_source_bytes(&mut self, bytes: u64) -> Result<(), PackageError> {
         let next = self.total_source_bytes.checked_add(bytes).ok_or_else(|| {
             PackageError::new(
@@ -703,6 +962,38 @@ fn package_directory(root: &Path, source: &str) -> Result<PathBuf, PackageError>
     Ok(root.join(normalized))
 }
 
+fn read_template_file(
+    package: &Dir,
+    package_path: &Path,
+    path: &str,
+    maximum: u64,
+) -> Result<Vec<u8>, PackageError> {
+    let normalized = normalize_template_path(path)?;
+    let mut directory = package
+        .try_clone()
+        .map_err(|error| io_error(package_path, error))?;
+    let mut display_path = package_path.to_path_buf();
+    let mut components = normalized.split('/').peekable();
+    while let Some(component) = components.next() {
+        display_path.push(component);
+        if components.peek().is_none() {
+            return read_regular_file_at(&directory, component, &display_path, maximum);
+        }
+        directory = open_directory_no_follow(
+            &directory,
+            component,
+            &display_path,
+            "template path cannot resolve through a symlink",
+            "template path component is not a directory",
+        )?;
+    }
+    Err(PackageError::at(
+        PackageErrorCode::InvalidManifest,
+        package_path,
+        "template path is empty",
+    ))
+}
+
 fn validate_entry_modules(
     manifest: &Manifest,
     modules: &[(String, String)],
@@ -732,12 +1023,134 @@ fn validate_entry_modules(
     Ok(())
 }
 
-fn content_digest(manifest: &[u8], modules: &[(String, String)]) -> String {
+fn validate_template_path_collisions<'a>(
+    manifest: &Manifest,
+    module_paths: impl IntoIterator<Item = &'a str>,
+) -> Result<(), PackageError> {
+    let modules = module_paths.into_iter().collect::<BTreeSet<_>>();
+    if manifest.template_declarations().iter().any(|template| {
+        template.path == MANIFEST_FILE
+            || template.path == "allen.lock"
+            || modules.contains(template.path.as_str())
+    }) {
+        return Err(PackageError::new(
+            PackageErrorCode::InvalidManifest,
+            "template resource path collides with package metadata or source",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_template_content(
+    declaration: &TemplateDeclaration,
+    content: &str,
+) -> Result<Vec<(usize, usize, String)>, PackageError> {
+    let bytes = content.as_bytes();
+    let mut markers = Vec::new();
+    let mut used = BTreeSet::new();
+    let mut cursor = 0;
+    while cursor + 1 < bytes.len() {
+        match (bytes[cursor], bytes[cursor + 1]) {
+            (b'{', b'{') => {
+                let marker_start = cursor;
+                let hole_start = cursor + 2;
+                cursor = hole_start;
+                let mut hole_end = None;
+                while cursor + 1 < bytes.len() {
+                    match (bytes[cursor], bytes[cursor + 1]) {
+                        (b'}', b'}') => {
+                            hole_end = Some(cursor);
+                            break;
+                        }
+                        (b'{', b'{') => {
+                            return Err(invalid_template(
+                                declaration,
+                                "contains a nested or malformed hole marker",
+                            ));
+                        }
+                        _ => cursor += 1,
+                    }
+                }
+                let hole_end = hole_end.ok_or_else(|| {
+                    invalid_template(declaration, "contains an unmatched '{{' marker")
+                })?;
+                let hole = &content[hole_start..hole_end];
+                if !is_source_identifier(hole) {
+                    return Err(invalid_template(
+                        declaration,
+                        "contains a hole that is not a source identifier",
+                    ));
+                }
+                if !declaration.holes.contains_key(hole) {
+                    return Err(invalid_template(
+                        declaration,
+                        &format!("uses undeclared hole '{hole}'"),
+                    ));
+                }
+                let marker_end = hole_end + 2;
+                markers.push((marker_start, marker_end, hole.to_owned()));
+                used.insert(hole);
+                cursor = marker_end;
+            }
+            (b'}', b'}') => {
+                return Err(invalid_template(
+                    declaration,
+                    "contains an unmatched '}}' marker",
+                ));
+            }
+            _ => cursor += 1,
+        }
+    }
+    if let Some(unused) = declaration
+        .holes
+        .keys()
+        .find(|hole| !used.contains(hole.as_str()))
+    {
+        return Err(invalid_template(
+            declaration,
+            &format!("declares unused hole '{unused}'"),
+        ));
+    }
+    Ok(markers)
+}
+
+fn invalid_template(declaration: &TemplateDeclaration, detail: &str) -> PackageError {
+    PackageError::new(
+        PackageErrorCode::InvalidManifest,
+        format!("template '{}' {detail}", declaration.name),
+    )
+}
+
+fn template_digest(content: &[u8], holes: &[(String, String)]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(b"allen-template-resource-v1\0");
+    hash_item(&mut hasher, b"content", content);
+    for (name, value_type) in holes {
+        hash_item(&mut hasher, name.as_bytes(), value_type.as_bytes());
+    }
+    format!("sha256:{:x}", hasher.finalize())
+}
+
+fn content_digest(
+    manifest: &[u8],
+    modules: &[(String, String)],
+    templates: &[LoadedTemplate],
+) -> String {
     let mut hasher = Sha256::new();
     hasher.update(b"allen-package-content-v1\0");
     hash_item(&mut hasher, MANIFEST_FILE.as_bytes(), manifest);
     for (path, source) in modules {
         hash_item(&mut hasher, path.as_bytes(), source.as_bytes());
+    }
+    if !templates.is_empty() {
+        hasher.update(b"allen-package-template-resources-v1\0");
+        for template in templates {
+            hash_item(
+                &mut hasher,
+                template.name.as_bytes(),
+                template.digest.as_bytes(),
+            );
+        }
     }
     format!("sha256:{:x}", hasher.finalize())
 }
@@ -968,6 +1381,12 @@ mod tests {
             let mut file = File::create(path).unwrap();
             file.write_all(contents.as_bytes()).unwrap();
         }
+
+        fn write_bytes(&self, path: &str, contents: &[u8]) {
+            let path = self.0.join(path);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, contents).unwrap();
+        }
     }
 
     impl Drop for TestDirectory {
@@ -1036,6 +1455,26 @@ language = ">=0.1.0, <0.2.0"
         (directory, manifest, sources)
     }
 
+    fn template_manifest(value_type: &str) -> String {
+        format!(
+            r#"{}
+[[templates]]
+name = "alert"
+path = "templates/alert.txt"
+holes = {{ title = "String", count = "{value_type}" }}
+"#,
+            root_manifest("")
+        )
+    }
+
+    fn template_fixture(content: &str, value_type: &str) -> TestDirectory {
+        let directory = TestDirectory::new();
+        directory.write(MANIFEST_FILE, &template_manifest(value_type));
+        directory.write("src/main.allen", "export fn main() returns Int { 42 }\n");
+        directory.write("templates/alert.txt", content);
+        directory
+    }
+
     #[test]
     fn verified_memory_root_matches_the_filesystem_graph() {
         let (directory, manifest, sources) = root_only_fixture();
@@ -1046,6 +1485,404 @@ language = ">=0.1.0, <0.2.0"
 
         assert_eq!(memory, filesystem);
         assert_eq!(canonical_lockfile(&memory.lockfile), lock);
+    }
+
+    #[test]
+    fn exec_requests_are_canonical_and_bound_into_the_package_lock() {
+        let (directory, manifest, sources) = root_only_fixture();
+        let manifest = format!(
+            r#"{manifest}
+[exec]
+commands = ["git status", "aws cloudwatch *", "git status"]
+environment = ["HOME", "AWS_REGION", "HOME"]
+"#
+        );
+        directory.write(MANIFEST_FILE, &manifest);
+        let limits = LoadLimits::default();
+        let lock = generate_lock(&directory.0, &limits).unwrap();
+        assert_eq!(generate_lock(&directory.0, &limits).unwrap(), lock);
+        let loaded = load_verified_package(&directory.0, &lock, &limits).unwrap();
+        let root = loaded
+            .packages
+            .iter()
+            .find(|package| package.id == loaded.root)
+            .unwrap();
+
+        assert_eq!(
+            root.manifest.exec_commands(),
+            ["aws cloudwatch *", "git status"]
+        );
+        assert_eq!(root.manifest.exec_environment(), ["AWS_REGION", "HOME"]);
+        assert_eq!(canonical_lockfile(&parse_lockfile(&lock).unwrap()), lock);
+
+        let memory = load_verified_root_package(&manifest, &sources, Some(&lock), &limits).unwrap();
+        assert_eq!(memory, loaded);
+
+        let broadened = manifest.replace("aws cloudwatch *", "aws *");
+        directory.write(MANIFEST_FILE, &broadened);
+        let broadened_lock = generate_lock(&directory.0, &limits).unwrap();
+        assert_ne!(broadened_lock, lock);
+        assert_eq!(
+            load_verified_package(&directory.0, &lock, &limits)
+                .unwrap_err()
+                .code,
+            PackageErrorCode::LockMismatch
+        );
+    }
+
+    #[test]
+    fn loads_byte_exact_templates_with_ordered_signatures_and_markers() {
+        let content = "Header\r\n${title} `literal` {single}\n{{title}} has {{count}} items; {{title}} again.\n";
+        let directory = template_fixture(content, "Int");
+        let limits = LoadLimits::default();
+        let lock = generate_lock(&directory.0, &limits).unwrap();
+        let loaded = load_verified_package(&directory.0, &lock, &limits).unwrap();
+        let root = loaded
+            .packages
+            .iter()
+            .find(|package| package.id == loaded.root)
+            .unwrap();
+
+        assert_eq!(root.template_names().collect::<Vec<_>>(), ["alert"]);
+        assert_eq!(root.template_path("alert"), Some("templates/alert.txt"));
+        assert_eq!(root.template_content("alert"), Some(content.as_bytes()));
+        assert_eq!(
+            root.template_holes("alert").unwrap(),
+            [
+                ("count".to_owned(), "Int".to_owned()),
+                ("title".to_owned(), "String".to_owned()),
+            ]
+        );
+        let markers = root.template_markers("alert").unwrap();
+        assert_eq!(
+            markers
+                .iter()
+                .map(|(_, _, name)| name.as_str())
+                .collect::<Vec<_>>(),
+            ["title", "count", "title"]
+        );
+        for (start, end, name) in markers {
+            assert_eq!(
+                &content.as_bytes()[*start..*end],
+                format!("{{{{{name}}}}}").as_bytes()
+            );
+        }
+        assert_eq!(root.template_digest("missing"), None);
+        assert!(
+            root.template_digest("alert")
+                .unwrap()
+                .starts_with("sha256:")
+        );
+    }
+
+    #[test]
+    fn verified_memory_resources_match_filesystem_and_reject_snapshot_drift() {
+        let content = "{{title}} has {{count}} items";
+        let directory = template_fixture(content, "Int");
+        let manifest = template_manifest("Int");
+        let sources = BTreeMap::from([(
+            "src/main.allen".to_owned(),
+            "export fn main() returns Int { 42 }\n".to_owned(),
+        )]);
+        let resources = BTreeMap::from([(
+            "templates/alert.txt".to_owned(),
+            content.as_bytes().to_vec(),
+        )]);
+        let limits = LoadLimits::default();
+        let lock = generate_lock(&directory.0, &limits).unwrap();
+        let filesystem = load_verified_package(&directory.0, &lock, &limits).unwrap();
+        let memory = load_verified_root_package_with_resources(
+            &manifest,
+            &sources,
+            &resources,
+            Some(&lock),
+            &limits,
+        )
+        .unwrap();
+        assert_eq!(memory, filesystem);
+        assert_eq!(
+            load_verified_root_package(&manifest, &sources, Some(&lock), &limits)
+                .unwrap_err()
+                .code,
+            PackageErrorCode::InvalidManifest
+        );
+
+        for invalid in [
+            BTreeMap::new(),
+            BTreeMap::from([
+                (
+                    "templates/alert.txt".to_owned(),
+                    content.as_bytes().to_vec(),
+                ),
+                ("templates/extra.txt".to_owned(), b"extra".to_vec()),
+            ]),
+            BTreeMap::from([("../alert.txt".to_owned(), content.as_bytes().to_vec())]),
+        ] {
+            assert_eq!(
+                load_verified_root_package_with_resources(
+                    &manifest,
+                    &sources,
+                    &invalid,
+                    Some(&lock),
+                    &limits,
+                )
+                .unwrap_err()
+                .code,
+                PackageErrorCode::InvalidManifest
+            );
+        }
+
+        let tampered = BTreeMap::from([(
+            "templates/alert.txt".to_owned(),
+            b"{{title}} has {{count}} changed items".to_vec(),
+        )]);
+        assert_eq!(
+            load_verified_root_package_with_resources(
+                &manifest,
+                &sources,
+                &tampered,
+                Some(&lock),
+                &limits,
+            )
+            .unwrap_err()
+            .code,
+            PackageErrorCode::LockMismatch
+        );
+
+        let oversized = BTreeMap::from([(
+            "templates/alert.txt".to_owned(),
+            vec![b'x'; usize::try_from(MAX_TEMPLATE_BYTES).unwrap() + 1],
+        )]);
+        assert_eq!(
+            load_verified_root_package_with_resources(
+                &manifest, &sources, &oversized, None, &limits,
+            )
+            .unwrap_err()
+            .code,
+            PackageErrorCode::SourceBytesLimit
+        );
+    }
+
+    #[test]
+    fn template_paths_cannot_alias_metadata_or_source_modules() {
+        for collision in ["allen.toml", "allen.lock", "src/main.allen"] {
+            let manifest =
+                parse_manifest(&template_manifest("Int").replace("templates/alert.txt", collision))
+                    .unwrap();
+            assert_eq!(
+                validate_template_path_collisions(&manifest, ["src/main.allen"])
+                    .unwrap_err()
+                    .code,
+                PackageErrorCode::InvalidManifest,
+                "collision = {collision}",
+            );
+        }
+    }
+
+    #[test]
+    fn template_grammar_rejects_bad_markers_and_accepts_repeated_holes() {
+        let declaration = TemplateDeclaration {
+            name: "alert".to_owned(),
+            path: "templates/alert.txt".to_owned(),
+            holes: BTreeMap::from([("title".to_owned(), "String".to_owned())]),
+        };
+        for content in [
+            "{{title",
+            "title}}",
+            "{{}}",
+            "{{ title }}",
+            "{{Title}}",
+            "{{{{title}}",
+            "{{other}}",
+            "no marker",
+        ] {
+            assert_eq!(
+                validate_template_content(&declaration, content)
+                    .unwrap_err()
+                    .code,
+                PackageErrorCode::InvalidManifest,
+                "content = {content:?}",
+            );
+        }
+
+        let repeated = "${title} `title` {{title}}/{{title}}";
+        let markers = validate_template_content(&declaration, repeated).unwrap();
+        assert_eq!(markers.len(), 2);
+        assert_eq!(markers[0].2, "title");
+
+        let literal = TemplateDeclaration {
+            name: "literal".to_owned(),
+            path: "templates/literal.txt".to_owned(),
+            holes: BTreeMap::new(),
+        };
+        assert!(
+            validate_template_content(&literal, "${not_a_hole} `backticks` {single braces}")
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn template_content_and_signature_changes_invalidate_digests_and_locks() {
+        let first_content = "{{title}}: {{count}}\n";
+        let directory = template_fixture(first_content, "Int");
+        let limits = LoadLimits::default();
+        let first_lock = generate_lock(&directory.0, &limits).unwrap();
+        assert_eq!(generate_lock(&directory.0, &limits).unwrap(), first_lock);
+        let first_loaded = load_verified_package(&directory.0, &first_lock, &limits).unwrap();
+        let first_root = first_loaded
+            .packages
+            .iter()
+            .find(|package| package.id == first_loaded.root)
+            .unwrap();
+        let first_package_digest = first_root.digest.clone();
+        let first_template_digest = first_root.template_digest("alert").unwrap().to_owned();
+
+        directory.write("templates/alert.txt", "{{title}}: {{count}} items\n");
+        let content_lock = generate_lock(&directory.0, &limits).unwrap();
+        let content_loaded = load_verified_package(&directory.0, &content_lock, &limits).unwrap();
+        let content_root = content_loaded
+            .packages
+            .iter()
+            .find(|package| package.id == content_loaded.root)
+            .unwrap();
+        assert_ne!(content_lock, first_lock);
+        assert_ne!(content_root.digest, first_package_digest);
+        assert_ne!(
+            content_root.template_digest("alert").unwrap(),
+            first_template_digest
+        );
+        assert_eq!(
+            load_verified_package(&directory.0, &first_lock, &limits)
+                .unwrap_err()
+                .code,
+            PackageErrorCode::LockMismatch
+        );
+
+        directory.write("templates/alert.txt", first_content);
+        directory.write(MANIFEST_FILE, &template_manifest("String"));
+        let signature_lock = generate_lock(&directory.0, &limits).unwrap();
+        let signature_loaded =
+            load_verified_package(&directory.0, &signature_lock, &limits).unwrap();
+        let signature_root = signature_loaded
+            .packages
+            .iter()
+            .find(|package| package.id == signature_loaded.root)
+            .unwrap();
+        assert_ne!(signature_lock, first_lock);
+        assert_ne!(
+            signature_root.template_digest("alert").unwrap(),
+            first_template_digest
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_utf8_oversized_and_in_memory_templates() {
+        let invalid_utf8 = template_fixture("{{title}} {{count}}", "Int");
+        invalid_utf8.write_bytes("templates/alert.txt", &[0xff, 0xfe]);
+        assert_eq!(
+            generate_lock(&invalid_utf8.0, &LoadLimits::default())
+                .unwrap_err()
+                .code,
+            PackageErrorCode::InvalidManifest
+        );
+
+        let prefix = "{{title}}{{count}}";
+        let maximum_content = format!(
+            "{prefix}{}",
+            "x".repeat(usize::try_from(MAX_TEMPLATE_BYTES).unwrap() - prefix.len())
+        );
+        let maximum = template_fixture(&maximum_content, "Int");
+        assert!(generate_lock(&maximum.0, &LoadLimits::default()).is_ok());
+
+        let oversized = template_fixture("{{title}} {{count}}", "Int");
+        oversized.write_bytes(
+            "templates/alert.txt",
+            &vec![b'x'; usize::try_from(MAX_TEMPLATE_BYTES).unwrap() + 1],
+        );
+        assert_eq!(
+            generate_lock(&oversized.0, &LoadLimits::default())
+                .unwrap_err()
+                .code,
+            PackageErrorCode::SourceBytesLimit
+        );
+
+        let (_, _, sources) = root_only_fixture();
+        assert_eq!(
+            load_verified_root_package(
+                &template_manifest("Int"),
+                &sources,
+                None,
+                &LoadLimits::default(),
+            )
+            .unwrap_err()
+            .code,
+            PackageErrorCode::InvalidManifest
+        );
+    }
+
+    #[test]
+    fn template_resources_count_toward_the_filesystem_entry_limit() {
+        let directory = template_fixture("{{title}} {{count}}", "Int");
+        let limits = LoadLimits {
+            filesystem_entries: 1,
+            ..LoadLimits::default()
+        };
+        let error = generate_lock(&directory.0, &limits).unwrap_err();
+        assert_eq!(error.code, PackageErrorCode::ModuleLimit);
+        assert_eq!(
+            error.message,
+            "source graph exceeds its filesystem entry limit"
+        );
+
+        fs::remove_file(directory.0.join("templates/alert.txt")).unwrap();
+        let error = generate_lock(&directory.0, &limits).unwrap_err();
+        assert_eq!(error.code, PackageErrorCode::ModuleLimit);
+        assert_eq!(
+            error.message,
+            "source graph exceeds its filesystem entry limit"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_template_symlinks_and_non_regular_files() {
+        use std::os::unix::fs::symlink;
+
+        let linked = template_fixture("{{title}} {{count}}", "Int");
+        linked.write("outside.txt", "{{title}} {{count}}");
+        fs::remove_file(linked.0.join("templates/alert.txt")).unwrap();
+        symlink("../outside.txt", linked.0.join("templates/alert.txt")).unwrap();
+        assert_eq!(
+            generate_lock(&linked.0, &LoadLimits::default())
+                .unwrap_err()
+                .code,
+            PackageErrorCode::Symlink
+        );
+
+        let linked_directory = template_fixture("{{title}} {{count}}", "Int");
+        fs::rename(
+            linked_directory.0.join("templates"),
+            linked_directory.0.join("real-templates"),
+        )
+        .unwrap();
+        symlink("real-templates", linked_directory.0.join("templates")).unwrap();
+        assert_eq!(
+            generate_lock(&linked_directory.0, &LoadLimits::default())
+                .unwrap_err()
+                .code,
+            PackageErrorCode::Symlink
+        );
+
+        let directory = template_fixture("{{title}} {{count}}", "Int");
+        fs::remove_file(directory.0.join("templates/alert.txt")).unwrap();
+        fs::create_dir(directory.0.join("templates/alert.txt")).unwrap();
+        assert_eq!(
+            generate_lock(&directory.0, &LoadLimits::default())
+                .unwrap_err()
+                .code,
+            PackageErrorCode::SpecialFile
+        );
     }
 
     #[test]
@@ -1157,7 +1994,7 @@ language = ">=0.1.0, <0.2.0"
         assert_eq!(
             first,
             r#"lock_version = 1
-language = "0.1.0"
+language = "0.1.1"
 root = "app@0.1.0"
 
 [[package]]

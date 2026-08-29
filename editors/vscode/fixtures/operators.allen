@@ -7,6 +7,9 @@ export fn main() returns Int {
   total /= 2;
   let skipped_and = false && ((1 % 0) == 0);
   let skipped_or = true || ((1 % 0) == 0);
+  let fallback: Option<Int> = None;
+  let decoded: Result<Int, DecodeError> = decode<Int>(b"1");
+  total = fallback ?? total;
   if (skipped_and || skipped_or) { total = total % 8; }
   total
 }

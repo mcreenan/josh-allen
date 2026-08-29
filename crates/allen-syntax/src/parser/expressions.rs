@@ -3,14 +3,19 @@ use crate::SyntaxKind;
 
 impl Parser<'_, '_> {
     pub(super) fn expression(&mut self) {
+        self.expression_with_range();
+    }
+
+    fn expression_with_range(&mut self) -> bool {
         let marker = self.start();
         if self.exceeded {
-            return;
+            return false;
         }
         self.expression_depth += 1;
-        self.disjunction();
+        let has_range = self.range();
         self.expression_depth = self.expression_depth.saturating_sub(1);
         self.complete(marker, SyntaxKind::Expression);
+        has_range
     }
 
     pub(super) fn expression_before_body(&mut self) {
@@ -27,6 +32,7 @@ impl Parser<'_, '_> {
                 | SyntaxKind::IntLiteral
                 | SyntaxKind::FloatLiteral
                 | SyntaxKind::StringLiteral
+                | SyntaxKind::MultilineStringDelimiter
                 | SyntaxKind::BytesLiteral
                 | SyntaxKind::KwTrue
                 | SyntaxKind::KwFalse
@@ -49,6 +55,64 @@ impl Parser<'_, '_> {
                 | SyntaxKind::KwFn
                 | SyntaxKind::ErrorToken
         )
+    }
+
+    fn range(&mut self) -> bool {
+        let marker = self.start();
+        if self.exceeded {
+            return false;
+        }
+        self.coalescing();
+        let has_range = matches!(self.nth(0), SyntaxKind::DotDot | SyntaxKind::DotDotEq);
+        if has_range {
+            self.bump_nontrivia();
+            self.coalescing();
+            if matches!(self.nth(0), SyntaxKind::DotDot | SyntaxKind::DotDotEq) {
+                self.error("range operators are nonassociative; parenthesize the nested range");
+            }
+        }
+        self.complete(marker, SyntaxKind::Range);
+        has_range
+    }
+
+    fn coalescing(&mut self) {
+        let marker = self.start();
+        if self.exceeded {
+            return;
+        }
+        self.pipeline();
+        if self.at(SyntaxKind::QuestionQuestion) {
+            self.bump_nontrivia();
+            self.coalescing();
+        }
+        self.complete(marker, SyntaxKind::Coalescing);
+    }
+
+    fn pipeline(&mut self) {
+        let marker = self.start();
+        if self.exceeded {
+            return;
+        }
+        self.composition();
+        while self.at(SyntaxKind::PipeGt) {
+            self.bump_nontrivia();
+            self.composition();
+        }
+        self.complete(marker, SyntaxKind::Pipeline);
+    }
+
+    fn composition(&mut self) {
+        let marker = self.start();
+        if self.exceeded {
+            return;
+        }
+        self.disjunction();
+        while self.at(SyntaxKind::Gt) && self.nth(1) == SyntaxKind::Gt {
+            self.bump_nontrivia();
+            self.bump_nontrivia();
+            self.disjunction();
+        }
+        self.complete(marker, SyntaxKind::Composition);
     }
 
     fn disjunction(&mut self) {
@@ -99,7 +163,8 @@ impl Parser<'_, '_> {
         while matches!(
             self.nth(0),
             SyntaxKind::Lt | SyntaxKind::LtEq | SyntaxKind::Gt | SyntaxKind::GtEq
-        ) {
+        ) && !(self.nth(0) == SyntaxKind::Gt && self.nth(1) == SyntaxKind::Gt)
+        {
             self.bump_nontrivia();
             self.addition();
         }
@@ -148,7 +213,10 @@ impl Parser<'_, '_> {
             }
             SyntaxKind::Minus => {
                 self.bump_nontrivia();
-                if self.nth_text(0) == Some("9223372036854775808") {
+                if self
+                    .nth_text(0)
+                    .is_some_and(crate::lexer::is_minimum_int_magnitude)
+                {
                     let inner = self.start();
                     self.direct_min_magnitude_operand();
                     self.complete(inner, SyntaxKind::Unary);
@@ -182,9 +250,15 @@ impl Parser<'_, '_> {
         while !self.exceeded {
             match self.nth(0) {
                 SyntaxKind::LBracket => self.index_postfix(),
-                SyntaxKind::Dot if self.nth(1) == SyntaxKind::Ident => {
+                SyntaxKind::Dot if matches!(self.nth(1), SyntaxKind::Ident | SyntaxKind::KwMap) => {
                     self.bump_nontrivia();
-                    self.expect(SyntaxKind::Ident, "expected field name after `.`");
+                    self.bump_nontrivia();
+                }
+                SyntaxKind::QuestionDot
+                    if matches!(self.nth(1), SyntaxKind::Ident | SyntaxKind::KwMap) =>
+                {
+                    self.bump_nontrivia();
+                    self.bump_nontrivia();
                 }
                 SyntaxKind::LParen => self.call_postfix(),
                 SyntaxKind::Lt if self.at_allowed_type_argument_call() => {
@@ -201,7 +275,11 @@ impl Parser<'_, '_> {
     fn at_postfix_operator(&self) -> bool {
         matches!(
             self.nth(0),
-            SyntaxKind::LBracket | SyntaxKind::Dot | SyntaxKind::LParen | SyntaxKind::Question
+            SyntaxKind::LBracket
+                | SyntaxKind::Dot
+                | SyntaxKind::QuestionDot
+                | SyntaxKind::LParen
+                | SyntaxKind::Question
         ) || (self.nth(0) == SyntaxKind::Lt && self.at_allowed_type_argument_call())
     }
 
@@ -238,7 +316,7 @@ impl Parser<'_, '_> {
             SyntaxKind::LBrace => self.anonymous_record(),
             SyntaxKind::LBracket => self.list_literal(),
             SyntaxKind::KwMap => self.error_one("expected `.` or `{` after `map`"),
-            SyntaxKind::Backtick => self.template_literal(),
+            SyntaxKind::Backtick | SyntaxKind::MultilineStringDelimiter => self.template_literal(),
             SyntaxKind::KwIf => self.conditional_expression(),
             SyntaxKind::KwMatch => self.match_expression(),
             SyntaxKind::KwPrompt => self.prompt_expression(),
@@ -248,7 +326,7 @@ impl Parser<'_, '_> {
         self.complete(marker, SyntaxKind::Primary);
     }
 
-    fn literal(&mut self, allow_min_magnitude: bool) {
+    pub(super) fn literal(&mut self, allow_min_magnitude: bool) {
         let marker = self.start();
         if self.exceeded {
             return;
@@ -290,7 +368,7 @@ impl Parser<'_, '_> {
         if let Some(text) = self.nth_text(0) {
             if !crate::lexer::int_magnitude_supported(text) {
                 self.error("integer literal exceeds Int range");
-            } else if text == "9223372036854775808" && !allow_min_magnitude {
+            } else if crate::lexer::is_minimum_int_magnitude(text) && !allow_min_magnitude {
                 self.error("integer literal magnitude requires unary `-`");
             }
         }
@@ -377,7 +455,7 @@ impl Parser<'_, '_> {
             self.complete(marker, SyntaxKind::RecordConstructor);
             return;
         }
-        self.record_value_fields();
+        self.record_constructor_contents();
         self.expect_close_delimiter(SyntaxKind::RBrace, "expected `}` after record constructor");
         self.complete(marker, SyntaxKind::RecordConstructor);
     }
@@ -391,9 +469,31 @@ impl Parser<'_, '_> {
             self.complete(marker, SyntaxKind::AnonymousRecord);
             return;
         }
-        self.record_value_fields();
+        self.record_constructor_contents();
         self.expect_close_delimiter(SyntaxKind::RBrace, "expected `}` after anonymous record");
         self.complete(marker, SyntaxKind::AnonymousRecord);
+    }
+
+    fn record_constructor_contents(&mut self) {
+        if self.at(SyntaxKind::DotDot) {
+            self.record_update_base();
+            if self.at(SyntaxKind::Comma) {
+                self.bump_nontrivia();
+            } else if !self.at(SyntaxKind::RBrace) {
+                self.missing("expected `,` after record update base");
+            }
+        }
+        self.record_value_fields();
+    }
+
+    fn record_update_base(&mut self) {
+        let marker = self.start();
+        self.expect(
+            SyntaxKind::DotDot,
+            "expected `..` before record update base",
+        );
+        self.expression();
+        self.complete(marker, SyntaxKind::RecordUpdateBase);
     }
 
     fn record_value_fields(&mut self) {
@@ -436,8 +536,39 @@ impl Parser<'_, '_> {
             self.complete(marker, SyntaxKind::ListLiteral);
             return;
         }
-        self.expression_list(SyntaxKind::RBracket, "expected `]` after list literal");
+        let mut expect_item = !self.at(SyntaxKind::RBracket);
+        while !self.exceeded && !self.at_expression_list_end(SyntaxKind::RBracket) {
+            if self.at(SyntaxKind::Comma) {
+                if expect_item {
+                    self.error_one("expected list item before `,`");
+                } else {
+                    self.bump_nontrivia();
+                    expect_item = !self.at_expression_list_end(SyntaxKind::RBracket);
+                }
+                continue;
+            }
+            if !self.at(SyntaxKind::DotDot) && !self.at_expression_start() {
+                self.error_one("expected list item");
+                expect_item = false;
+                continue;
+            }
+            if !expect_item {
+                self.missing("expected `,` between list items");
+            }
+            self.list_item();
+            expect_item = false;
+        }
+        self.expect_close_delimiter(SyntaxKind::RBracket, "expected `]` after list literal");
         self.complete(marker, SyntaxKind::ListLiteral);
+    }
+
+    fn list_item(&mut self) {
+        let marker = self.start();
+        if self.at(SyntaxKind::DotDot) {
+            self.bump_nontrivia();
+        }
+        self.expression();
+        self.complete(marker, SyntaxKind::ListItem);
     }
 
     fn map_literal(&mut self) {
@@ -461,8 +592,8 @@ impl Parser<'_, '_> {
                 }
                 continue;
             }
-            if self.at_map_entry_start() {
-                self.map_entry();
+            if self.at(SyntaxKind::DotDot) || self.at_map_entry_start() {
+                self.map_item();
                 expect_entry = false;
             } else {
                 self.error_one("expected map entry");
@@ -486,10 +617,17 @@ impl Parser<'_, '_> {
             )
     }
 
-    fn map_entry(&mut self) {
-        self.expression();
-        self.expect(SyntaxKind::Colon, "expected `:` between map key and value");
-        self.expression();
+    fn map_item(&mut self) {
+        let marker = self.start();
+        if self.at(SyntaxKind::DotDot) {
+            self.bump_nontrivia();
+            self.expression();
+        } else {
+            self.expression();
+            self.expect(SyntaxKind::Colon, "expected `:` between map key and value");
+            self.expression();
+        }
+        self.complete(marker, SyntaxKind::MapItem);
     }
 
     fn tuple_or_group(&mut self) {
@@ -510,11 +648,20 @@ impl Parser<'_, '_> {
         if self.exceeded {
             return;
         }
-        if !self.expect_open_delimiter(SyntaxKind::Backtick, "expected template start") {
+        let delimiter = match self.nth(0) {
+            SyntaxKind::Backtick => SyntaxKind::Backtick,
+            SyntaxKind::MultilineStringDelimiter => SyntaxKind::MultilineStringDelimiter,
+            _ => {
+                self.missing("expected template start");
+                self.complete(marker, SyntaxKind::TemplateLiteral);
+                return;
+            }
+        };
+        if !self.expect_open_delimiter(delimiter, "expected template start") {
             self.complete(marker, SyntaxKind::TemplateLiteral);
             return;
         }
-        while !self.exceeded && !self.at(SyntaxKind::Backtick) && !self.at(SyntaxKind::Eof) {
+        while !self.exceeded && !self.at(delimiter) && !self.at(SyntaxKind::Eof) {
             match self.nth(0) {
                 SyntaxKind::TemplateTextScalar | SyntaxKind::TemplateEscape => {
                     self.template_segment();
@@ -523,7 +670,7 @@ impl Parser<'_, '_> {
                 _ => self.error_one("expected template segment or interpolation"),
             }
         }
-        self.expect_close_delimiter(SyntaxKind::Backtick, "expected template end");
+        self.expect_close_delimiter(delimiter, "expected template end");
         self.complete(marker, SyntaxKind::TemplateLiteral);
     }
 
@@ -574,19 +721,69 @@ impl Parser<'_, '_> {
     }
 
     fn index_postfix(&mut self) {
+        let marker = self.start();
         if !self.expect_open_delimiter(SyntaxKind::LBracket, "expected `[` before index expression")
         {
             return;
         }
+        self.expression_depth += 1;
         self.expression();
+        self.expression_depth = self.expression_depth.saturating_sub(1);
         self.expect_close_delimiter(SyntaxKind::RBracket, "expected `]` after index expression");
+        self.complete(marker, SyntaxKind::Slice);
     }
 
     fn call_postfix(&mut self) {
         if !self.expect_open_delimiter(SyntaxKind::LParen, "expected `(` before call arguments") {
             return;
         }
-        self.expression_list(SyntaxKind::RParen, "expected `)` after call arguments");
+        let mut expect_argument = !self.at(SyntaxKind::RParen);
+        while !self.exceeded && !self.at_expression_list_end(SyntaxKind::RParen) {
+            if self.at(SyntaxKind::Comma) {
+                if expect_argument {
+                    self.error_one("expected call argument before `,`");
+                } else {
+                    self.bump_nontrivia();
+                    expect_argument = !self.at_expression_list_end(SyntaxKind::RParen);
+                }
+                continue;
+            }
+            if !self.at_expression_start() {
+                self.error_one("expected call argument");
+                expect_argument = false;
+                continue;
+            }
+            if !expect_argument {
+                self.missing("expected `,` between call arguments");
+            }
+            self.call_argument();
+            expect_argument = false;
+            if self.at(SyntaxKind::Comma) {
+                self.bump_nontrivia();
+                expect_argument = !self.at_expression_list_end(SyntaxKind::RParen);
+            } else if !self.at_expression_list_end(SyntaxKind::RParen) {
+                self.missing("expected `,` between call arguments");
+            }
+        }
+        self.expect_close_delimiter(SyntaxKind::RParen, "expected `)` after call arguments");
+        if self.at(SyntaxKind::KwFn) {
+            self.closure_expression();
+        }
+    }
+
+    fn call_argument(&mut self) {
+        let marker = self.start();
+        if self.nth(0) == SyntaxKind::Ident && self.nth(1) == SyntaxKind::Colon {
+            self.bump_nontrivia();
+            self.expect(SyntaxKind::Colon, "expected `:` after call argument label");
+        }
+        if self.nth_text(0) == Some("_") {
+            self.eat_trivia();
+            self.token_as(1, Some(SyntaxKind::Underscore));
+        } else {
+            self.expression();
+        }
+        self.complete(marker, SyntaxKind::CallArgument);
     }
 
     fn expression_list(&mut self, close: SyntaxKind, close_message: &'static str) {
@@ -653,6 +850,7 @@ impl Parser<'_, '_> {
                 && matches!(
                     kind,
                     SyntaxKind::Comma
+                        | SyntaxKind::Colon
                         | SyntaxKind::RParen
                         | SyntaxKind::RBracket
                         | SyntaxKind::RBrace
@@ -703,7 +901,7 @@ impl Parser<'_, '_> {
         let Some(last) = self.previous_nontrivia_text(0) else {
             return false;
         };
-        if last == "narrow" {
+        if matches!(last, "narrow" | "decode") {
             return true;
         }
         self.previous_nontrivia_text(1) == Some(".")
@@ -798,6 +996,16 @@ impl Parser<'_, '_> {
             return;
         }
         self.expect(SyntaxKind::KwFn, "expected `fn`");
+        if self.at_short_closure() {
+            self.short_closure_parameter_list();
+            self.expect(
+                SyntaxKind::FatArrow,
+                "expected `=>` after concise lambda parameters",
+            );
+            self.expression();
+            self.complete(marker, SyntaxKind::ShortClosure);
+            return;
+        }
         self.parameter_list();
         self.expect(
             SyntaxKind::KwReturns,
@@ -813,6 +1021,66 @@ impl Parser<'_, '_> {
             self.missing("expected closure body");
         }
         self.complete(marker, SyntaxKind::Closure);
+    }
+
+    fn at_short_closure(&self) -> bool {
+        if self.nth(0) != SyntaxKind::LParen {
+            return false;
+        }
+        let mut index = self.pos;
+        let mut depth = 0usize;
+        while let Some(token) = self.tokens.get(index) {
+            if super::is_trivia(token.kind()) {
+                index += 1;
+                continue;
+            }
+            match token.kind() {
+                SyntaxKind::LParen => depth += 1,
+                SyntaxKind::RParen => {
+                    depth = depth.saturating_sub(1);
+                    if depth == 0 {
+                        return self
+                            .next_nontrivia_raw(index + 1)
+                            .is_some_and(|next| self.tokens[next].kind() == SyntaxKind::FatArrow);
+                    }
+                }
+                SyntaxKind::Eof => return false,
+                _ => {}
+            }
+            index += 1;
+        }
+        false
+    }
+
+    fn short_closure_parameter_list(&mut self) {
+        if !self.expect_open_delimiter(SyntaxKind::LParen, "expected concise lambda parameter list")
+        {
+            return;
+        }
+        let mut expect_parameter = !self.at(SyntaxKind::RParen);
+        while !self.exceeded && !self.at(SyntaxKind::RParen) && !self.at(SyntaxKind::Eof) {
+            if self.at(SyntaxKind::Comma) {
+                if expect_parameter {
+                    self.error_one("expected concise lambda parameter before `,`");
+                } else {
+                    self.bump_nontrivia();
+                    expect_parameter = !self.at(SyntaxKind::RParen);
+                }
+            } else if self.at(SyntaxKind::Ident) {
+                if !expect_parameter {
+                    self.missing("expected `,` between concise lambda parameters");
+                }
+                self.bump_nontrivia();
+                expect_parameter = false;
+            } else {
+                self.error_one("expected concise lambda parameter");
+                expect_parameter = false;
+            }
+        }
+        self.expect_close_delimiter(
+            SyntaxKind::RParen,
+            "expected `)` after concise lambda parameters",
+        );
     }
 
     pub(super) fn conditional_expression(&mut self) {
@@ -1454,6 +1722,7 @@ mod tests {
     fn validates_contextual_int_min_magnitude_syntax() {
         for text in [
             "fn f() returns Int { -9223372036854775808 }",
+            "fn f() returns Int { -9_223_372_036_854_775_808 }",
             "fn f() returns Int { --9223372036854775808 }",
             "fn f() returns Int { --1 }",
         ] {
@@ -1470,6 +1739,7 @@ mod tests {
 
         for text in [
             "fn f() returns Int { 9223372036854775808 }",
+            "fn f() returns Int { 9_223_372_036_854_775_808 }",
             "fn f() returns Int { 9223372036854775809 }",
             "fn f() returns Int { -(9223372036854775808) }",
             "fn f() returns Int { -9223372036854775808[0] }",
@@ -1611,6 +1881,7 @@ mod tests {
             "fn f() returns Void { for item in map { \"a\": [`x ${1}`] } { return; } }",
             "fn f(value: Int) returns Int { match choose({ nested: [value] }) { _ => 1 } }",
             "fn f() returns Void { let c = fn(callback: fn({ a: Int }) returns Int) returns Int { 1 }; }",
+            "fn f(users: List<Int>) returns List<Int> { list.filter(values: users, callback: fn(user) => user > 0) }",
         ] {
             let source = source(text);
             let parsed = parse(&source);
@@ -1638,6 +1909,20 @@ mod tests {
         assert!(!parsed.has_errors());
         parsed.assert_round_trip(&source);
         assert!(node_kinds(&text).contains(&SyntaxKind::TypeArgument));
+    }
+
+    #[test]
+    fn decode_accepts_one_explicit_type_argument() {
+        let text = "fn f() returns Result<Int, DecodeError> { decode<Int>(b\"1\") }";
+        let source = source(text);
+        let parsed = parse(&source);
+        assert!(
+            parsed.diagnostics().is_empty(),
+            "{:?}",
+            parsed.diagnostics()
+        );
+        assert!(node_kinds(text).contains(&SyntaxKind::TypeArgument));
+        parsed.assert_round_trip(&source);
     }
 
     #[test]
@@ -1796,6 +2081,28 @@ mod tests {
     }
 
     #[test]
+    fn builtin_namespace_map_member_accepts_the_map_keyword() {
+        let text = "fn f(values: List<Int>) returns List<Int> { list.map(values, fn(item: Int) returns Int { item }) }";
+        let source = source(text);
+        let parsed = parse(&source);
+        assert!(
+            parsed.diagnostics().is_empty(),
+            "{:?}",
+            parsed.diagnostics()
+        );
+        assert!(!parsed.has_errors());
+        parsed.assert_round_trip(&source);
+
+        assert!(
+            parsed
+                .syntax()
+                .descendants_with_tokens()
+                .filter_map(rowan::NodeOrToken::into_token)
+                .any(|token| token.kind() == SyntaxKind::KwMap && token.text() == "map")
+        );
+    }
+
+    #[test]
     fn prompt_fields_are_exact_nodes_and_contextual_tokens() {
         let text = r#"fn f() returns Prompt<Result<Int, String>> {
   let system = 1;
@@ -1921,23 +2228,27 @@ mod tests {
 
     #[test]
     fn minimum_integer_literal_keeps_recursive_unary_shape() {
-        let text = "fn f() returns Int { -9223372036854775808 }";
-        let source = source(text);
-        let parsed = parse(&source);
-        assert!(
-            parsed.diagnostics().is_empty(),
-            "{:?}",
-            parsed.diagnostics()
-        );
-        assert!(!parsed.has_errors());
-        parsed.assert_round_trip(&source);
-        assert!(
-            node_kinds(text)
-                .iter()
-                .filter(|kind| **kind == SyntaxKind::Unary)
-                .count()
-                >= 2
-        );
+        for text in [
+            "fn f() returns Int { -9223372036854775808 }",
+            "fn f() returns Int { -0_9223372036854775808 }",
+        ] {
+            let source = source(text);
+            let parsed = parse(&source);
+            assert!(
+                parsed.diagnostics().is_empty(),
+                "{:?}",
+                parsed.diagnostics()
+            );
+            assert!(!parsed.has_errors());
+            parsed.assert_round_trip(&source);
+            assert!(
+                node_kinds(text)
+                    .iter()
+                    .filter(|kind| **kind == SyntaxKind::Unary)
+                    .count()
+                    >= 2
+            );
+        }
     }
 
     #[test]
@@ -1999,5 +2310,81 @@ mod tests {
         assert_eq!(parsed.syntax().kind(), SyntaxKind::Source);
         assert!(parsed.has_errors());
         parsed.assert_round_trip(&nested);
+    }
+
+    #[test]
+    fn ranges_and_slices_pin_precedence_nonassociativity_and_composition_tokens() {
+        let text = "fn f(values: List<Int>) returns Int { let ranged = 1 + 2..3 ?? 4; let sliced = values[1..=4]; let indexed = values[0]; let composed = left >> right; ranged }";
+        let file = source(text);
+        let parsed = parse(&file);
+        assert!(
+            parsed.diagnostics().is_empty(),
+            "{:?}",
+            parsed.diagnostics()
+        );
+        assert!(!parsed.has_errors());
+        parsed.assert_round_trip(&file);
+
+        let kinds = node_kinds(text);
+        assert_eq!(
+            kinds
+                .iter()
+                .filter(|kind| **kind == SyntaxKind::Range)
+                .count(),
+            7,
+            "every expression has a range precedence wrapper"
+        );
+        assert_eq!(
+            kinds
+                .iter()
+                .filter(|kind| **kind == SyntaxKind::Slice)
+                .count(),
+            2,
+            "index and slice postfixes share one lossless bracket carrier"
+        );
+        assert!(kinds.contains(&SyntaxKind::Composition));
+        let tokens = parsed
+            .syntax()
+            .descendants_with_tokens()
+            .filter_map(rowan::NodeOrToken::into_token)
+            .map(|token| token.kind())
+            .collect::<Vec<_>>();
+        assert!(tokens.contains(&SyntaxKind::DotDot));
+        assert!(tokens.contains(&SyntaxKind::DotDotEq));
+        let composition = parsed
+            .syntax()
+            .descendants()
+            .find(|node| {
+                node.kind() == SyntaxKind::Composition
+                    && node.text().to_string().contains("left >> right")
+            })
+            .expect("composition node");
+        assert_eq!(
+            composition
+                .descendants_with_tokens()
+                .filter_map(rowan::NodeOrToken::into_token)
+                .filter(|token| token.kind() == SyntaxKind::Gt)
+                .count(),
+            2,
+            "composition stays contextual as two `>` tokens"
+        );
+
+        let malformed = source("fn bad() returns Int { 1..2..3 } fn later() returns Void {}");
+        let parsed = parse(&malformed);
+        assert!(parsed.has_errors());
+        assert!(parsed.diagnostics().iter().any(|diagnostic| {
+            diagnostic.message()
+                == "range operators are nonassociative; parenthesize the nested range"
+        }));
+        assert_eq!(
+            parsed
+                .syntax()
+                .descendants()
+                .filter(|node| node.kind() == SyntaxKind::FunctionDeclaration)
+                .count(),
+            2,
+            "range recovery reaches the following declaration"
+        );
+        parsed.assert_round_trip(&malformed);
     }
 }

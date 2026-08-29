@@ -186,6 +186,12 @@ fn header(data: &[u8]) -> ReplayHeader {
         capability_digest: digest(6),
         error_registry_digest: digest(7),
         effective_manifest_grants: grants,
+        requested_exec_commands: Vec::new(),
+        requested_exec_environment: Vec::new(),
+        effective_exec_grants: Vec::new(),
+        effective_exec_environment: Vec::new(),
+        effective_exec_environment_digest: [0; 32],
+        pinned_exec_identity_digest: [0; 32],
         scheduler_completion_order: Vec::new(),
     }
 }
@@ -569,7 +575,7 @@ fn exercise_valid_log(log: &ReplayLog) {
         );
         assert!(
             ReplayLog::from_json(
-                &json.replacen("\"bytecode_version\":13", "\"bytecode_version\":12", 1),
+                &json.replacen("\"bytecode_version\":16", "\"bytecode_version\":15", 1),
                 LIMITS
             )
             .is_err()

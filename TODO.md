@@ -1,29 +1,37 @@
-# Things that have been decided but not yet implemented
+# Language feature implementation status
 
-## P0
+## Selected language features
 
-- [ ] Headless tool provider for josh run (PD-10 or variant) — route tool/invoke behind explicit grants instead of rejecting all provider requests (`crates/josh/src/runner.rs:383-402`).
-- [ ] Whitelisted CLI exec capability — `exec.run(argv, stdin?)` → `Result<{status, stdout, stderr}, ExecError>`; manifest requests named commands, host grants per binary/arg-prefix (`--grant-exec "aws cloudwatch *"`); argv-only (no shell), explicit env allowlist, output/wall limits, record/replay via argv + stdout digest.
-- [ ] `decode<T>(Bytes) → Result<T, DecodeError>` — in-program JSON decoding, reusing the entry-boundary lowering/validation.
+The stable IDs link to focused proposals. Implement the batches in order.
+Items in one batch can proceed independently unless the item names a
+dependency.
 
-## P1
+### Batch L1: syntax and library foundations
 
-- [ ] Clockless time module — `format_utc` / `parse_utc` / bucketing on epoch ints; no clock, time only arrives as data.
-- [ ] `to_int(String) → Result<Int, ParseError>`
-- [ ] Fixed-decimal float formatting — `float.format(x, decimals);`
-- [ ] Typed template resources — external template file with a declared hole signature, verified by allen check (every hole filled, no stray placeholders, no ${/backtick escaping). Replaces the earlier string.replace-workaround and raw/heredoc items; still add string.replace as a general string op.
-- [ ] Record invariants / entry validators — where clauses checked at the boundary (e.g. all five series same length); kills the misaligned-series bug class at load time.
-- [ ] Lockstep iteration — `for (h, c, a) in zip(...)` instead of index loops with trapping `l[i]`.
-- [ ] List stats helpers — min/max/sum/fold.
-- [ ] `map.insert` / `map.remove` / `map.keys` — maps are literal-only; sparse series can't be grouped without them.
+- [x] [`LIT-RAW-STRING`](roadmap/proposals/language/LIT-RAW-STRING.md) - Add raw string literals with hash-counted delimiters.
+- [x] [`LIT-MULTILINE`](roadmap/proposals/language/LIT-MULTILINE.md) - Add indentation-trimmed multiline strings.
+- [x] [`FUN-LABELED-ARGS`](roadmap/proposals/language/FUN-LABELED-ARGS.md) - Add labels to declaration and call contracts.
+- [x] [`FUN-LAMBDA-SHORT`](roadmap/proposals/language/FUN-LAMBDA-SHORT.md) - Infer concise lambda types from one exact expected function type.
+- [x] [`COL-COMBINATORS`](roadmap/proposals/language/COL-COMBINATORS.md) - Add the selected eager list transform and predicate operations.
+- [x] [`FLOW-OPTION-QUESTION`](roadmap/proposals/language/FLOW-OPTION-QUESTION.md) - Extend postfix question propagation to `Option`.
 
-## P2
+### Batch L2: call and data sugar
 
-- [ ] Newtypes — distinct nominal aliases (newtype EpochSeconds = Int) so epoch seconds, hour indexes, and counts can't interchange.
-- [ ] fail(reason) — a failed outcome distinct from stop's clean termination, for data-invariant violations.
-- [ ] Option coalescing — postfix `unwrap_or` / `??` for gappy datapoints and the partial last hour.
-- [ ] Top-level const — shared thresholds (97.0, 256, sweep start index) without threading through signatures.
-- [ ] Source-level test blocks — test "..." { } run by allen test, on top of the existing testkit record/replay.
-- [ ] Numeric literal separators — 485_273.
-- [ ] Docs/examples — a minimal "typed JSON in → typed JSON out via --input" example (also preempts the parenthesized-if, capabilities: [], and export-entry stumbles); document the 1 MiB entry-output cap and its knob.
-- [ ] PD-1/PD-2 durability — optional; cron/Orca covers scheduling.
+- [x] [`FUN-DEFAULT-ARGS`](roadmap/proposals/language/FUN-DEFAULT-ARGS.md) - Add declaration-owned default arguments after labeled arguments.
+- [x] [`FUN-TRAILING-CALLBACK`](roadmap/proposals/language/FUN-TRAILING-CALLBACK.md) - Move one final callback outside call parentheses.
+- [x] [`FUN-PARTIAL`](roadmap/proposals/language/FUN-PARTIAL.md) - Lower direct-call placeholders to typed closures.
+- [x] [`FUN-COMPOSE`](roadmap/proposals/language/FUN-COMPOSE.md) - Lower function composition to one typed closure.
+- [x] [`FUN-PIPE`](roadmap/proposals/language/FUN-PIPE.md) - Add the forward pipe after partial application and eager combinators.
+- [x] [`FUN-EXTENSION-CALL`](roadmap/proposals/language/FUN-EXTENSION-CALL.md) - Add namespace-owned and explicitly imported extension-call resolution.
+- [x] [`COL-RECORD-UPDATE`](roadmap/proposals/language/COL-RECORD-UPDATE.md) - Add immutable record update syntax.
+- [x] [`COL-LITERAL-SPREAD`](roadmap/proposals/language/COL-LITERAL-SPREAD.md) - Add list and map spread items.
+- [x] [`FLOW-OPTION-CHAIN`](roadmap/proposals/language/FLOW-OPTION-CHAIN.md) - Add optional field and call chaining after `Option` propagation.
+
+### Batch L3: new values and pattern work
+
+- [x] [`COL-RANGE-VALUES`](roadmap/proposals/language/COL-RANGE-VALUES.md) - Add half-open and inclusive `Range<Int>` values.
+- [x] [`COL-SLICES`](roadmap/proposals/language/COL-SLICES.md) - Add safe bracket slices after range values.
+- [x] [`PAT-RANGE`](roadmap/proposals/language/PAT-RANGE.md) - Add ordered range patterns after range syntax is fixed.
+- [x] [`PAT-OR`](roadmap/proposals/language/PAT-OR.md) - Add OR patterns with exact binding agreement.
+- [x] [`FUN-LOCAL`](roadmap/proposals/language/FUN-LOCAL.md) - Add noncapturing, nongeneric local named functions.
+- [x] [`COL-LAZY-SEQUENCE`](roadmap/proposals/language/COL-LAZY-SEQUENCE.md) - Add affine, single-pass lazy sequences after eager combinators.

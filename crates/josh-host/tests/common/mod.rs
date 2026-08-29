@@ -4,7 +4,8 @@ use std::collections::BTreeMap;
 
 use allen_bytecode::{
     Artifact, ArtifactMetadata, Constant, EntryContract, Function, Instruction, ManifestContract,
-    Module, StrictSchema, ValueType, compute_tool_contract_digest, encode,
+    Module, StrictSchema, ValueType, compute_entry_contract_digest, compute_tool_contract_digest,
+    encode,
 };
 use base64::Engine as _;
 use josh_host::Session;
@@ -59,6 +60,8 @@ pub fn load_unit_program(session: &mut Session) -> ProgramLoadResult {
             functions: vec![Function {
                 name: "pkg/x74657374/x302e312e30/x737263/x6d61696e.allen::main".to_owned(),
                 parameters: vec![0],
+                parameter_names: vec!["_arg0".to_owned()],
+                parameter_default_digests: vec![None],
                 captures: Vec::new(),
                 registers: vec![ValueType::Unit],
                 return_type: ValueType::Unit,
@@ -74,6 +77,8 @@ pub fn load_unit_program(session: &mut Session) -> ProgramLoadResult {
             async_functions: Vec::new(),
             entry: 0,
         },
+        templates: Vec::new(),
+        record_invariants: Vec::new(),
         debug: None,
         schemas: vec![StrictSchema {
             value_type: ValueType::Unit,
@@ -83,6 +88,24 @@ pub fn load_unit_program(session: &mut Session) -> ProgramLoadResult {
             function: 0,
             input_schema: 0,
             output_schema: 0,
+            input_validators: Vec::new(),
+            output_validators: Vec::new(),
+            input_record_provenance: Vec::new(),
+            output_record_provenance: Vec::new(),
+            input_contract_digest: compute_entry_contract_digest(
+                &StrictSchema {
+                    value_type: ValueType::Unit,
+                },
+                &[],
+                &[],
+            ),
+            output_contract_digest: compute_entry_contract_digest(
+                &StrictSchema {
+                    value_type: ValueType::Unit,
+                },
+                &[],
+                &[],
+            ),
         }],
         imports: Vec::new(),
         manifest: Some(ManifestContract {
@@ -93,6 +116,8 @@ pub fn load_unit_program(session: &mut Session) -> ProgramLoadResult {
             optional_capabilities: Vec::new(),
             limits: Vec::new(),
             https_origins: Vec::new(),
+            exec_commands: Vec::new(),
+            exec_environment: Vec::new(),
             required_tools: Vec::new(),
             tool_contract_digest: compute_tool_contract_digest(&[]),
         }),
@@ -115,6 +140,8 @@ pub fn execution_params(loaded: ProgramLoadResult, execution_id: &str) -> Execut
         granted_capabilities: Vec::new(),
         granted_tools: Vec::new(),
         allowed_http_origins: Vec::new(),
+        granted_exec: Vec::new(),
+        granted_exec_environment: Vec::new(),
         limits: BTreeMap::from([("wall_ms".to_owned(), 1_000)]),
     }
 }

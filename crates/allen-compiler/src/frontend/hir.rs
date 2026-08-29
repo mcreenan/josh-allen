@@ -2,8 +2,8 @@
 
 use super::Span;
 use allen_bytecode::{
-    CapabilityOperation, CheckedIntOperation, EffectSetId, FsOperation, SafeCollectionOperation,
-    StringOperation, ValueType,
+    CapabilityOperation, CheckedIntOperation, CollectionOperation, EffectSetId, FsOperation,
+    ListCombinator, SafeCollectionOperation, StandardOperation, StringOperation, ValueType,
 };
 
 pub type SymbolId = u32;
@@ -26,7 +26,15 @@ pub struct SourceSpan {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct HirModule {
     pub path: String,
+    pub constants: Vec<HirConstant>,
     pub functions: Vec<HirFunction>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct HirConstant {
+    pub symbol: SymbolId,
+    pub name: String,
+    pub value_type: TypeId,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -50,6 +58,18 @@ pub struct HirExpr {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub enum HirListItem {
+    Element(HirExpr),
+    Spread(HirExpr),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum HirMapItem {
+    Entry { key: HirExpr, value: HirExpr },
+    Spread(HirExpr),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum HirExprKind {
     Unit,
     Int(i64),
@@ -57,12 +77,21 @@ pub enum HirExprKind {
     Bool(bool),
     String(String),
     Template(Vec<HirTemplatePart>),
+    TemplateRender {
+        template: u32,
+        arguments: Vec<HirExpr>,
+    },
     Bytes(Vec<u8>),
     Variable,
     List(Vec<HirExpr>),
+    ListWithSpread(Vec<HirListItem>),
     Length(Box<HirExpr>),
     StringOperation {
         operation: StringOperation,
+        arguments: Vec<HirExpr>,
+    },
+    StandardOperation {
+        operation: StandardOperation,
         arguments: Vec<HirExpr>,
     },
     CapabilityInspect {
@@ -77,6 +106,21 @@ pub enum HirExprKind {
         operation: CheckedIntOperation,
         arguments: Vec<HirExpr>,
     },
+    CollectionOperation {
+        operation: CollectionOperation,
+        arguments: Vec<HirExpr>,
+    },
+    ListFold {
+        values: Box<HirExpr>,
+        initial: Box<HirExpr>,
+        callback: Box<HirExpr>,
+    },
+    ListCombinator {
+        operation: ListCombinator,
+        values: Box<HirExpr>,
+        initial: Option<Box<HirExpr>>,
+        callback: Box<HirExpr>,
+    },
     ListAppend {
         values: Box<HirExpr>,
         value: Box<HirExpr>,
@@ -87,9 +131,12 @@ pub enum HirExprKind {
         value: Box<HirExpr>,
     },
     Map(Vec<(HirExpr, HirExpr)>),
+    MapWithSpread(Vec<HirMapItem>),
     Record(Vec<HirExpr>),
     Prompt(Vec<HirExpr>),
     Enum,
+    NewtypeWrap(Box<HirExpr>),
+    NewtypeUnwrap(Box<HirExpr>),
     FieldGet(Box<HirExpr>),
     Match {
         source: Box<HirExpr>,
@@ -117,6 +164,7 @@ pub enum HirExprKind {
     Try(Box<HirExpr>),
     ToUnknown(Box<HirExpr>),
     Narrow(Box<HirExpr>),
+    Decode(Box<HirExpr>),
     Tuple(Vec<HirExpr>),
     Unary(Box<HirExpr>),
     Binary(Vec<HirExpr>),
@@ -124,6 +172,46 @@ pub enum HirExprKind {
         collection: Box<HirExpr>,
         index: Box<HirExpr>,
     },
+    Range {
+        start: Box<HirExpr>,
+        end: Box<HirExpr>,
+        inclusive: bool,
+    },
+    Slice {
+        collection: Box<HirExpr>,
+        range: Box<HirExpr>,
+    },
+    SequenceFromList(Box<HirExpr>),
+    SequenceMap {
+        sequence: Box<HirExpr>,
+        callback: Box<HirExpr>,
+    },
+    SequenceFilter {
+        sequence: Box<HirExpr>,
+        callback: Box<HirExpr>,
+    },
+    SequenceTake {
+        sequence: Box<HirExpr>,
+        count: Box<HirExpr>,
+    },
+    SequenceFind {
+        sequence: Box<HirExpr>,
+        callback: Box<HirExpr>,
+    },
+    SequenceAny {
+        sequence: Box<HirExpr>,
+        callback: Box<HirExpr>,
+    },
+    SequenceAll {
+        sequence: Box<HirExpr>,
+        callback: Box<HirExpr>,
+    },
+    SequenceFold {
+        sequence: Box<HirExpr>,
+        initial: Box<HirExpr>,
+        callback: Box<HirExpr>,
+    },
+    SequenceToList(Box<HirExpr>),
     Convert(Box<HirExpr>),
     Assignment(Box<HirExpr>),
     DirectCall(Vec<HirExpr>),
@@ -148,6 +236,7 @@ pub enum HirExprKind {
         body: Box<HirExpr>,
     },
     Stop(Box<HirExpr>),
+    Fail(Box<HirExpr>),
     Closure {
         captures: Vec<SymbolId>,
         body: Box<HirExpr>,
@@ -180,8 +269,4 @@ pub struct HirLoopBindingElement {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum HirForSource {
     Iterable(Box<HirExpr>),
-    Range {
-        start: Box<HirExpr>,
-        end: Box<HirExpr>,
-    },
 }

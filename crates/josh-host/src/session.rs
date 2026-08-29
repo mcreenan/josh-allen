@@ -8,7 +8,7 @@ use std::time::Duration;
 use allen_bytecode::{
     DecodeLimits, VerifiedArtifact, compute_strict_schema_digest, decode_and_verify, encode,
 };
-use allen_compiler::{assemble_inline_source, assemble_root_source_package};
+use allen_compiler::{assemble_inline_source, assemble_root_source_package_with_resources};
 use allen_package::LoadLimits;
 use allen_runtime::{
     HostPolicy, LaunchRequest, PreparedLaunch, RuntimeError, RuntimeProviders, ToolProvider,
@@ -403,6 +403,8 @@ impl Session {
             HostError::new(WireErrorCode::ProgramInvalid, "program manifest is missing")
         })?;
         let tool_contract_digest = digest_text(&manifest.tool_contract_digest);
+        let exec_commands = manifest.exec_commands.clone();
+        let exec_environment = manifest.exec_environment.clone();
         let entries = verified
             .entries()
             .iter()
@@ -414,6 +416,8 @@ impl Session {
                 output_schema: digest_text(&compute_strict_schema_digest(
                     &verified.schemas()[entry.output_schema as usize],
                 )),
+                input_contract_digest: digest_text(&entry.input_contract_digest),
+                output_contract_digest: digest_text(&entry.output_contract_digest),
             })
             .collect();
         let program_id = format!("program-{}", self.next_program_id);
@@ -431,6 +435,8 @@ impl Session {
             tool_contract_digest,
             diagnostics: Vec::new(),
             entries,
+            exec_commands,
+            exec_environment,
         })
     }
 
@@ -602,22 +608,18 @@ fn assemble_source_bundle(
     let mut manifest = None;
     let mut lock = None;
     let mut sources = BTreeMap::new();
+    let mut resources = BTreeMap::new();
     let mut decoded_bytes = 0_u64;
     for file in files {
-        let file_bytes = match file.encoding {
-            josh_protocol::FileEncoding::Utf8 => {
-                u64::try_from(file.content.len()).unwrap_or(u64::MAX)
-            }
-            josh_protocol::FileEncoding::Base64 => u64::try_from(
-                base64::engine::general_purpose::STANDARD
-                    .decode(&file.content)
-                    .map_err(|_| {
-                        HostError::new(WireErrorCode::ProgramInvalid, "source data is invalid")
-                    })?
-                    .len(),
-            )
-            .unwrap_or(u64::MAX),
+        let decoded = match file.encoding {
+            josh_protocol::FileEncoding::Utf8 => file.content.as_bytes().to_vec(),
+            josh_protocol::FileEncoding::Base64 => base64::engine::general_purpose::STANDARD
+                .decode(&file.content)
+                .map_err(|_| {
+                    HostError::new(WireErrorCode::ProgramInvalid, "source data is invalid")
+                })?,
         };
+        let file_bytes = u64::try_from(decoded.len()).unwrap_or(u64::MAX);
         decoded_bytes = decoded_bytes.checked_add(file_bytes).ok_or_else(|| {
             HostError::new(WireErrorCode::ProgramInvalid, "source program is too large")
         })?;
@@ -633,7 +635,9 @@ fn assemble_source_bundle(
             path if path.starts_with("src/") && path.ends_with(".allen") => {
                 sources.insert(path.to_owned(), file.content.clone());
             }
-            _ => {}
+            path => {
+                resources.insert(path.to_owned(), decoded);
+            }
         }
     }
     let mut limits = LoadLimits::default();
@@ -643,7 +647,14 @@ fn assemble_source_bundle(
     limits.filesystem_entries = limits.filesystem_entries.min(files.len());
     limits.path_bytes = limits.path_bytes.min(4_096);
     let compiled = if let Some(manifest) = manifest {
-        assemble_root_source_package(manifest, &sources, lock, Some(catalog), &limits)
+        assemble_root_source_package_with_resources(
+            manifest,
+            &sources,
+            &resources,
+            lock,
+            Some(catalog),
+            &limits,
+        )
     } else if lock.is_none() && sources.len() == 1 {
         let source = sources.get("src/main.allen").ok_or_else(|| {
             HostError::new(
@@ -710,7 +721,11 @@ const fn unsatisfied() -> HostError {
 }
 
 fn host_policy(params: &ExecutionStartParams, catalog: &FrozenCatalog) -> HostPolicy {
-    let mut policy = HostPolicy::default();
+    let mut policy = HostPolicy {
+        granted_exec: params.granted_exec.iter().cloned().collect(),
+        granted_exec_environment: params.granted_exec_environment.iter().cloned().collect(),
+        ..HostPolicy::default()
+    };
     for (name, value) in &params.limits {
         match name.as_str() {
             "instructions" => policy.limits.instructions = *value,
@@ -786,7 +801,7 @@ fn host_policy(params: &ExecutionStartParams, catalog: &FrozenCatalog) -> HostPo
 }
 
 fn runtime_error(error: &RuntimeError) -> josh_protocol::ProtocolRuntimeError {
-    josh_protocol::ProtocolRuntimeError {
+    let mut result = josh_protocol::ProtocolRuntimeError {
         code: error.code.as_str().to_owned(),
         message: error.message.clone(),
         category: "runtime".to_owned(),
@@ -795,7 +810,11 @@ fn runtime_error(error: &RuntimeError) -> josh_protocol::ProtocolRuntimeError {
         operation_id: None,
         metadata: BTreeMap::new(),
         causes: Vec::new(),
+    };
+    if result.code == "program.failed" && result.validate().is_err() {
+        "program failed".clone_into(&mut result.message);
     }
+    result
 }
 
 fn runtime_panic() -> josh_protocol::ProtocolRuntimeError {
@@ -842,7 +861,7 @@ mod tests {
     use allen_bytecode::{
         Artifact, ArtifactMetadata, Constant, EntryContract as ArtifactEntry, Function,
         Instruction, ManifestContract, Module, StrictSchema, ValueType,
-        compute_tool_contract_digest, encode,
+        compute_entry_contract_digest, compute_tool_contract_digest, encode,
     };
     use josh_protocol::{ExecutionMode, InvokingSessionId};
     use serde_json::Value;
@@ -881,6 +900,8 @@ mod tests {
                 functions: vec![Function {
                     name: "pkg/x74657374/x302e312e30/x737263/x6d61696e.allen::main".to_owned(),
                     parameters: vec![0],
+                    parameter_names: vec!["_arg0".to_owned()],
+                    parameter_default_digests: vec![None],
                     captures: Vec::new(),
                     registers: vec![ValueType::Unit],
                     return_type: ValueType::Unit,
@@ -905,6 +926,24 @@ mod tests {
                 function: 0,
                 input_schema: 0,
                 output_schema: 0,
+                input_validators: Vec::new(),
+                output_validators: Vec::new(),
+                input_record_provenance: Vec::new(),
+                output_record_provenance: Vec::new(),
+                input_contract_digest: compute_entry_contract_digest(
+                    &StrictSchema {
+                        value_type: ValueType::Unit,
+                    },
+                    &[],
+                    &[],
+                ),
+                output_contract_digest: compute_entry_contract_digest(
+                    &StrictSchema {
+                        value_type: ValueType::Unit,
+                    },
+                    &[],
+                    &[],
+                ),
             }],
             imports: Vec::new(),
             manifest: Some(ManifestContract {
@@ -915,9 +954,13 @@ mod tests {
                 optional_capabilities: Vec::new(),
                 limits: Vec::new(),
                 https_origins: Vec::new(),
+                exec_commands: Vec::new(),
+                exec_environment: Vec::new(),
                 required_tools: Vec::new(),
                 tool_contract_digest: compute_tool_contract_digest(&[]),
             }),
+            templates: Vec::new(),
+            record_invariants: Vec::new(),
         }
     }
 
@@ -1014,6 +1057,8 @@ mod tests {
                     granted_capabilities: Vec::new(),
                     granted_tools: Vec::new(),
                     allowed_http_origins: Vec::new(),
+                    granted_exec: Vec::new(),
+                    granted_exec_environment: Vec::new(),
                     limits: BTreeMap::new(),
                 },
             )
@@ -1036,6 +1081,8 @@ mod tests {
             granted_capabilities: Vec::new(),
             granted_tools: Vec::new(),
             allowed_http_origins: Vec::new(),
+            granted_exec: Vec::new(),
+            granted_exec_environment: Vec::new(),
             limits: [
                 "call_depth",
                 "cleanup_instructions",
@@ -1127,6 +1174,8 @@ mod tests {
                     granted_capabilities: Vec::new(),
                     granted_tools: Vec::new(),
                     allowed_http_origins: Vec::new(),
+                    granted_exec: Vec::new(),
+                    granted_exec_environment: Vec::new(),
                     limits: BTreeMap::from([("wall_ms".to_owned(), 1_000)]),
                 },
             )
@@ -1156,6 +1205,8 @@ mod tests {
                     granted_capabilities: Vec::new(),
                     granted_tools: Vec::new(),
                     allowed_http_origins: Vec::new(),
+                    granted_exec: Vec::new(),
+                    granted_exec_environment: Vec::new(),
                     limits: BTreeMap::new(),
                 },
             )
@@ -1197,6 +1248,8 @@ mod tests {
                     granted_capabilities: Vec::new(),
                     granted_tools: Vec::new(),
                     allowed_http_origins: Vec::new(),
+                    granted_exec: Vec::new(),
+                    granted_exec_environment: Vec::new(),
                     limits: BTreeMap::new(),
                 },
             )
@@ -1291,6 +1344,8 @@ mod tests {
                     granted_capabilities: Vec::new(),
                     granted_tools: Vec::new(),
                     allowed_http_origins: Vec::new(),
+                    granted_exec: Vec::new(),
+                    granted_exec_environment: Vec::new(),
                     limits: BTreeMap::from([("wall_ms".to_owned(), 1_000)]),
                 },
             )
@@ -1321,6 +1376,8 @@ mod tests {
             granted_capabilities: Vec::new(),
             granted_tools: Vec::new(),
             allowed_http_origins: Vec::new(),
+            granted_exec: Vec::new(),
+            granted_exec_environment: Vec::new(),
             limits: BTreeMap::new(),
         };
         assert_eq!(
@@ -1348,6 +1405,8 @@ mod tests {
                     granted_capabilities: Vec::new(),
                     granted_tools: Vec::new(),
                     allowed_http_origins: Vec::new(),
+                    granted_exec: Vec::new(),
+                    granted_exec_environment: Vec::new(),
                     limits: BTreeMap::new(),
                 },
             )

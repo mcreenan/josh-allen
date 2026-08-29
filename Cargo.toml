@@ -3,6 +3,7 @@ members = [
   "crates/allen-bytecode",
   "crates/allen-cli",
   "crates/allen-compiler",
+  "crates/allen-exec",
   "crates/allen-http-get",
   "crates/allen-package",
   "crates/allen-runtime",

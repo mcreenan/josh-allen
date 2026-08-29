@@ -28,7 +28,7 @@ JOSH_RESPONSE_TIMEOUT_SECONDS = 30
 # MCP version used by the local stdio clients supported by this plugin.
 MCP_PROTOCOL_VERSION = "2025-06-18"
 JOSH_PROTOCOL = "josh/1"
-JOSH_PROTOCOL_VERSION = "josh/1.4"
+JOSH_PROTOCOL_VERSION = "josh/1.5"
 JOSH_LIMITS = {
     "max_frame_bytes": MAX_FRAME_BYTES,
     "max_active_requests": 64,
@@ -648,6 +648,9 @@ class Bridge:
                 # occurs in the source-side manifest/program contract.
                 "granted_tools": ["allen_integration_echo"] if "allen_integration_echo" in source else [],
                 "allowed_http_origins": [],
+                # The callback bridge does not grant live subprocess authority.
+                "granted_exec": [],
+                "granted_exec_environment": [],
                 "limits": {"wall_ms": wall_ms},
             })
             session.execution_deadline = time.monotonic() + wall_ms / 1_000

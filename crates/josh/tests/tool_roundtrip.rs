@@ -7,7 +7,8 @@ use std::time::Duration;
 use allen_bytecode::{
     Artifact, ArtifactMetadata, Constant, DecodeLimits, EntryContract, EnumPayloadType,
     EnumSwitchArm, EnumType, EnumVariant, Function, Instruction, ManifestContract, Module,
-    StrictSchema, ToolContract, ValueType, compute_tool_contract_digest, decode_and_verify, encode,
+    StrictSchema, ToolContract, ValueType, compute_entry_contract_digest,
+    compute_tool_contract_digest, decode_and_verify, encode,
 };
 use allen_compiler::assemble_root_source_package;
 use allen_package::LoadLimits;
@@ -253,6 +254,8 @@ fn tool_artifact_with_retry(schema: &ToolSchema, retry_on_error: bool) -> Vec<u8
             functions: vec![Function {
                 name: "pkg/x74657374/x302e312e30/x737263/x6d61696e.allen::main".to_owned(),
                 parameters: vec![0],
+                parameter_names: vec!["_arg0".to_owned()],
+                parameter_default_digests: vec![None],
                 captures: Vec::new(),
                 registers,
                 return_type: result_type.clone(),
@@ -262,13 +265,15 @@ fn tool_artifact_with_retry(schema: &ToolSchema, retry_on_error: bool) -> Vec<u8
             async_functions: vec![0],
             entry: 0,
         },
+        templates: Vec::new(),
+        record_invariants: Vec::new(),
         debug: None,
         schemas: vec![
             StrictSchema {
                 value_type: ValueType::String,
             },
             StrictSchema {
-                value_type: result_type,
+                value_type: result_type.clone(),
             },
         ],
         entries: vec![EntryContract {
@@ -276,6 +281,24 @@ fn tool_artifact_with_retry(schema: &ToolSchema, retry_on_error: bool) -> Vec<u8
             function: 0,
             input_schema: 0,
             output_schema: 1,
+            input_validators: Vec::new(),
+            output_validators: Vec::new(),
+            input_record_provenance: Vec::new(),
+            output_record_provenance: Vec::new(),
+            input_contract_digest: compute_entry_contract_digest(
+                &StrictSchema {
+                    value_type: ValueType::String,
+                },
+                &[],
+                &[],
+            ),
+            output_contract_digest: compute_entry_contract_digest(
+                &StrictSchema {
+                    value_type: result_type,
+                },
+                &[],
+                &[],
+            ),
         }],
         imports: Vec::new(),
         manifest: Some(ManifestContract {
@@ -286,6 +309,8 @@ fn tool_artifact_with_retry(schema: &ToolSchema, retry_on_error: bool) -> Vec<u8
             optional_capabilities: Vec::new(),
             limits: Vec::new(),
             https_origins: Vec::new(),
+            exec_commands: Vec::new(),
+            exec_environment: Vec::new(),
             required_tools: vec![contract.clone()],
             tool_contract_digest: compute_tool_contract_digest(&[contract]),
         }),
@@ -328,6 +353,8 @@ fn unit_artifact(stopped: bool) -> Vec<u8> {
             functions: vec![Function {
                 name: "pkg/x74657374/x302e312e30/x737263/x6d61696e.allen::main".to_owned(),
                 parameters: vec![0],
+                parameter_names: vec!["_arg0".to_owned()],
+                parameter_default_digests: vec![None],
                 captures: Vec::new(),
                 registers,
                 return_type: ValueType::Unit,
@@ -337,6 +364,8 @@ fn unit_artifact(stopped: bool) -> Vec<u8> {
             async_functions: Vec::new(),
             entry: 0,
         },
+        templates: Vec::new(),
+        record_invariants: Vec::new(),
         debug: None,
         schemas: vec![StrictSchema {
             value_type: ValueType::Unit,
@@ -346,6 +375,24 @@ fn unit_artifact(stopped: bool) -> Vec<u8> {
             function: 0,
             input_schema: 0,
             output_schema: 0,
+            input_validators: Vec::new(),
+            output_validators: Vec::new(),
+            input_record_provenance: Vec::new(),
+            output_record_provenance: Vec::new(),
+            input_contract_digest: compute_entry_contract_digest(
+                &StrictSchema {
+                    value_type: ValueType::Unit,
+                },
+                &[],
+                &[],
+            ),
+            output_contract_digest: compute_entry_contract_digest(
+                &StrictSchema {
+                    value_type: ValueType::Unit,
+                },
+                &[],
+                &[],
+            ),
         }],
         imports: Vec::new(),
         manifest: Some(ManifestContract {
@@ -356,6 +403,8 @@ fn unit_artifact(stopped: bool) -> Vec<u8> {
             optional_capabilities: Vec::new(),
             limits: Vec::new(),
             https_origins: Vec::new(),
+            exec_commands: Vec::new(),
+            exec_environment: Vec::new(),
             required_tools: Vec::new(),
             tool_contract_digest: compute_tool_contract_digest(&[]),
         }),
@@ -431,6 +480,7 @@ version = ">=1.0.0, <2.0.0"
     )
 }
 
+#[allow(clippy::too_many_lines)]
 fn run_parity_transcript(
     load: &ProgramLoadParams,
     artifact_digest: &str,
@@ -473,6 +523,8 @@ fn run_parity_transcript(
         granted_capabilities: Vec::new(),
         granted_tools: vec!["example.lookup".to_owned()],
         allowed_http_origins: Vec::new(),
+        granted_exec: Vec::new(),
+        granted_exec_environment: Vec::new(),
         limits: BTreeMap::from([("wall_ms".to_owned(), 5_000)]),
     };
     let request = |id: &str, method: &str, params: serde_json::Value| {
@@ -642,6 +694,8 @@ optional = []
         granted_capabilities: Vec::new(),
         granted_tools: Vec::new(),
         allowed_http_origins: Vec::new(),
+        granted_exec: Vec::new(),
+        granted_exec_environment: Vec::new(),
         limits: BTreeMap::from([("wall_ms".to_owned(), 5_000)]),
     };
     let request = |id: &str, method: &str, params: serde_json::Value| {
@@ -923,6 +977,8 @@ optional = []
             granted_capabilities: Vec::new(),
             granted_tools: Vec::new(),
             allowed_http_origins: Vec::new(),
+            granted_exec: Vec::new(),
+            granted_exec_environment: Vec::new(),
             limits: BTreeMap::from([("wall_ms".to_owned(), 5_000)]),
         };
         let request = |id: &str, request_method: &str, params: serde_json::Value| {
@@ -1152,6 +1208,8 @@ optional = []
             "granted_capabilities":[],
             "granted_tools":[],
             "allowed_http_origins":[],
+            "granted_exec":[],
+            "granted_exec_environment":[],
             "limits":{"wall_ms":5000}
         })
     };
@@ -1333,7 +1391,8 @@ fn active_connection_returns_when_writer_breaks_and_input_stays_open() {
                 "execution_id":"exec-broken","program_id":"program-1",
                 "artifact_digest":artifact_digest,"entry":"main","input":null,
                 "working_directory":null,"granted_capabilities":[],"granted_tools":[],
-                "allowed_http_origins":[],"limits":{"wall_ms":5000}
+                "allowed_http_origins":[],"granted_exec":[],
+                "granted_exec_environment":[],"limits":{"wall_ms":5000}
             }),
         ),
     ];
@@ -1416,6 +1475,8 @@ fn in_memory_connection_matches_the_golden_tool_transcript() {
         granted_capabilities: Vec::new(),
         granted_tools: vec!["example.lookup".to_owned()],
         allowed_http_origins: Vec::new(),
+        granted_exec: Vec::new(),
+        granted_exec_environment: Vec::new(),
         limits: BTreeMap::from([("wall_ms".to_owned(), 5_000)]),
     };
     let request = |id: &str, method: &str, params: serde_json::Value| {
@@ -1536,6 +1597,8 @@ fn run_terminal_script(
         granted_capabilities: Vec::new(),
         granted_tools,
         allowed_http_origins: Vec::new(),
+        granted_exec: Vec::new(),
+        granted_exec_environment: Vec::new(),
         limits: execution_limits,
     };
     let request = |id: &str, method: &str, params: serde_json::Value| {
@@ -1752,6 +1815,8 @@ fn late_tool_response_after_cancel_is_fatal_without_a_second_terminal() {
         granted_capabilities: Vec::new(),
         granted_tools: vec!["example.lookup".to_owned()],
         allowed_http_origins: Vec::new(),
+        granted_exec: Vec::new(),
+        granted_exec_environment: Vec::new(),
         limits: BTreeMap::from([("wall_ms".to_owned(), 5_000)]),
     };
     let request = |id: &str, method: &str, params: serde_json::Value| {
@@ -1921,6 +1986,8 @@ fn wrong_domain_tool_error_stops_before_a_matched_retry() {
         granted_capabilities: Vec::new(),
         granted_tools: vec!["example.lookup".to_owned()],
         allowed_http_origins: Vec::new(),
+        granted_exec: Vec::new(),
+        granted_exec_environment: Vec::new(),
         limits: BTreeMap::from([("wall_ms".to_owned(), 250)]),
     };
     let request = |id: &str, method: &str, params: serde_json::Value| {
@@ -2093,6 +2160,8 @@ fn tool_call_and_reentrant_program_load_complete_over_raw_stdio() {
         granted_capabilities: Vec::new(),
         granted_tools: vec!["example.lookup".to_owned()],
         allowed_http_origins: Vec::new(),
+        granted_exec: Vec::new(),
+        granted_exec_environment: Vec::new(),
         limits: BTreeMap::from([("wall_ms".to_owned(), 5_000)]),
     };
     send(&mut stdin, "h-4", "execution/start", &start);

@@ -4,8 +4,9 @@ use allen_bytecode::{
     Artifact, ArtifactMetadata, BYTECODE_VERSION, CheckedIntOperation, DecodeLimits, EntryContract,
     EnumPayloadType, EnumType, EnumVariant, Function, Instruction, ManifestContract, Module,
     SafeCollectionOperation, StrictSchema, ToolContract, ToolVerificationContract, ValueType,
-    compute_strict_schema_digest, compute_tool_contract_digest, decode_and_verify, encode,
-    standard_error_type, verify_with_frozen_tool_catalog,
+    compute_entry_contract_digest, compute_entry_record_provenance, compute_strict_schema_digest,
+    compute_tool_contract_digest, decode_and_verify, encode, standard_error_type,
+    verify_with_frozen_tool_catalog,
 };
 use libfuzzer_sys::fuzz_target;
 
@@ -138,6 +139,14 @@ fn current_artifact(data: &[u8]) -> Artifact {
         error_digest: compute_strict_schema_digest(&schemas[1]),
     };
     let tool_index = u32::from(mutation == 5);
+    let input_contract_digest = compute_entry_contract_digest(&schemas[0], &[], &[]);
+    let output_contract_digest = compute_entry_contract_digest(&schemas[2], &[], &[]);
+    let input_record_provenance =
+        compute_entry_record_provenance(&schemas[0], &[wrapper.clone()], &[], &[])
+            .unwrap_or_default();
+    let output_record_provenance =
+        compute_entry_record_provenance(&schemas[2], &[wrapper.clone()], &[], &[])
+            .unwrap_or_default();
 
     Artifact {
         metadata: ArtifactMetadata {
@@ -152,6 +161,10 @@ fn current_artifact(data: &[u8]) -> Artifact {
                 Function {
                     name: "pkg/x66757a7a/x302e312e30/x737263/x6d61696e.allen::safe".to_owned(),
                     parameters: (0..safe_destination).collect(),
+                    parameter_names: (0..safe_destination)
+                        .map(|index| format!("_arg{index}"))
+                        .collect(),
+                    parameter_default_digests: vec![None; usize::from(safe_destination)],
                     captures: vec![],
                     registers: safe_registers,
                     return_type: safe_result,
@@ -166,6 +179,10 @@ fn current_artifact(data: &[u8]) -> Artifact {
                 Function {
                     name: "pkg/x66757a7a/x302e312e30/x737263/x6d61696e.allen::checked".to_owned(),
                     parameters: (0..checked_destination).collect(),
+                    parameter_names: (0..checked_destination)
+                        .map(|index| format!("_arg{index}"))
+                        .collect(),
+                    parameter_default_digests: vec![None; usize::from(checked_destination)],
                     captures: vec![],
                     registers: checked_registers,
                     return_type: ValueType::Option(Box::new(ValueType::Int)),
@@ -184,6 +201,8 @@ fn current_artifact(data: &[u8]) -> Artifact {
                 Function {
                     name: "pkg/x66757a7a/x302e312e30/x737263/x6d61696e.allen::main".to_owned(),
                     parameters: vec![0],
+                    parameter_names: vec!["_arg0".to_owned()],
+                    parameter_default_digests: vec![None],
                     captures: vec![],
                     registers: vec![
                         ValueType::Unit,
@@ -216,6 +235,12 @@ fn current_artifact(data: &[u8]) -> Artifact {
             function: 2,
             input_schema: 0,
             output_schema: 2,
+            input_validators: vec![],
+            output_validators: vec![],
+            input_record_provenance,
+            output_record_provenance,
+            input_contract_digest,
+            output_contract_digest,
         }],
         imports: vec![],
         manifest: Some(ManifestContract {
@@ -226,9 +251,13 @@ fn current_artifact(data: &[u8]) -> Artifact {
             optional_capabilities: vec![],
             limits: vec![],
             https_origins: vec![],
+            exec_commands: vec![],
+            exec_environment: vec![],
             required_tools: vec![tool.clone()],
             tool_contract_digest: compute_tool_contract_digest(&[tool]),
         }),
+        templates: vec![],
+        record_invariants: vec![],
     }
 }
 

@@ -3,16 +3,19 @@ use std::collections::{BTreeMap, BTreeSet};
 use semver::{Version, VersionReq};
 use serde::Deserialize;
 
+use allen_exec::CommandPattern;
+
 use crate::{PackageError, PackageErrorCode};
 
-pub const SUPPORTED_LANGUAGE: &str = "0.1.0";
+pub const SUPPORTED_LANGUAGE: &str = "0.1.1";
 const MAX_MANIFEST_TEXT_BYTES: usize = 1024 * 1024;
 const MAX_BOUNDARY_TYPE_BYTES: usize = 4096;
 const MAX_RESPONSE_ATTEMPTS: u32 = 3;
-const SUPPORTED_CAPABILITIES: [&str; 13] = [
+const SUPPORTED_CAPABILITIES: [&str; 14] = [
     "agent.ask",
     "agent.message",
     "agent.transcript",
+    "exec.run",
     "fs.read",
     "fs.write",
     "net.http_get",
@@ -81,6 +84,23 @@ pub struct Tools {
     pub required: Vec<ToolRequirement>,
 }
 
+/// Whitelisted process requests carried by a package manifest.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq)]
+#[serde(default, deny_unknown_fields)]
+struct ExecRequests {
+    commands: Vec<String>,
+    environment: Vec<String>,
+}
+
+/// One declared external template and its closed hole signature.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct TemplateDeclaration {
+    pub(crate) name: String,
+    pub(crate) path: String,
+    pub(crate) holes: BTreeMap<String, String>,
+}
+
 /// Supported launch ceilings.
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq)]
 #[serde(default, deny_unknown_fields)]
@@ -138,9 +158,65 @@ pub struct Manifest {
     #[serde(default)]
     pub tools: Tools,
     #[serde(default)]
+    exec: ExecRequests,
+    #[serde(default)]
+    templates: Vec<TemplateDeclaration>,
+    #[serde(default)]
     pub limits: ManifestLimits,
     #[serde(default)]
     pub dependencies: BTreeMap<String, Dependency>,
+}
+
+impl Manifest {
+    /// Return the sorted, unique command patterns requested by this package.
+    #[must_use]
+    pub fn exec_commands(&self) -> &[String] {
+        &self.exec.commands
+    }
+
+    /// Return the sorted, unique environment names requested by this package.
+    #[must_use]
+    pub fn exec_environment(&self) -> &[String] {
+        &self.exec.environment
+    }
+
+    /// Return whether one argv vector is covered by a requested command pattern.
+    #[must_use]
+    pub fn allows_exec_argv<T: AsRef<str>>(&self, argv: &[T]) -> bool {
+        self.exec
+            .commands
+            .iter()
+            .any(|pattern| command_pattern_matches(pattern, argv))
+    }
+
+    /// Return whether a canonical host grant is no broader than this request.
+    #[must_use]
+    pub fn allows_exec_grant(&self, grant: &str) -> bool {
+        validate_exec_command(grant).is_ok()
+            && self
+                .exec
+                .commands
+                .iter()
+                .any(|request| command_pattern_covers(request, grant))
+    }
+
+    /// Iterate over canonical template declarations in name order.
+    #[must_use]
+    pub fn templates(
+        &self,
+    ) -> impl ExactSizeIterator<Item = (&str, &str, &BTreeMap<String, String>)> {
+        self.templates.iter().map(|template| {
+            (
+                template.name.as_str(),
+                template.path.as_str(),
+                &template.holes,
+            )
+        })
+    }
+
+    pub(crate) fn template_declarations(&self) -> &[TemplateDeclaration] {
+        &self.templates
+    }
 }
 
 /// Parse and validate one strict package manifest.
@@ -166,9 +242,114 @@ pub fn parse_manifest(text: &str) -> Result<Manifest, PackageError> {
     validate_capabilities(&mut manifest.capabilities)?;
     validate_network(&mut manifest.network, &manifest.capabilities)?;
     validate_tools(&mut manifest.tools)?;
+    validate_exec(&mut manifest.exec)?;
+    validate_templates(&mut manifest.templates)?;
     validate_limits(&manifest.limits)?;
     validate_dependencies(&manifest.dependencies)?;
     Ok(manifest)
+}
+
+fn validate_templates(templates: &mut [TemplateDeclaration]) -> Result<(), PackageError> {
+    let mut names = BTreeSet::new();
+    let mut paths = BTreeSet::new();
+    for template in templates.iter() {
+        if !is_source_identifier(&template.name) {
+            return Err(PackageError::new(
+                PackageErrorCode::InvalidManifest,
+                format!(
+                    "template name '{}' is not a source identifier",
+                    template.name
+                ),
+            ));
+        }
+        if !names.insert(template.name.as_str()) {
+            return Err(PackageError::new(
+                PackageErrorCode::InvalidManifest,
+                format!("template name '{}' is duplicated", template.name),
+            ));
+        }
+        let normalized_path = normalize_template_path(&template.path)?;
+        if !paths.insert(normalized_path) {
+            return Err(PackageError::new(
+                PackageErrorCode::InvalidManifest,
+                format!("template path '{}' is duplicated", template.path),
+            ));
+        }
+        for (hole, value_type) in &template.holes {
+            if !is_source_identifier(hole) {
+                return Err(PackageError::new(
+                    PackageErrorCode::InvalidManifest,
+                    format!(
+                        "template '{}' hole '{hole}' is not a source identifier",
+                        template.name
+                    ),
+                ));
+            }
+            if !matches!(value_type.as_str(), "Bool" | "Int" | "Float" | "String") {
+                return Err(PackageError::new(
+                    PackageErrorCode::InvalidManifest,
+                    format!(
+                        "template '{}' hole '{hole}' has unsupported type '{value_type}'",
+                        template.name
+                    ),
+                ));
+            }
+        }
+    }
+    templates.sort_by(|left, right| left.name.cmp(&right.name));
+    Ok(())
+}
+
+fn validate_exec(exec: &mut ExecRequests) -> Result<(), PackageError> {
+    for pattern in &exec.commands {
+        validate_exec_command(pattern)?;
+    }
+    exec.commands.sort();
+    exec.commands.dedup();
+
+    for name in &exec.environment {
+        if !is_environment_name(name) {
+            return Err(PackageError::new(
+                PackageErrorCode::InvalidCapability,
+                format!("exec environment name '{name}' is not canonical"),
+            ));
+        }
+        if name.eq_ignore_ascii_case("LC_ALL") || name.eq_ignore_ascii_case("TZ") {
+            return Err(PackageError::new(
+                PackageErrorCode::InvalidCapability,
+                format!("exec environment name '{name}' is reserved by the host"),
+            ));
+        }
+    }
+    exec.environment.sort();
+    exec.environment.dedup();
+    Ok(())
+}
+
+fn validate_exec_command(pattern: &str) -> Result<(), PackageError> {
+    CommandPattern::parse(pattern).map(|_| ()).map_err(|_| {
+        PackageError::new(
+            PackageErrorCode::InvalidCapability,
+            format!("exec command pattern '{pattern}' is not canonical"),
+        )
+    })
+}
+
+fn is_environment_name(name: &str) -> bool {
+    let mut bytes = name.bytes();
+    bytes.next().is_some_and(|first| {
+        (first.is_ascii_alphabetic() || first == b'_')
+            && bytes.all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+    })
+}
+
+fn command_pattern_matches<T: AsRef<str>>(pattern: &str, argv: &[T]) -> bool {
+    CommandPattern::parse(pattern).is_ok_and(|pattern| pattern.matches(argv))
+}
+
+fn command_pattern_covers(request: &str, grant: &str) -> bool {
+    CommandPattern::parse(request)
+        .is_ok_and(|request| CommandPattern::parse(grant).is_ok_and(|grant| request.covers(&grant)))
 }
 
 fn validate_tools(tools: &mut Tools) -> Result<(), PackageError> {
@@ -494,6 +675,15 @@ pub(crate) fn normalize_dependency_path(value: &str) -> Result<String, PackageEr
     })
 }
 
+pub(crate) fn normalize_template_path(value: &str) -> Result<String, PackageError> {
+    normalize_path(value, false).map_err(|()| {
+        PackageError::new(
+            PackageErrorCode::InvalidManifest,
+            format!("template path '{value}' is not normalized below the package root"),
+        )
+    })
+}
+
 #[allow(clippy::case_sensitive_file_extension_comparisons)]
 pub(crate) fn normalize_source_path(value: &str) -> Result<String, PackageError> {
     let normalized = normalize_path(value, false).map_err(|()| {
@@ -615,6 +805,239 @@ version = "^1.2.0"
                 .map(|tool| tool.name.as_str())
                 .collect::<Vec<_>>(),
             ["deploy", "release-tools.create-issue"]
+        );
+    }
+
+    #[test]
+    fn parses_canonical_exec_requests_and_matches_argv_exactly() {
+        let text = format!(
+            r#"{MANIFEST}
+[exec]
+commands = ["git status", "aws cloudwatch *", "aws cloudwatch *"]
+environment = ["HOME", "AWS_REGION", "Path", "AWS_REGION"]
+"#
+        );
+        let manifest = parse_manifest(&text).unwrap();
+        assert_eq!(manifest.exec_commands(), ["aws cloudwatch *", "git status"]);
+        assert_eq!(manifest.exec_environment(), ["AWS_REGION", "HOME", "Path"]);
+        assert!(manifest.allows_exec_argv(&["git", "status"]));
+        assert!(!manifest.allows_exec_argv(&["git", "status", "--short"]));
+        assert!(manifest.allows_exec_argv(&["aws", "cloudwatch"]));
+        assert!(manifest.allows_exec_argv(&[
+            "aws",
+            "cloudwatch",
+            "describe-alarms",
+            "--state-value",
+            "ALARM",
+        ]));
+        assert!(!manifest.allows_exec_argv(&["aws", "s3", "ls"]));
+        assert!(manifest.allows_exec_grant("git status"));
+        assert!(!manifest.allows_exec_grant("git status *"));
+        assert!(manifest.allows_exec_grant("aws cloudwatch *"));
+        assert!(manifest.allows_exec_grant("aws cloudwatch describe-alarms"));
+        assert!(manifest.allows_exec_grant("aws cloudwatch describe-alarms *"));
+        assert!(!manifest.allows_exec_grant("aws *"));
+        assert!(!manifest.allows_exec_grant("aws cloudwatch*"));
+    }
+
+    #[test]
+    fn manifest_without_exec_preserves_an_empty_request() {
+        let manifest = parse_manifest(MANIFEST).unwrap();
+        assert!(manifest.exec_commands().is_empty());
+        assert!(manifest.exec_environment().is_empty());
+        assert!(!manifest.allows_exec_argv(&["anything"]));
+        assert_eq!(manifest.templates().len(), 0);
+    }
+
+    #[test]
+    fn parses_and_sorts_canonical_template_declarations() {
+        let text = format!(
+            r#"{MANIFEST}
+[[templates]]
+name = "summary"
+path = "templates/summary.txt"
+holes = {{ title = "String" }}
+
+[[templates]]
+name = "alert"
+path = "templates/alert.txt"
+holes = {{ title = "String", active = "Bool", ratio = "Float", count = "Int" }}
+"#
+        );
+        let manifest = parse_manifest(&text).unwrap();
+        let templates = manifest.templates().collect::<Vec<_>>();
+        assert_eq!(
+            templates
+                .iter()
+                .map(|(name, path, _)| (*name, *path))
+                .collect::<Vec<_>>(),
+            [
+                ("alert", "templates/alert.txt"),
+                ("summary", "templates/summary.txt"),
+            ]
+        );
+        assert_eq!(
+            templates[0]
+                .2
+                .iter()
+                .map(|(name, value_type)| (name.as_str(), value_type.as_str()))
+                .collect::<Vec<_>>(),
+            [
+                ("active", "Bool"),
+                ("count", "Int"),
+                ("ratio", "Float"),
+                ("title", "String"),
+            ]
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_template_declarations() {
+        let declaration = |name: &str, path: &str, holes: &str| {
+            format!(
+                "{MANIFEST}\n[[templates]]\nname = \"{name}\"\npath = \"{path}\"\nholes = {holes}\n"
+            )
+        };
+        for text in [
+            declaration("Bad", "templates/a.txt", r#"{ value = "String" }"#),
+            declaration("a", "../a.txt", r#"{ value = "String" }"#),
+            declaration("a", "/a.txt", r#"{ value = "String" }"#),
+            declaration("a", "templates//a.txt", r#"{ value = "String" }"#),
+            declaration("a", "templates/./a.txt", r#"{ value = "String" }"#),
+            declaration("a", "templates\\a.txt", r#"{ value = "String" }"#),
+            declaration("a", "templates/a.txt", r#"{ Bad = "String" }"#),
+            declaration("a", "templates/a.txt", r#"{ value = "Bytes" }"#),
+        ] {
+            assert_eq!(
+                parse_manifest(&text).unwrap_err().code,
+                PackageErrorCode::InvalidManifest,
+            );
+        }
+
+        let duplicate = format!(
+            r#"{MANIFEST}
+[[templates]]
+name = "same"
+path = "templates/a.txt"
+holes = {{}}
+
+[[templates]]
+name = "same"
+path = "templates/b.txt"
+holes = {{}}
+"#
+        );
+        let duplicate_error = parse_manifest(&duplicate).unwrap_err();
+        assert_eq!(duplicate_error.code, PackageErrorCode::InvalidManifest);
+        assert_eq!(
+            duplicate_error.message,
+            "template name 'same' is duplicated"
+        );
+
+        let duplicate_path = format!(
+            r#"{MANIFEST}
+[[templates]]
+name = "first"
+path = "templates/shared.txt"
+holes = {{ value = "String" }}
+
+[[templates]]
+name = "second"
+path = "templates/shared.txt"
+holes = {{ value = "Int" }}
+"#
+        );
+        let error = parse_manifest(&duplicate_path).unwrap_err();
+        assert_eq!(error.code, PackageErrorCode::InvalidManifest);
+        assert_eq!(
+            error.message,
+            "template path 'templates/shared.txt' is duplicated"
+        );
+    }
+
+    #[test]
+    fn rejects_unknown_template_keys() {
+        let text = format!(
+            r#"{MANIFEST}
+[[templates]]
+name = "alert"
+path = "templates/alert.txt"
+holes = {{ title = "String" }}
+escaping = "shell"
+"#
+        );
+        assert_eq!(
+            parse_manifest(&text).unwrap_err().code,
+            PackageErrorCode::InvalidManifest,
+        );
+    }
+
+    #[test]
+    fn rejects_noncanonical_exec_command_patterns() {
+        for commands in [
+            r#"[""]"#,
+            r#"[" aws"]"#,
+            r#"["aws "]"#,
+            r#"["aws  cloudwatch"]"#,
+            r#"["aws\tcloudwatch"]"#,
+            "['aws\u{a0}cloudwatch']",
+            "['aw\u{200d}s cloudwatch']",
+            "['\u{e5}ws cloudwatch']",
+            "['aws clo\u{200d}udwatch']",
+            "['aws caf\u{e9}']",
+            r#"['aws "cloudwatch"']"#,
+            r#"["aws 'cloudwatch'"]"#,
+            r"['aws \cloudwatch']",
+            r#"["/usr/bin/aws cloudwatch"]"#,
+            r#"["bin/aws cloudwatch"]"#,
+            r#"["*"]"#,
+            r#"["aws cloud*"]"#,
+            r#"["aws * cloudwatch"]"#,
+            r#"["aws cloudwatch * more"]"#,
+        ] {
+            let text = format!("{MANIFEST}\n[exec]\ncommands = {commands}\n");
+            assert_eq!(
+                parse_manifest(&text).unwrap_err().code,
+                PackageErrorCode::InvalidCapability,
+                "commands = {commands}",
+            );
+        }
+
+        let slash_in_argument =
+            format!("{MANIFEST}\n[exec]\ncommands = [\"aws /var/log/messages\"]\n");
+        assert!(parse_manifest(&slash_in_argument).is_ok());
+    }
+
+    #[test]
+    fn rejects_invalid_or_reserved_exec_environment_names() {
+        for name in [
+            "",
+            "1AWS",
+            "AWS-REGION",
+            "AWS.REGION",
+            "ÅWS_REGION",
+            "LC_ALL",
+            "lc_all",
+            "Lc_All",
+            "TZ",
+            "tz",
+            "Tz",
+        ] {
+            let text = format!("{MANIFEST}\n[exec]\nenvironment = [\"{name}\"]\n");
+            assert_eq!(
+                parse_manifest(&text).unwrap_err().code,
+                PackageErrorCode::InvalidCapability,
+                "environment = {name}",
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_unknown_exec_keys() {
+        let text = format!("{MANIFEST}\n[exec]\ncommands = [\"aws *\"]\nshell = true\n");
+        assert_eq!(
+            parse_manifest(&text).unwrap_err().code,
+            PackageErrorCode::InvalidManifest,
         );
     }
 

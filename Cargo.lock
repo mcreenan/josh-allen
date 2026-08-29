@@ -21,12 +21,15 @@ version = "0.1.2"
 dependencies = [
  "allen-bytecode",
  "allen-compiler",
+ "allen-exec",
  "allen-package",
  "allen-runtime",
  "allen-sandbox-fs",
  "allen-schema",
+ "allen-testkit",
  "allen-vm",
  "base64",
+ "josh-protocol",
  "rustix",
  "serde",
  "serde_json",
@@ -44,6 +47,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "allen-exec"
+version = "0.1.2"
+dependencies = [
+ "rustix",
+ "sha2",
+]
+
+[[package]]
 name = "allen-http-get"
 version = "0.1.2"
 dependencies = [
@@ -58,6 +69,7 @@ dependencies = [
 name = "allen-package"
 version = "0.1.2"
 dependencies = [
+ "allen-exec",
  "allen-schema",
  "cap-fs-ext",
  "cap-std",
@@ -73,6 +85,8 @@ name = "allen-runtime"
 version = "0.1.2"
 dependencies = [
  "allen-bytecode",
+ "allen-compiler",
+ "allen-exec",
  "allen-http-get",
  "allen-package",
  "allen-sandbox-fs",
@@ -114,6 +128,9 @@ name = "allen-testkit"
 version = "0.1.2"
 dependencies = [
  "allen-bytecode",
+ "allen-exec",
+ "allen-runtime",
+ "allen-schema",
  "allen-vm",
  "serde",
  "serde_json",
@@ -125,6 +142,9 @@ name = "allen-vm"
 version = "0.1.2"
 dependencies = [
  "allen-bytecode",
+ "base64",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -510,11 +530,13 @@ version = "0.1.2"
 dependencies = [
  "allen-bytecode",
  "allen-compiler",
+ "allen-exec",
  "allen-package",
  "allen-schema",
  "base64",
  "josh-host",
  "josh-protocol",
+ "rustix",
  "serde",
  "serde_json",
 ]

@@ -78,7 +78,7 @@
     "declarations": {
       "patterns": [
         {
-          "match": "\\b(?:(export)\\s+)?(record|enum|type)\\s+([A-Za-z_][A-Za-z0-9_]*)",
+          "match": "\\b(?:(export)\\s+)?(record|enum|type|newtype)\\s+([A-Za-z_][A-Za-z0-9_]*)",
           "captures": {
             "1": {
               "name": "storage.modifier.allen"
@@ -88,6 +88,20 @@
             },
             "3": {
               "name": "entity.name.type.allen"
+            }
+          }
+        },
+        {
+          "match": "\\b(?:(export)\\s+)?(const)\\s+([A-Za-z_][A-Za-z0-9_]*)",
+          "captures": {
+            "1": {
+              "name": "storage.modifier.allen"
+            },
+            "2": {
+              "name": "storage.modifier.const.allen"
+            },
+            "3": {
+              "name": "entity.name.constant.allen"
             }
           }
         },
@@ -113,6 +127,12 @@
     "strings": {
       "patterns": [
         {
+          "include": "#raw-string"
+        },
+        {
+          "include": "#multiline-string"
+        },
+        {
           "include": "#template-string"
         },
         {
@@ -120,6 +140,45 @@
         },
         {
           "include": "#string"
+        }
+      ]
+    },
+    "raw-string": {
+      "name": "string.quoted.raw.allen",
+      "begin": "r(#{0,16})\\\"",
+      "beginCaptures": {
+        "0": {
+          "name": "punctuation.definition.string.begin.allen"
+        }
+      },
+      "end": "\\\"#{0,16}|$",
+      "endCaptures": {
+        "0": {
+          "name": "punctuation.definition.string.end.allen"
+        }
+      }
+    },
+    "multiline-string": {
+      "name": "string.quoted.multiline.allen",
+      "begin": "\\\"\\\"\\\"",
+      "beginCaptures": {
+        "0": {
+          "name": "punctuation.definition.string.begin.allen"
+        }
+      },
+      "end": "\\\"\\\"\\\"",
+      "endCaptures": {
+        "0": {
+          "name": "punctuation.definition.string.end.allen"
+        }
+      },
+      "patterns": [
+        {
+          "include": "#template-interpolation"
+        },
+        {
+          "name": "constant.character.escape.allen",
+          "match": "\\\\(?:[\\\"\\\\nrt0bf]|\\$\\{)"
         }
       ]
     },
@@ -274,11 +333,11 @@
       "name": "support.function.effect.allen"
     },
     "keywords": {
-      "match": "\\b(?:as|async|await|break|continue|effects|else|enum|export|fn|for|from|if|import|in|let|loop|manifest|map|match|mut|prompt|record|return|returns|spawn|type|while)\\b",
+      "match": "\\b(?:as|async|await|break|const|continue|effects|else|enum|export|extension|fn|for|from|if|import|in|let|loop|manifest|map|match|mut|newtype|prompt|record|return|returns|spawn|test|type|where|while)\\b",
       "name": "keyword.control.allen"
     },
     "types": {
-      "match": "\\b(?:Bool|Int|Float|String|Bytes|Void|Never|List|Map|Option|Result|unknown|Prompt|Future|Task|Workspace|ExternalFsAccess|SubAgent|ExternalFileRequest|ExternalDirectoryRequest|HttpResponse|FileError|NetworkError|AgentError|UserError|SubAgentError|ModelError|PermissionError|TranscriptPart|TranscriptMessage|TranscriptSnapshot|Eq)\\b",
+      "match": "\\b(?:Bool|Int|Float|String|Bytes|Void|Never|List|Map|Option|Result|Range|Sequence|unknown|Prompt|Future|Task|Workspace|ExternalFsAccess|SubAgent|ExternalFileRequest|ExternalDirectoryRequest|HttpResponse|FileError|NetworkError|TimeError|ParseError|FormatError|DecodeError|AgentError|UserError|SubAgentError|ModelError|PermissionError|TranscriptPart|TranscriptMessage|TranscriptSnapshot|Eq)\\b",
       "name": "support.type.allen"
     },
     "literals": {
@@ -288,7 +347,7 @@
           "name": "constant.language.allen"
         },
         {
-          "match": "\\b[0-9]+(?:\\.[0-9]+(?:[eE][+-]?[0-9]+)?)?\\b",
+          "match": "\\b[0-9]+(?:_[0-9]+)*(?:\\.[0-9]+(?:_[0-9]+)*(?:[eE][+-]?[0-9]+(?:_[0-9]+)*)?)?\\b",
           "name": "constant.numeric.allen"
         }
       ]
@@ -302,7 +361,7 @@
       "name": "entity.name.function.call.allen"
     },
     "operators": {
-      "match": "\\.\\.|=>|\\+=|-=|\\*=|/=|%=|==|!=|<=|>=|&&|\\|\\||[%+*/!<>=?@-]",
+      "match": "\\?\\.|\\.\\.=|\\.\\.|=>|>>|\\|>|\\?\\?|\\+=|-=|\\*=|/=|%=|==|!=|<=|>=|&&|\\|\\||\\||[%+*/!<>=?@-]",
       "name": "keyword.operator.allen"
     },
     "punctuation": {

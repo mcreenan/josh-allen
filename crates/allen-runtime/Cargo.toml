@@ -7,6 +7,7 @@ license.workspace = true
 
 [dependencies]
 allen-bytecode = { path = "../allen-bytecode" }
+allen-exec = { path = "../allen-exec" }
 allen-http-get = { path = "../allen-http-get" }
 allen-package = { path = "../allen-package" }
 allen-schema = { path = "../allen-schema" }
@@ -18,3 +19,6 @@ sha2 = "0.10"
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+allen-compiler = { path = "../allen-compiler" }

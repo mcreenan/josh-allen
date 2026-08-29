@@ -10,23 +10,28 @@ mod package;
 pub const DIAGNOSTIC_CODES: &[&str] = &[
     "E0002", "E0003", "E0004", "E0005", "E2003", "E2009", "E2011", "E2012", "E2015", "E2016",
     "E2017", "E2018", "E2019", "E2020", "E2403", "E3002", "E3003", "E3005", "E3007", "E3008",
-    "E3010", "E3011",
+    "E3010", "E3011", "E3012", "E3013",
 ];
 
 pub use frontend::{
-    Compilation, CompilerToolBinding, EffectReportEntry, ExportedFunction, HirBundle, HirExpr,
-    HirExprKind, HirFunction, HirModule, InlineManifest, MirBlock, MirBundle, MirCleanupKind,
-    MirFunction, MirOperation, MirOwnership, MirOwnershipState, MirSuspension, MirTaskScope,
-    MirTerminator, PackageEntryPoint, PackageSourceBundle, PreparedSource, PreparedTools,
+    Compilation, CompiledSourceTest, CompilerTemplateBinding, CompilerToolBinding,
+    EffectReportEntry, ExportedFunction, HirBundle, HirConstant, HirExpr, HirExprKind, HirFunction,
+    HirModule, InlineManifest, MirBlock, MirBundle, MirCleanupKind, MirConstant, MirFunction,
+    MirOperation, MirOwnership, MirOwnershipState, MirSuspension, MirTaskScope, MirTerminator,
+    PackageEntryPoint, PackageSourceBundle, PreparedSource, PreparedTools, SourceTest,
     ToolPreparationError, compile_bundle, compile_bundle_with_prepared_source,
     compile_inline_manifest_source, compile_inline_manifest_source_with_catalog,
     compile_package_bundle, compile_package_bundle_with_prepared_tools,
-    compile_package_bundle_with_tools, compile_prepared_inline_manifest_source, compile_source,
-    extract_inline_manifest, prepare_source, prepare_tools,
+    compile_package_bundle_with_prepared_tools_and_templates, compile_package_bundle_with_tools,
+    compile_prepared_inline_manifest_source, compile_source, compile_source_test,
+    compile_source_test_with_prepared_tools_and_templates, discover_source_tests,
+    extract_inline_manifest, prepare_source, prepare_tools, reachable_source_modules,
 };
 pub use package::{
-    CompiledPackage, assemble_inline_compilation, assemble_inline_source, assemble_loaded_package,
+    CompiledPackage, CompiledPackageSourceTest, assemble_inline_compilation,
+    assemble_inline_source, assemble_loaded_package, assemble_loaded_source_test,
     assemble_loose_compilation, assemble_root_source_package,
+    assemble_root_source_package_with_resources, assemble_source_test, prepare_loaded_source_tests,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

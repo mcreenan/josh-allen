@@ -44,6 +44,7 @@ impl Parser<'_, '_> {
             SyntaxKind::KwWhile => self.while_statement(),
             SyntaxKind::KwLoop => self.loop_statement(),
             SyntaxKind::KwFor => self.for_statement(),
+            SyntaxKind::KwFn if self.nth(1) == SyntaxKind::Ident => self.local_function(),
             _ => self.error_one("expected statement"),
         }
         self.complete(marker, SyntaxKind::Statement);
@@ -117,10 +118,6 @@ impl Parser<'_, '_> {
         self.loop_binding();
         self.expect(SyntaxKind::KwIn, "expected `in` after loop binding");
         self.expression_before_body();
-        if self.at(SyntaxKind::DotDot) {
-            self.bump_nontrivia();
-            self.expression_before_body();
-        }
         if self.at(SyntaxKind::LBrace) {
             self.body();
         } else {
@@ -215,7 +212,29 @@ impl Parser<'_, '_> {
                 | SyntaxKind::KwWhile
                 | SyntaxKind::KwLoop
                 | SyntaxKind::KwFor
-        ) || self.at_assignment_statement()
+        ) || (self.nth(0) == SyntaxKind::KwFn && self.nth(1) == SyntaxKind::Ident)
+            || self.at_assignment_statement()
+    }
+
+    fn local_function(&mut self) {
+        let marker = self.start();
+        self.expect(SyntaxKind::KwFn, "expected `fn`");
+        self.expect(SyntaxKind::Ident, "expected local function name");
+        self.parameter_list();
+        self.expect(
+            SyntaxKind::KwReturns,
+            "expected `returns` before local function return type",
+        );
+        self.type_syntax();
+        if self.at(SyntaxKind::KwEffects) {
+            self.effect_clause();
+        }
+        if self.at(SyntaxKind::LBrace) {
+            self.body();
+        } else {
+            self.missing("expected local function body");
+        }
+        self.complete(marker, SyntaxKind::LocalFunction);
     }
 
     fn at_assignment_statement(&self) -> bool {
@@ -356,7 +375,8 @@ fn is_conditional_expression_continuation(kind: SyntaxKind) -> bool {
 fn is_conditional_binary_continuation(kind: SyntaxKind) -> bool {
     matches!(
         kind,
-        SyntaxKind::PipePipe
+        SyntaxKind::QuestionQuestion
+            | SyntaxKind::PipePipe
             | SyntaxKind::AmpAmp
             | SyntaxKind::EqEq
             | SyntaxKind::NotEq
@@ -513,6 +533,40 @@ mod tests {
                 .count(),
             2,
             "loop-binding recovery swallowed the later declaration"
+        );
+    }
+
+    #[test]
+    fn local_named_functions_are_statements_without_capturing_closures() {
+        let text = "fn outer() returns Int { fn add(value: Int) returns Int { value + 1 } let callback = fn(value: Int) returns Int { value }; add(callback(1)) }";
+        let file = source(text);
+        let parsed = parse(&file);
+        assert!(
+            parsed.diagnostics().is_empty(),
+            "{:?}",
+            parsed.diagnostics()
+        );
+        assert!(!parsed.has_errors());
+        parsed.assert_round_trip(&file);
+        let kinds: Vec<_> = parsed
+            .syntax()
+            .descendants()
+            .map(|node| node.kind())
+            .collect();
+        assert_eq!(
+            kinds
+                .iter()
+                .filter(|kind| **kind == SyntaxKind::LocalFunction)
+                .count(),
+            1
+        );
+        assert_eq!(
+            kinds
+                .iter()
+                .filter(|kind| **kind == SyntaxKind::Closure)
+                .count(),
+            1,
+            "anonymous `fn(` remains an expression closure"
         );
     }
 }

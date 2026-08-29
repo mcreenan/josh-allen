@@ -17,6 +17,7 @@ pub use typed_response::{
 };
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::ffi::OsString;
 use std::hash::{BuildHasher, Hash, Hasher};
 use std::net::IpAddr;
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -25,8 +26,14 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use allen_bytecode::{
-    ExternalFsAccess, FsOperation, StrictSchema, ToolContract, ValueType, VerifiedArtifact,
-    canonical_value_type_bytes, compute_strict_schema_digest, prompt_output_type,
+    BoolBinaryOp, CompareOp, EntryValidatorPathSegment, EntryValidatorSite, ExternalFsAccess,
+    FsOperation, RecordInvariantDefinition, StrictSchema, ToolContract, ValidatorExpr, ValueType,
+    VerifiedArtifact, canonical_value_type_bytes, compute_strict_schema_digest, prompt_output_type,
+};
+use allen_exec::{
+    CommandPattern, Deadline as ExecDeadline, EnvironmentSnapshot, ExecErrorKind,
+    ExecutableIdentity, ExecutionLimits as ExecLimits, ExecutionRequest as ExecRequest,
+    ProcessBroker,
 };
 use allen_http_get::{HttpBroker, HttpError, HttpErrorCode, HttpLimits, HttpUsage};
 use allen_sandbox_fs::{
@@ -40,9 +47,9 @@ use allen_schema::{
 use allen_vm::{
     CancellationSource, Checkpoint, CheckpointObserver, EffectExecutionBinding,
     EffectExecutionOutcome, EffectProvider, EnumIdentity, EnumPayload, EnumValue,
-    ExecutionCapabilities, ExecutionLimits, ExecutionOutcome, PendingEffectId, RESOURCE_WALL_TIME,
-    SubAgentValue, SystemMonotonicClock, Value, VmError, WorkspaceValue,
-    execute_entry_with_capabilities_and_runtime_context,
+    ExecutionCapabilities, ExecutionLimits, ExecutionOutcome, JsonDecodeErrorKind, NewtypeValue,
+    PendingEffectId, RESOURCE_WALL_TIME, SubAgentValue, SystemMonotonicClock, Value, VmError,
+    WorkspaceValue, execute_entry_with_capabilities_and_runtime_context,
 };
 use base64::Engine;
 use sha2::{Digest, Sha256};
@@ -71,6 +78,12 @@ pub struct HostPolicy {
     pub tool_catalog: Option<FrozenCatalog>,
     /// Require selected granted authority to be physically available at preparation.
     pub strict_preflight_authority: bool,
+    /// Canonical argv-prefix grants supplied by the embedding host.
+    pub granted_exec: BTreeSet<String>,
+    /// Environment names the host permits the manifest to copy.
+    pub granted_exec_environment: BTreeSet<String>,
+    /// Immutable host environment captured before launch preflight.
+    pub exec_environment_snapshot: EnvironmentSnapshot,
 }
 impl Default for HostPolicy {
     fn default() -> Self {
@@ -91,14 +104,41 @@ impl Default for HostPolicy {
             granted_tools: BTreeSet::new(),
             tool_catalog: None,
             strict_preflight_authority: false,
+            granted_exec: BTreeSet::new(),
+            granted_exec_environment: BTreeSet::new(),
+            exec_environment_snapshot: EnvironmentSnapshot::capture(),
         }
     }
 }
 #[derive(Clone, Debug)]
 pub struct LaunchRequest {
     pub entry: String,
+    /// An already-materialized JSON value for trusted embedded callers.
+    ///
+    /// Host boundaries that receive JSON bytes must use [`RawLaunchRequest`]
+    /// so duplicate keys and other wire errors remain observable.
     pub input: serde_json::Value,
 }
+
+/// One launch request whose entry input has not crossed a JSON value boundary.
+#[derive(Clone, Debug)]
+pub struct RawLaunchRequest {
+    pub entry: String,
+    pub input: Vec<u8>,
+}
+
+#[derive(Clone, Debug)]
+enum PreparedInput {
+    Raw(Vec<u8>),
+    Materialized(serde_json::Value),
+}
+
+#[derive(Clone, Copy)]
+enum LaunchInput<'a> {
+    Raw(&'a [u8]),
+    Materialized(&'a serde_json::Value),
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct RuntimeOutcome {
     pub output: serde_json::Value,
@@ -126,12 +166,17 @@ pub struct PreparedLaunch {
     artifact: VerifiedArtifact,
     entry_function: u32,
     has_input: bool,
-    input: serde_json::Value,
+    input: PreparedInput,
     input_type: ValueType,
     output_type: ValueType,
+    input_contract_digest: [u8; 32],
+    output_contract_digest: [u8; 32],
+    input_validators: Vec<EntryValidatorSite>,
+    output_validators: Vec<EntryValidatorSite>,
     broker: Option<WorkspaceBroker>,
     accounting: ExecutionAccounting,
     http: Option<HttpBroker>,
+    exec: Option<ExecAuthority>,
     tool_catalog: Option<FrozenCatalog>,
     tool_contracts: Vec<ToolContract>,
     limits: ExecutionLimits,
@@ -143,6 +188,10 @@ pub struct PreparedLaunch {
     effective_workspace_limits: WorkspaceLimits,
     effective_http_limits: HttpLimits,
     effective_http_origins: BTreeSet<String>,
+    effective_exec_grants: Vec<String>,
+    effective_exec_environment: Vec<String>,
+    effective_exec_environment_digest: [u8; 32],
+    pinned_exec_identity_digest: [u8; 32],
     workspace_root_identity: Option<PathBuf>,
     denied_net_addresses: BTreeSet<IpAddr>,
     optional_grants: BTreeSet<String>,
@@ -903,6 +952,20 @@ pub fn launch(
     launch_with_providers(artifact, request, policy, &mut RuntimeProviders::default())
 }
 
+/// Validate and execute one manifest-selected entry from raw JSON bytes.
+///
+/// # Errors
+///
+/// Returns a stable runtime error when strict JSON projection, preflight, the
+/// capability broker, or verified execution fails.
+pub fn launch_raw(
+    artifact: &VerifiedArtifact,
+    request: &RawLaunchRequest,
+    policy: &HostPolicy,
+) -> Result<RuntimeOutcome, RuntimeError> {
+    launch_raw_with_providers(artifact, request, policy, &mut RuntimeProviders::default())
+}
+
 /// Validate and execute one entry with explicit host-neutral providers.
 ///
 /// # Errors
@@ -918,6 +981,30 @@ pub fn launch_with_providers(
     let mut observer = NoObserver;
     let mut cancellation = NeverCancel;
     launch_with_context(
+        artifact,
+        request,
+        policy,
+        providers,
+        &mut cancellation,
+        &mut observer,
+    )
+}
+
+/// Validate and execute raw entry JSON with explicit host-neutral providers.
+///
+/// # Errors
+///
+/// Returns the same stable preflight, boundary, broker, and VM errors as
+/// [`launch_raw`].
+pub fn launch_raw_with_providers(
+    artifact: &VerifiedArtifact,
+    request: &RawLaunchRequest,
+    policy: &HostPolicy,
+    providers: &mut RuntimeProviders<'_>,
+) -> Result<RuntimeOutcome, RuntimeError> {
+    let mut observer = NoObserver;
+    let mut cancellation = NeverCancel;
+    launch_raw_with_context(
         artifact,
         request,
         policy,
@@ -947,6 +1034,21 @@ pub fn prepare_launch(
     prepare_launch_with_http_factory(artifact, request, policy, &mut factory)
 }
 
+/// Complete launch preflight from raw JSON bytes and retain those bytes for
+/// the one-shot prepared execution.
+///
+/// # Errors
+///
+/// Returns a stable error before execution is accepted.
+pub fn prepare_raw_launch(
+    artifact: &VerifiedArtifact,
+    request: &RawLaunchRequest,
+    policy: &HostPolicy,
+) -> Result<PreparedLaunch, RuntimeError> {
+    let mut factory = ProductionHttpFactory;
+    prepare_raw_launch_with_http_factory(artifact, request, policy, &mut factory)
+}
+
 #[allow(clippy::too_many_lines)]
 fn prepare_launch_with_http_factory(
     artifact: &VerifiedArtifact,
@@ -954,10 +1056,42 @@ fn prepare_launch_with_http_factory(
     policy: &HostPolicy,
     http_factory: &mut dyn HttpBrokerFactory,
 ) -> Result<PreparedLaunch, RuntimeError> {
+    prepare_launch_input_with_http_factory(
+        artifact,
+        &request.entry,
+        LaunchInput::Materialized(&request.input),
+        policy,
+        http_factory,
+    )
+}
+
+fn prepare_raw_launch_with_http_factory(
+    artifact: &VerifiedArtifact,
+    request: &RawLaunchRequest,
+    policy: &HostPolicy,
+    http_factory: &mut dyn HttpBrokerFactory,
+) -> Result<PreparedLaunch, RuntimeError> {
+    prepare_launch_input_with_http_factory(
+        artifact,
+        &request.entry,
+        LaunchInput::Raw(&request.input),
+        policy,
+        http_factory,
+    )
+}
+
+#[allow(clippy::too_many_lines)]
+fn prepare_launch_input_with_http_factory(
+    artifact: &VerifiedArtifact,
+    request_entry: &str,
+    request_input: LaunchInput<'_>,
+    policy: &HostPolicy,
+    http_factory: &mut dyn HttpBrokerFactory,
+) -> Result<PreparedLaunch, RuntimeError> {
     let entry = artifact
         .entries()
         .iter()
-        .find(|entry| entry.name == request.entry)
+        .find(|entry| entry.name == request_entry)
         .ok_or_else(|| {
             RuntimeError::new(RuntimeErrorCode::EntryNotFound, "entry is not declared")
         })?;
@@ -1029,6 +1163,7 @@ fn prepare_launch_with_http_factory(
     for cap in &manifest.required_capabilities {
         if entry_effects.contains(cap)
             && !is_host_response_effect(cap)
+            && cap != "exec.run"
             && !policy.granted_capabilities.contains(cap)
         {
             return Err(RuntimeError::new(
@@ -1086,9 +1221,13 @@ fn prepare_launch_with_http_factory(
         .filter(|origin| policy.http_origins.contains(*origin))
         .cloned()
         .collect::<BTreeSet<_>>();
-    let input_bytes = serde_json::to_vec(&request.input)
-        .map_err(|_| RuntimeError::new(RuntimeErrorCode::InvalidInput, "input is not JSON"))?;
-    if input_bytes.len() > effective_input_bytes {
+    let input_len = match request_input {
+        LaunchInput::Raw(input) => input.len(),
+        LaunchInput::Materialized(input) => serde_json::to_vec(input)
+            .map_err(|_| RuntimeError::new(RuntimeErrorCode::InvalidInput, "input is not JSON"))?
+            .len(),
+    };
+    if input_len > effective_input_bytes {
         return Err(RuntimeError::new(
             RuntimeErrorCode::InputTooLarge,
             "input exceeds host limit",
@@ -1109,11 +1248,13 @@ fn prepare_launch_with_http_factory(
                 "output schema is invalid",
             )
         })?;
-    let _validated_input = json_to_value(
-        &request.input,
-        &input_schema.value_type,
-        &artifact.verified_module().module().enum_types,
-    )?;
+    // Reject malformed wire input during launch preflight. The execution
+    // boundary still performs the one materialization retained for the VM.
+    let enums = &artifact.verified_module().module().enum_types;
+    match request_input {
+        LaunchInput::Raw(input) => decode_entry_input(input, &input_schema.value_type, enums)?,
+        LaunchInput::Materialized(input) => json_to_value(input, &input_schema.value_type, enums)?,
+    };
     let function = artifact
         .verified_module()
         .module()
@@ -1214,7 +1355,7 @@ fn prepare_launch_with_http_factory(
             "required HTTP capability has no effective origin",
         ));
     }
-    let optional_grants = manifest
+    let mut optional_grants: BTreeSet<String> = manifest
         .optional_capabilities
         .iter()
         .filter(|capability| {
@@ -1254,6 +1395,21 @@ fn prepare_launch_with_http_factory(
     } else {
         None
     };
+    let (
+        exec,
+        effective_exec_grants,
+        effective_exec_environment,
+        effective_exec_environment_digest,
+        pinned_exec_identity_digest,
+    ) = prepare_exec_authority(manifest, entry_effects, policy)?;
+    if exec.is_some()
+        && manifest
+            .optional_capabilities
+            .iter()
+            .any(|value| value == "exec.run")
+    {
+        optional_grants.insert("exec.run".to_owned());
+    }
     let effective_manifest_grants = manifest
         .required_capabilities
         .iter()
@@ -1265,6 +1421,7 @@ fn prepare_launch_with_http_factory(
             }
             "net.http_get" => policy.granted_capabilities.contains(*capability) && http.is_some(),
             "permission.request_external_fs" => policy.granted_capabilities.contains(*capability),
+            "exec.run" => exec.is_some(),
             _ => false,
         })
         .cloned()
@@ -1294,17 +1451,26 @@ fn prepare_launch_with_http_factory(
         http_get: entry_effects.iter().any(|effect| effect == "net.http_get")
             && policy.granted_capabilities.contains("net.http_get")
             && !effective_http_origins.is_empty(),
+        exec_run: entry_effects.iter().any(|effect| effect == "exec.run") && exec.is_some(),
     };
     Ok(PreparedLaunch {
         artifact: artifact.clone(),
         entry_function: entry.function,
         has_input: !function.parameters.is_empty(),
-        input: request.input.clone(),
+        input: match request_input {
+            LaunchInput::Raw(input) => PreparedInput::Raw(input.to_vec()),
+            LaunchInput::Materialized(input) => PreparedInput::Materialized(input.clone()),
+        },
         input_type: input_schema.value_type.clone(),
         output_type: output_schema.value_type.clone(),
+        input_contract_digest: entry.input_contract_digest,
+        output_contract_digest: entry.output_contract_digest,
+        input_validators: entry.input_validators.clone(),
+        output_validators: entry.output_validators.clone(),
         broker,
         accounting,
         http,
+        exec,
         tool_catalog: policy.tool_catalog.clone(),
         tool_contracts: manifest.required_tools.clone(),
         limits,
@@ -1316,6 +1482,10 @@ fn prepare_launch_with_http_factory(
         effective_workspace_limits,
         effective_http_limits,
         effective_http_origins,
+        effective_exec_grants,
+        effective_exec_environment,
+        effective_exec_environment_digest,
+        pinned_exec_identity_digest,
         workspace_root_identity: policy
             .workspace_root
             .as_ref()
@@ -1345,8 +1515,128 @@ fn is_host_response_effect(effect: &str) -> bool {
 fn is_manifest_grantable_capability(capability: &str) -> bool {
     matches!(
         capability,
-        "fs.read" | "fs.write" | "net.http_get" | "permission.request_external_fs"
+        "fs.read" | "fs.write" | "net.http_get" | "permission.request_external_fs" | "exec.run"
     )
+}
+
+#[allow(clippy::too_many_lines, clippy::type_complexity)]
+fn prepare_exec_authority(
+    manifest: &allen_bytecode::ManifestContract,
+    entry_effects: &[String],
+    policy: &HostPolicy,
+) -> Result<
+    (
+        Option<ExecAuthority>,
+        Vec<String>,
+        Vec<String>,
+        [u8; 32],
+        [u8; 32],
+    ),
+    RuntimeError,
+> {
+    let requested = manifest
+        .exec_commands
+        .iter()
+        .map(|pattern| CommandPattern::parse(pattern))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| {
+            RuntimeError::new(
+                RuntimeErrorCode::ManifestInvalid,
+                "artifact exec command contract is invalid",
+            )
+        })?;
+    let grants = policy
+        .granted_exec
+        .iter()
+        .map(|pattern| CommandPattern::parse(pattern))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| {
+            RuntimeError::new(
+                RuntimeErrorCode::CapabilityDenied,
+                "host exec grant is not canonical",
+            )
+        })?;
+    if policy.granted_exec_environment.iter().any(|name| {
+        let mut bytes = name.bytes();
+        !bytes.next().is_some_and(|first| {
+            (first.is_ascii_alphabetic() || first == b'_')
+                && bytes.all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+                && !name.eq_ignore_ascii_case("LC_ALL")
+                && !name.eq_ignore_ascii_case("TZ")
+        })
+    }) {
+        return Err(RuntimeError::new(
+            RuntimeErrorCode::CapabilityDenied,
+            "host exec environment grant is not canonical",
+        ));
+    }
+    if !entry_effects.iter().any(|effect| effect == "exec.run") {
+        return Ok((None, Vec::new(), Vec::new(), [0; 32], [0; 32]));
+    }
+    let patterns = grants
+        .into_iter()
+        .filter(|grant| requested.iter().any(|request| request.covers(grant)))
+        .collect::<Vec<_>>();
+    if patterns.is_empty() {
+        return Ok((None, Vec::new(), Vec::new(), [0; 32], [0; 32]));
+    }
+    let effective_grants = patterns
+        .iter()
+        .map(|pattern| pattern.as_str().to_owned())
+        .collect::<Vec<_>>();
+    let effective_environment = manifest
+        .exec_environment
+        .iter()
+        .filter(|name| policy.granted_exec_environment.contains(*name))
+        .cloned()
+        .collect::<Vec<_>>();
+    let mut environment = EnvironmentSnapshot::empty();
+    environment.insert(OsString::from("LC_ALL"), OsString::from("C"));
+    environment.insert(OsString::from("TZ"), OsString::from("UTC"));
+    for name in &effective_environment {
+        if let Some(value) = policy.exec_environment_snapshot.get(name) {
+            environment.insert(OsString::from(name), value.to_os_string());
+        }
+    }
+    let environment_digest = environment.digest();
+    let resolution_path = policy
+        .exec_environment_snapshot
+        .get("PATH")
+        .map(std::ffi::OsStr::to_os_string);
+    let broker = ProcessBroker::with_resolution_path(environment, resolution_path);
+    let mut executables = BTreeMap::new();
+    for pattern in &patterns {
+        if executables.contains_key(pattern.executable()) {
+            continue;
+        }
+        let executable = broker.resolve(pattern.executable()).map_err(|_| {
+            RuntimeError::new(
+                RuntimeErrorCode::CapabilityDenied,
+                "an effective exec executable is unavailable",
+            )
+        })?;
+        executables.insert(pattern.executable().to_owned(), executable);
+    }
+    let mut identity_parts = Vec::new();
+    for (name, executable) in &executables {
+        identity_parts
+            .extend_from_slice(&u64::try_from(name.len()).unwrap_or(u64::MAX).to_le_bytes());
+        identity_parts.extend_from_slice(name.as_bytes());
+        identity_parts.extend_from_slice(executable.digest());
+    }
+    let identity_digest = replay_digest(&[&identity_parts]);
+    Ok((
+        Some(ExecAuthority {
+            broker,
+            patterns,
+            executables,
+            calls: 0,
+        }),
+        effective_grants,
+        effective_environment,
+        environment_digest,
+        identity_digest,
+    ))
 }
 
 fn build_effect_execution_binding(prepared: &PreparedLaunch) -> EffectExecutionBinding {
@@ -1355,7 +1645,12 @@ fn build_effect_execution_binding(prepared: &PreparedLaunch) -> EffectExecutionB
     let output_type = canonical_value_type_bytes(&prepared.output_type);
     let entry = prepared.entry_function.to_le_bytes();
     let contracts = format!("{:?}", prepared.tool_contracts);
-    let contract_digest = replay_digest(&[&entry, &input_type, &output_type, contracts.as_bytes()]);
+    let schema_contract = replay_digest(&[&entry, &input_type, &output_type, contracts.as_bytes()]);
+    let contract_digest = replay_digest(&[
+        &schema_contract,
+        &prepared.input_contract_digest,
+        &prepared.output_contract_digest,
+    ]);
     let language = format!("allen-language/{bytecode}");
     let runtime = format!("allen-runtime/{}", env!("CARGO_PKG_VERSION"));
     let policy = format!(
@@ -1399,6 +1694,18 @@ fn build_effect_execution_binding(prepared: &PreparedLaunch) -> EffectExecutionB
             "../../../docs/conformance/errors-0.1.json"
         )]),
         effective_manifest_grants: grants,
+        requested_exec_commands: prepared
+            .artifact
+            .manifest()
+            .map_or_else(Vec::new, |manifest| manifest.exec_commands.clone()),
+        requested_exec_environment: prepared
+            .artifact
+            .manifest()
+            .map_or_else(Vec::new, |manifest| manifest.exec_environment.clone()),
+        effective_exec_grants: prepared.effective_exec_grants.clone(),
+        effective_exec_environment: prepared.effective_exec_environment.clone(),
+        effective_exec_environment_digest: prepared.effective_exec_environment_digest,
+        pinned_exec_identity_digest: prepared.pinned_exec_identity_digest,
     }
 }
 
@@ -1431,9 +1738,14 @@ pub fn execute_prepared_with_context(
         input,
         input_type,
         output_type,
+        input_contract_digest: _,
+        output_contract_digest: _,
+        input_validators,
+        output_validators,
         broker,
         accounting,
         http,
+        exec,
         tool_catalog,
         tool_contracts,
         limits,
@@ -1445,23 +1757,27 @@ pub fn execute_prepared_with_context(
         effective_workspace_limits,
         effective_http_limits,
         effective_http_origins,
+        effective_exec_grants: _,
+        effective_exec_environment: _,
+        effective_exec_environment_digest: _,
+        pinned_exec_identity_digest: _,
         workspace_root_identity: _,
         denied_net_addresses: _,
         optional_grants,
         effective_manifest_grants,
         authority,
     } = prepared;
-    let input = json_to_value(
+    let enums = &artifact.verified_module().module().enum_types;
+    let input = match &input {
+        PreparedInput::Raw(input) => decode_entry_input(input, &input_type, enums),
+        PreparedInput::Materialized(input) => json_to_value(input, &input_type, enums),
+    }?;
+    validate_entry_invariants(
         &input,
-        &input_type,
-        &artifact.verified_module().module().enum_types,
-    )
-    .map_err(|_| {
-        RuntimeError::new(
-            RuntimeErrorCode::Panic,
-            "prepared input no longer matches its verified type",
-        )
-    })?;
+        &input_validators,
+        artifact.record_invariants(),
+        RuntimeErrorCode::EntryInvariantInput,
+    )?;
     let mut live_effects = None;
     let effects: &mut dyn EffectProvider =
         if let Some(override_effects) = providers.effect_override.take() {
@@ -1496,6 +1812,7 @@ pub fn execute_prepared_with_context(
                 broker,
                 accounting,
                 http,
+                exec,
                 providers.external_grants.take(),
                 providers.tools.take(),
                 providers.invoking_agent.take(),
@@ -1578,8 +1895,14 @@ pub fn execute_prepared_with_context(
         ));
     };
     let prepared_output = match &execution_result {
-        Ok(ExecutionOutcome::Completed(result)) => {
-            let output = value_to_json(
+        Ok(ExecutionOutcome::Completed(result)) => validate_entry_invariants(
+            &result.value,
+            &output_validators,
+            artifact.record_invariants(),
+            RuntimeErrorCode::EntryInvariantOutput,
+        )
+        .and_then(|()| {
+            value_to_json(
                 &result.value,
                 &output_type,
                 &artifact.verified_module().module().enum_types,
@@ -1589,20 +1912,19 @@ pub fn execute_prepared_with_context(
                     RuntimeErrorCode::Panic,
                     "verified output no longer matches its declared type",
                 )
-            });
-            output.and_then(|output| {
-                let bytes = serde_json::to_vec(&output).map_err(|_| {
-                    RuntimeError::new(RuntimeErrorCode::Panic, "output is not JSON")
-                })?;
-                if bytes.len() > effective_output_bytes {
-                    return Err(RuntimeError::new(
-                        RuntimeErrorCode::ResourceLimit,
-                        "output exceeds host limit",
-                    ));
-                }
-                Ok(output)
             })
-        }
+        })
+        .and_then(|output| {
+            let bytes = serde_json::to_vec(&output)
+                .map_err(|_| RuntimeError::new(RuntimeErrorCode::Panic, "output is not JSON"))?;
+            if bytes.len() > effective_output_bytes {
+                return Err(RuntimeError::new(
+                    RuntimeErrorCode::ResourceLimit,
+                    "output exceeds host limit",
+                ));
+            }
+            Ok(output)
+        }),
         Ok(ExecutionOutcome::Stopped { .. }) | Err(_) => Ok(serde_json::Value::Null),
     };
     let prepared_output = match prepared_output {
@@ -1617,6 +1939,7 @@ pub fn execute_prepared_with_context(
             let validation = catch_unwind(AssertUnwindSafe(|| {
                 effects.finish_execution(EffectExecutionOutcome::Terminal { error: &vm_error })
             }));
+            let _ = catch_unwind(AssertUnwindSafe(|| effects.cancel_pending()));
             if let Some(effects) = live_effects.as_mut() {
                 effects.expire();
             }
@@ -1638,8 +1961,9 @@ pub fn execute_prepared_with_context(
     let replay_outcome = match &execution_result {
         Ok(ExecutionOutcome::Completed(_)) => EffectExecutionOutcome::Completed,
         Ok(ExecutionOutcome::Stopped { reason, .. }) => EffectExecutionOutcome::Stopped { reason },
-        Err(error) => EffectExecutionOutcome::Terminal {
-            error: &error.error,
+        Err(error) => match &error.error {
+            VmError::ProgramFailed { reason } => EffectExecutionOutcome::Failed { reason },
+            error => EffectExecutionOutcome::Terminal { error },
         },
     };
     let replay_validation = catch_unwind(AssertUnwindSafe(|| {
@@ -1675,7 +1999,10 @@ pub fn execute_prepared_with_context(
     }
     let execution = execution_result.map_err(|error| {
         let code = post_start_runtime_vm_error_code(&error.error);
-        let message = safe_terminal_message(code).to_owned();
+        let message = match &error.error {
+            VmError::ProgramFailed { reason } if !reason.is_empty() => reason.clone(),
+            _ => safe_terminal_message(code).to_owned(),
+        };
         RuntimeError::new(code, message).with_response_audit(response_audit.clone())
     })?;
     let output = prepared_output;
@@ -1717,6 +2044,28 @@ pub fn launch_with_context(
         .as_deref_mut()
         .unwrap_or(&mut production);
     let prepared = prepare_launch_with_http_factory(artifact, request, policy, factory)?;
+    execute_prepared_with_context(prepared, providers, cancellation, observer)
+}
+
+/// Validate and execute raw entry JSON with caller-owned cancellation and events.
+///
+/// # Errors
+///
+/// Returns stable preflight, boundary, provider, and VM failures.
+pub fn launch_raw_with_context(
+    artifact: &VerifiedArtifact,
+    request: &RawLaunchRequest,
+    policy: &HostPolicy,
+    providers: &mut RuntimeProviders<'_>,
+    cancellation: &mut dyn CancellationSource,
+    observer: &mut dyn CheckpointObserver,
+) -> Result<RuntimeOutcome, RuntimeError> {
+    let mut production = ProductionHttpFactory;
+    let factory: &mut dyn HttpBrokerFactory = providers
+        .http_factory
+        .as_deref_mut()
+        .unwrap_or(&mut production);
+    let prepared = prepare_raw_launch_with_http_factory(artifact, request, policy, factory)?;
     execute_prepared_with_context(prepared, providers, cancellation, observer)
 }
 
@@ -2005,6 +2354,15 @@ struct EffectiveAuthority {
     filesystem: Rights,
     permission_request: bool,
     http_get: bool,
+    exec_run: bool,
+}
+
+#[derive(Debug)]
+struct ExecAuthority {
+    broker: ProcessBroker,
+    patterns: Vec<CommandPattern>,
+    executables: BTreeMap<String, ExecutableIdentity>,
+    calls: u8,
 }
 
 struct CapabilityEntry {
@@ -2118,6 +2476,7 @@ struct BrokerEffects<'provider> {
     capabilities: Vec<CapabilityEntry>,
     accounting: ExecutionAccounting,
     http: Option<HttpBroker>,
+    exec: Option<ExecAuthority>,
     external_grants: Option<&'provider mut dyn ExternalGrantDecisionProvider>,
     tools: Option<&'provider mut dyn ToolProvider>,
     invoking_agent: Option<&'provider mut dyn InvokingAgentProvider>,
@@ -2158,6 +2517,7 @@ impl<'provider> BrokerEffects<'provider> {
         workspace: Option<WorkspaceBroker>,
         accounting: ExecutionAccounting,
         http: Option<HttpBroker>,
+        exec: Option<ExecAuthority>,
         external_grants: Option<&'provider mut dyn ExternalGrantDecisionProvider>,
         tools: Option<&'provider mut dyn ToolProvider>,
         invoking_agent: Option<&'provider mut dyn InvokingAgentProvider>,
@@ -2189,6 +2549,7 @@ impl<'provider> BrokerEffects<'provider> {
             }],
             accounting,
             http,
+            exec,
             external_grants,
             tools,
             invoking_agent,
@@ -2346,6 +2707,7 @@ impl<'provider> BrokerEffects<'provider> {
         self.expired = true;
         self.capabilities.clear();
         self.http = None;
+        self.exec = None;
         self.sub_agent_handles.clear();
     }
 
@@ -2671,6 +3033,156 @@ impl<'provider> BrokerEffects<'provider> {
     }
 
     #[allow(clippy::too_many_lines)]
+    fn exec_call(&mut self, call_arguments: &[Value]) -> Result<Value, VmError> {
+        let Some(exec) = &mut self.exec else {
+            return Ok(error_result(
+                "exec.denied",
+                "the subprocess capability was not granted",
+            ));
+        };
+        if !self.authority.exec_run {
+            return Ok(error_result(
+                "exec.denied",
+                "the subprocess capability was not granted",
+            ));
+        }
+        if exec.calls >= 16 {
+            return Ok(error_result(
+                "exec.limit",
+                "the subprocess call limit was reached",
+            ));
+        }
+        exec.calls += 1;
+        let [Value::List(argument_values), Value::Enum(stdin)] = call_arguments else {
+            return Err(VmError::Invariant("exec.run argument type"));
+        };
+        let mut argv = Vec::with_capacity(argument_values.len());
+        let mut argv_bytes = 0usize;
+        for argument in argument_values.iter() {
+            let Value::String(argument) = argument else {
+                return Err(VmError::Invariant("exec.run argv type"));
+            };
+            argv_bytes = argv_bytes.saturating_add(argument.len());
+            argv.push(argument.to_string());
+        }
+        if argv.is_empty()
+            || argv.len() > 256
+            || argv_bytes > 1024 * 1024
+            || argv
+                .iter()
+                .any(|argument| argument.len() > 64 * 1024 || argument.contains('\0'))
+            || argv[0].contains('/')
+        {
+            return Ok(error_result(
+                "exec.invalid_argv",
+                "the subprocess argv is invalid",
+            ));
+        }
+        if !exec.patterns.iter().any(|pattern| pattern.matches(&argv)) {
+            return Ok(error_result(
+                "exec.denied",
+                "the subprocess argv is not granted",
+            ));
+        }
+        let stdin = if stdin.identity == EnumIdentity::Option {
+            match (stdin.variant, &stdin.payload) {
+                (0, EnumPayload::Unit) => Vec::new(),
+                (1, EnumPayload::Tuple(values)) if values.len() == 1 => match &values[0] {
+                    Value::Bytes(bytes) => bytes.to_vec(),
+                    _ => return Err(VmError::Invariant("exec.run stdin bytes type")),
+                },
+                _ => return Err(VmError::Invariant("exec.run stdin option payload")),
+            }
+        } else {
+            return Err(VmError::Invariant("exec.run stdin option type"));
+        };
+        if stdin.len() > 1024 * 1024 {
+            return Ok(error_result(
+                "exec.stdin_limit",
+                "the subprocess stdin exceeds 1 MiB",
+            ));
+        }
+        let Some(executable) = exec.executables.get(&argv[0]) else {
+            return Ok(error_result(
+                "exec.unavailable",
+                "the subprocess executable is unavailable",
+            ));
+        };
+        let remaining = self
+            .tool_deadline
+            .map_or(Duration::from_secs(5), |deadline| {
+                deadline
+                    .saturating_duration_since(Instant::now())
+                    .min(Duration::from_secs(5))
+            });
+        if remaining.is_zero() {
+            return Ok(error_result("exec.timeout", "the subprocess timed out"));
+        }
+        let Ok(deadline) = ExecDeadline::from_budget(remaining) else {
+            return Ok(error_result("exec.timeout", "the subprocess timed out"));
+        };
+        let output = exec.broker.run(
+            executable,
+            ExecRequest {
+                arguments: argv[1..].iter().map(OsString::from).collect(),
+                stdin,
+                limits: ExecLimits {
+                    stdin_bytes: 1024 * 1024,
+                    stdout_bytes: 1024 * 1024,
+                    stderr_bytes: 1024 * 1024,
+                },
+                deadline,
+            },
+        );
+        let output = match output {
+            Ok(output) => output,
+            Err(error) => {
+                let (code, message) = match error.kind() {
+                    ExecErrorKind::InputLimitExceeded => {
+                        ("exec.stdin_limit", "the subprocess stdin exceeds 1 MiB")
+                    }
+                    ExecErrorKind::StdoutLimitExceeded => {
+                        ("exec.stdout_limit", "the subprocess stdout exceeds 1 MiB")
+                    }
+                    ExecErrorKind::StderrLimitExceeded => {
+                        ("exec.stderr_limit", "the subprocess stderr exceeds 1 MiB")
+                    }
+                    ExecErrorKind::TimedOut | ExecErrorKind::InvalidDeadline => {
+                        ("exec.timeout", "the subprocess timed out")
+                    }
+                    ExecErrorKind::UnsupportedPlatform
+                    | ExecErrorKind::ExecutableNotFound
+                    | ExecErrorKind::ExecutablePreparationFailed
+                    | ExecErrorKind::SpawnFailed
+                    | ExecErrorKind::OutputReadFailed
+                    | ExecErrorKind::TerminationFailed => {
+                        ("exec.unavailable", "the subprocess provider is unavailable")
+                    }
+                };
+                return Ok(error_result(code, message));
+            }
+        };
+        let status = output
+            .status
+            .code
+            .or_else(|| {
+                output
+                    .status
+                    .signal
+                    .map(|signal| 128_i32.saturating_add(signal))
+            })
+            .unwrap_or(255);
+        Ok(ok_result(Value::Record(
+            vec![
+                ("status".into(), Value::Int(i64::from(status))),
+                ("stderr".into(), Value::Bytes(output.stderr.into())),
+                ("stdout".into(), Value::Bytes(output.stdout.into())),
+            ]
+            .into(),
+        )))
+    }
+
+    #[allow(clippy::too_many_lines)]
     fn permission_call(
         &mut self,
         operation: FsOperation,
@@ -2877,7 +3389,9 @@ impl<'provider> BrokerEffects<'provider> {
 
 impl Drop for BrokerEffects<'_> {
     fn drop(&mut self) {
-        self.expire();
+        if !self.expired {
+            self.expire();
+        }
     }
 }
 
@@ -2906,6 +3420,7 @@ impl EffectProvider for BrokerEffects<'_> {
             | FsOperation::List
             | FsOperation::Search => self.filesystem_call(operation, args),
             FsOperation::HttpGet => self.http_call(args),
+            FsOperation::ExecRun => self.exec_call(args),
             FsOperation::PermissionRequestFile | FsOperation::PermissionRequestDirectory => {
                 self.permission_call(operation, args)
             }
@@ -5173,13 +5688,16 @@ fn unknown_value_to_json(value: &Value) -> Result<serde_json::Value, VmError> {
             }
             Ok(serde_json::Value::Object(object))
         }
+        Value::Newtype(value) => unknown_value_to_json(value.value()),
         Value::Unknown(value) => unknown_value_to_json(value),
         Value::ExternalFsAccess(_)
+        | Value::Range(_)
         | Value::Closure(_)
         | Value::Future(_)
         | Value::Task(_)
         | Value::Workspace(_)
-        | Value::SubAgent(_) => Err(VmError::AgentResponseSchema),
+        | Value::SubAgent(_)
+        | Value::Sequence(_) => Err(VmError::AgentResponseSchema),
     }
 }
 
@@ -5376,6 +5894,11 @@ fn schema_descriptor(
                 "value":schema_descriptor(value, enums)
             })
         }
+        ValueType::Newtype { name, underlying } => serde_json::json!({
+            "type":"newtype",
+            "identity":name,
+            "wire":schema_descriptor(underlying, enums)
+        }),
         _ => serde_json::json!({"type":"unsupported"}),
     }
 }
@@ -5470,6 +5993,9 @@ fn exact_validation_issues(
                     Some(_) => push(issues, &pointer_path(path, "$bytes"), "encoding"),
                     None => push(issues, &pointer_path(path, "$bytes"), "required"),
                 }
+            }
+            (ValueType::Newtype { underlying, .. }, _) => {
+                visit(value, underlying, path, enums, issues);
             }
             (ValueType::List(item), serde_json::Value::Array(values)) => {
                 for (index, value) in values.iter().enumerate() {
@@ -5756,6 +6282,11 @@ fn tool_json_to_value(
             "tool value does not match its descriptor",
         )
     };
+    if let ValueType::Newtype { name, underlying } = ty {
+        return tool_json_to_value(value, descriptor, underlying, enums).map(|value| {
+            Value::Newtype(std::rc::Rc::new(NewtypeValue::new(name.as_str(), value)))
+        });
+    }
     match (descriptor, ty, value) {
         (
             Descriptor::List { items, .. },
@@ -5901,6 +6432,84 @@ fn tool_json_to_value(
 }
 
 #[allow(clippy::too_many_lines)]
+/// Validate one replayed program-visible tool completion against the exact
+/// frozen output/error schemas and the verified artifact-local nominal table.
+#[must_use]
+pub fn validate_replayed_tool_result(
+    value: &Value,
+    result_type: &ValueType,
+    output_schema: &allen_schema::ToolSchema,
+    error_schema: &allen_schema::ToolSchema,
+    enums: &[allen_bytecode::EnumType],
+) -> bool {
+    let ValueType::Result(output_type, error_type) = result_type else {
+        return false;
+    };
+    let Value::Enum(result) = value else {
+        return false;
+    };
+    if result.identity != allen_vm::EnumIdentity::Result {
+        return false;
+    }
+    let allen_vm::EnumPayload::Tuple(payload) = &result.payload else {
+        return false;
+    };
+    let Some(payload) = payload.first() else {
+        return false;
+    };
+    match result.variant {
+        0 => tool_value_to_json(payload, output_schema.descriptor(), output_type, enums).is_ok_and(
+            |json| {
+                output_schema
+                    .validate(&json, &allen_schema::SchemaLimits::default())
+                    .is_ok()
+            },
+        ),
+        1 => {
+            let ValueType::Enum(error_id) = error_type.as_ref() else {
+                return false;
+            };
+            let Value::Enum(error) = payload else {
+                return false;
+            };
+            if error.identity != allen_vm::EnumIdentity::User(*error_id) {
+                return false;
+            }
+            if error.variant != 0 {
+                return matches!(error.variant, 1 | 2);
+            }
+            let allen_vm::EnumPayload::Tuple(declared) = &error.payload else {
+                return false;
+            };
+            let Some(declared) = declared.first() else {
+                return false;
+            };
+            let Some(enum_type) = enums.get(*error_id as usize) else {
+                return false;
+            };
+            let Some(allen_bytecode::EnumVariant {
+                payload: allen_bytecode::EnumPayloadType::Tuple(types),
+                ..
+            }) = enum_type.variants.first()
+            else {
+                return false;
+            };
+            let Some(declared_type) = types.first() else {
+                return false;
+            };
+            tool_value_to_json(declared, error_schema.descriptor(), declared_type, enums).is_ok_and(
+                |json| {
+                    error_schema
+                        .validate(&json, &allen_schema::SchemaLimits::default())
+                        .is_ok()
+                },
+            )
+        }
+        _ => false,
+    }
+}
+
+#[allow(clippy::too_many_lines)]
 fn tool_value_to_json(
     value: &Value,
     descriptor: &Descriptor,
@@ -5913,6 +6522,12 @@ fn tool_value_to_json(
             "tool value does not match its descriptor",
         )
     };
+    if let (ValueType::Newtype { name, underlying }, Value::Newtype(value)) = (ty, value) {
+        if value.identity() != name {
+            return Err(bad());
+        }
+        return tool_value_to_json(value.value(), descriptor, underlying, enums);
+    }
     match (descriptor, ty, value) {
         (Descriptor::List { items, .. }, ValueType::List(item_type), Value::List(items_value)) => {
             Ok(serde_json::Value::Array(
@@ -6039,11 +6654,286 @@ fn tool_value_to_json(
     }
 }
 
+fn validate_entry_invariants(
+    root: &Value,
+    sites: &[EntryValidatorSite],
+    definitions: &[RecordInvariantDefinition],
+    code: RuntimeErrorCode,
+) -> Result<(), RuntimeError> {
+    for site in sites {
+        let definition = definitions.get(site.invariant as usize).ok_or_else(|| {
+            RuntimeError::new(
+                RuntimeErrorCode::Panic,
+                "verified entry invariant is missing",
+            )
+        })?;
+        let mut values = vec![root];
+        for segment in &site.path {
+            let mut next = Vec::new();
+            for value in values {
+                collect_validator_path_values(value, segment, &mut next).map_err(|()| {
+                    RuntimeError::new(
+                        RuntimeErrorCode::Panic,
+                        "verified entry invariant path is invalid",
+                    )
+                })?;
+            }
+            values = next;
+        }
+        for value in values {
+            let Value::Record(fields) = value else {
+                return Err(RuntimeError::new(
+                    RuntimeErrorCode::Panic,
+                    "verified entry invariant target is invalid",
+                ));
+            };
+            if !evaluate_validator_bool(&definition.predicate, fields).map_err(|()| {
+                RuntimeError::new(
+                    RuntimeErrorCode::Panic,
+                    "verified entry invariant expression is invalid",
+                )
+            })? {
+                let message = if code == RuntimeErrorCode::EntryInvariantInput {
+                    "entry input violates a record invariant"
+                } else {
+                    "entry output violates a record invariant"
+                };
+                return Err(RuntimeError::new(code, message));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn collect_validator_path_values<'a>(
+    value: &'a Value,
+    segment: &EntryValidatorPathSegment,
+    output: &mut Vec<&'a Value>,
+) -> Result<(), ()> {
+    match (segment, value) {
+        (EntryValidatorPathSegment::Field(index), Value::Record(fields)) => {
+            output.push(&fields.get(*index as usize).ok_or(())?.1);
+        }
+        (EntryValidatorPathSegment::ListElement, Value::List(values))
+        | (EntryValidatorPathSegment::TupleElement(_), Value::Tuple(values)) => {
+            if let EntryValidatorPathSegment::TupleElement(index) = segment {
+                output.push(values.get(*index as usize).ok_or(())?);
+            } else {
+                output.extend(values.iter());
+            }
+        }
+        (EntryValidatorPathSegment::MapKey, Value::Map(entries)) => {
+            output.extend(entries.iter().map(|(key, _)| key));
+        }
+        (EntryValidatorPathSegment::MapValue, Value::Map(entries)) => {
+            output.extend(entries.iter().map(|(_, value)| value));
+        }
+        (EntryValidatorPathSegment::OptionSome, Value::Enum(value))
+            if value.identity == EnumIdentity::Option =>
+        {
+            if value.variant == 1 {
+                collect_enum_payload_value(&value.payload, 0, output)?;
+            }
+        }
+        (EntryValidatorPathSegment::ResultOk, Value::Enum(value))
+            if value.identity == EnumIdentity::Result =>
+        {
+            if value.variant == 0 {
+                collect_enum_payload_value(&value.payload, 0, output)?;
+            }
+        }
+        (EntryValidatorPathSegment::ResultError, Value::Enum(value))
+            if value.identity == EnumIdentity::Result =>
+        {
+            if value.variant == 1 {
+                collect_enum_payload_value(&value.payload, 0, output)?;
+            }
+        }
+        (EntryValidatorPathSegment::EnumPayload { variant, element }, Value::Enum(value))
+            if matches!(value.identity, EnumIdentity::User(_)) =>
+        {
+            if value.variant == *variant {
+                collect_enum_payload_value(&value.payload, *element as usize, output)?;
+            }
+        }
+        (EntryValidatorPathSegment::NewtypeValue, Value::Newtype(value)) => {
+            output.push(value.value());
+        }
+        _ => return Err(()),
+    }
+    Ok(())
+}
+
+fn collect_enum_payload_value<'a>(
+    payload: &'a EnumPayload,
+    element: usize,
+    output: &mut Vec<&'a Value>,
+) -> Result<(), ()> {
+    match payload {
+        EnumPayload::Tuple(values) => output.push(values.get(element).ok_or(())?),
+        EnumPayload::Record(values) => output.push(&values.get(element).ok_or(())?.1),
+        EnumPayload::Unit => return Err(()),
+    }
+    Ok(())
+}
+
+enum ValidatorValue<'a> {
+    Bool(bool),
+    Field(&'a Value),
+}
+
+fn validator_value<'a>(
+    expression: &'a ValidatorExpr,
+    fields: &'a [(std::rc::Rc<str>, Value)],
+) -> Result<ValidatorValue<'a>, ()> {
+    match expression {
+        ValidatorExpr::Bool(value) => Ok(ValidatorValue::Bool(*value)),
+        ValidatorExpr::Field { field, .. } => Ok(ValidatorValue::Field(
+            &fields.get(*field as usize).ok_or(())?.1,
+        )),
+        _ => Err(()),
+    }
+}
+
+fn evaluate_validator_bool(
+    expression: &ValidatorExpr,
+    fields: &[(std::rc::Rc<str>, Value)],
+) -> Result<bool, ()> {
+    Ok(match expression {
+        ValidatorExpr::Bool(value) => *value,
+        ValidatorExpr::Field { field, .. } => match &fields.get(*field as usize).ok_or(())?.1 {
+            Value::Bool(value) => *value,
+            Value::Newtype(value) => match value.value() {
+                Value::Bool(value) => *value,
+                _ => return Err(()),
+            },
+            _ => return Err(()),
+        },
+        ValidatorExpr::Not(value) => !evaluate_validator_bool(value, fields)?,
+        ValidatorExpr::BoolBinary {
+            operation,
+            left,
+            right,
+        } => match operation {
+            BoolBinaryOp::And => {
+                evaluate_validator_bool(left, fields)? && evaluate_validator_bool(right, fields)?
+            }
+            BoolBinaryOp::Or => {
+                evaluate_validator_bool(left, fields)? || evaluate_validator_bool(right, fields)?
+            }
+        },
+        ValidatorExpr::Compare {
+            operation,
+            left,
+            right,
+        } => {
+            let left = validator_value(left, fields)?;
+            let right = validator_value(right, fields)?;
+            match operation {
+                CompareOp::Equal => validator_equal(&left, &right),
+                CompareOp::NotEqual => !validator_equal(&left, &right),
+                CompareOp::Less => validator_order(&left, &right)?.is_lt(),
+                CompareOp::LessEqual => validator_order(&left, &right)?.is_le(),
+                CompareOp::Greater => validator_order(&left, &right)?.is_gt(),
+                CompareOp::GreaterEqual => validator_order(&left, &right)?.is_ge(),
+            }
+        }
+    })
+}
+
+fn validator_equal(left: &ValidatorValue<'_>, right: &ValidatorValue<'_>) -> bool {
+    if let (Some(left), Some(right)) = (validator_bool_value(left), validator_bool_value(right)) {
+        return left == right;
+    }
+    match (left, right) {
+        (ValidatorValue::Field(left), ValidatorValue::Field(right)) => {
+            validator_field_equal(left, right)
+        }
+        _ => false,
+    }
+}
+
+fn validator_bool_value(value: &ValidatorValue<'_>) -> Option<bool> {
+    match value {
+        ValidatorValue::Bool(value) | ValidatorValue::Field(Value::Bool(value)) => Some(*value),
+        ValidatorValue::Field(_) => None,
+    }
+}
+
+fn validator_field_equal(left: &Value, right: &Value) -> bool {
+    match (left, right) {
+        (Value::Bool(left), Value::Bool(right)) => left == right,
+        (Value::Int(left), Value::Int(right)) => left == right,
+        (Value::Float(left), Value::Float(right)) => left == right,
+        (Value::String(left), Value::String(right)) => left == right,
+        (Value::Bytes(left), Value::Bytes(right)) => left == right,
+        (Value::Newtype(left), Value::Newtype(right)) => {
+            left.identity() == right.identity()
+                && validator_field_equal(left.value(), right.value())
+        }
+        _ => false,
+    }
+}
+
+fn validator_order(
+    left: &ValidatorValue<'_>,
+    right: &ValidatorValue<'_>,
+) -> Result<std::cmp::Ordering, ()> {
+    let (ValidatorValue::Field(left), ValidatorValue::Field(right)) = (left, right) else {
+        return Err(());
+    };
+    match (left, right) {
+        (Value::Int(left), Value::Int(right)) => Ok(left.cmp(right)),
+        (Value::Float(left), Value::Float(right)) => {
+            left.as_f64().partial_cmp(&right.as_f64()).ok_or(())
+        }
+        (Value::String(left), Value::String(right)) => Ok(left.cmp(right)),
+        (Value::Bytes(left), Value::Bytes(right)) => Ok(left.cmp(right)),
+        (Value::Newtype(left), Value::Newtype(right)) if left.identity() == right.identity() => {
+            validator_order(
+                &ValidatorValue::Field(left.value()),
+                &ValidatorValue::Field(right.value()),
+            )
+        }
+        _ => Err(()),
+    }
+}
+
 fn json_to_value(
     value: &serde_json::Value,
     ty: &ValueType,
     enums: &[allen_bytecode::EnumType],
 ) -> Result<Value, RuntimeError> {
+    allen_vm::project_json_value(value, ty, enums)
+        .map_err(|error| RuntimeError::new(RuntimeErrorCode::InvalidInput, error.message()))
+}
+
+fn decode_entry_input(
+    bytes: &[u8],
+    ty: &ValueType,
+    enums: &[allen_bytecode::EnumType],
+) -> Result<Value, RuntimeError> {
+    allen_vm::decode_json(bytes, ty, enums).map_err(|error| {
+        let code = if error.kind() == JsonDecodeErrorKind::ResourceDepth {
+            RuntimeErrorCode::ResourceLimit
+        } else {
+            RuntimeErrorCode::InvalidInput
+        };
+        RuntimeError::new(code, error.message())
+    })
+}
+
+#[allow(dead_code)]
+fn json_to_value_legacy(
+    value: &serde_json::Value,
+    ty: &ValueType,
+    enums: &[allen_bytecode::EnumType],
+) -> Result<Value, RuntimeError> {
+    if let ValueType::Newtype { name, underlying } = ty {
+        return json_to_value(value, underlying, enums).map(|value| {
+            Value::Newtype(std::rc::Rc::new(NewtypeValue::new(name.as_str(), value)))
+        });
+    }
     if matches!(
         ty,
         ValueType::Option(_) | ValueType::Result(_, _) | ValueType::Enum(_) | ValueType::Map(_, _)
@@ -6139,6 +7029,15 @@ fn value_to_json(
     ty: &ValueType,
     enums: &[allen_bytecode::EnumType],
 ) -> Result<serde_json::Value, RuntimeError> {
+    if let (ValueType::Newtype { name, underlying }, Value::Newtype(value)) = (ty, value) {
+        if value.identity() != name {
+            return Err(RuntimeError::new(
+                RuntimeErrorCode::Panic,
+                "output does not match schema",
+            ));
+        }
+        return value_to_json(value.value(), underlying, enums);
+    }
     if matches!(
         ty,
         ValueType::Option(_) | ValueType::Result(_, _) | ValueType::Enum(_) | ValueType::Map(_, _)
@@ -6480,6 +7379,9 @@ fn compare_map_keys(left: &Value, right: &Value) -> Option<std::cmp::Ordering> {
         (Value::Int(left), Value::Int(right)) => Some(left.cmp(right)),
         (Value::String(left), Value::String(right)) => Some(left.as_bytes().cmp(right.as_bytes())),
         (Value::Bytes(left), Value::Bytes(right)) => Some(left.cmp(right)),
+        (Value::Newtype(left), Value::Newtype(right)) if left.identity() == right.identity() => {
+            compare_map_keys(left.value(), right.value())
+        }
         _ => None,
     }
 }
@@ -6497,6 +7399,51 @@ mod tests {
     use allen_schema::{CatalogLimits, Field, Idempotency, ToolDefinition, Variant};
     use std::collections::BTreeMap;
     use std::net::{Ipv4Addr, SocketAddr};
+
+    fn unvalidated_entry(
+        name: &str,
+        function: u32,
+        input_schema: u32,
+        output_schema: u32,
+        input_type: ValueType,
+        output_type: ValueType,
+        enum_types: &[EnumType],
+    ) -> EntryContract {
+        let input = StrictSchema {
+            value_type: input_type,
+        };
+        let output = StrictSchema {
+            value_type: output_type,
+        };
+        EntryContract {
+            name: name.to_owned(),
+            function,
+            input_schema,
+            output_schema,
+            input_validators: Vec::new(),
+            output_validators: Vec::new(),
+            input_record_provenance: allen_bytecode::compute_entry_record_provenance(
+                &input,
+                enum_types,
+                &[],
+                &[],
+            )
+            .unwrap(),
+            output_record_provenance: allen_bytecode::compute_entry_record_provenance(
+                &output,
+                enum_types,
+                &[],
+                &[],
+            )
+            .unwrap(),
+            input_contract_digest: allen_bytecode::compute_entry_contract_digest(&input, &[], &[]),
+            output_contract_digest: allen_bytecode::compute_entry_contract_digest(
+                &output,
+                &[],
+                &[],
+            ),
+        }
+    }
 
     fn verified_runtime_artifact(
         required: Vec<String>,
@@ -6540,6 +7487,7 @@ mod tests {
             limits,
             effects,
             https_origins,
+            vec![],
         )
     }
 
@@ -6550,6 +7498,7 @@ mod tests {
         limits: Vec<(String, u64)>,
         effects: Vec<String>,
         https_origins: Vec<String>,
+        exec_commands: Vec<String>,
     ) -> VerifiedArtifact {
         let artifact = Artifact {
             metadata: ArtifactMetadata {
@@ -6563,6 +7512,8 @@ mod tests {
                 functions: vec![Function {
                     name: package_test_symbol("runtime-test"),
                     parameters: vec![],
+                    parameter_names: Vec::new(),
+                    parameter_default_digests: Vec::new(),
                     captures: vec![],
                     registers: vec![ValueType::Int],
                     return_type: ValueType::Int,
@@ -6578,6 +7529,8 @@ mod tests {
                 async_functions: vec![],
                 entry: 0,
             },
+            templates: vec![],
+            record_invariants: vec![],
             debug: None,
             schemas: vec![
                 StrictSchema {
@@ -6587,12 +7540,15 @@ mod tests {
                     value_type: ValueType::Int,
                 },
             ],
-            entries: vec![EntryContract {
-                name: "main".to_owned(),
-                function: 0,
-                input_schema: 0,
-                output_schema: 1,
-            }],
+            entries: vec![unvalidated_entry(
+                "main",
+                0,
+                0,
+                1,
+                ValueType::Unit,
+                ValueType::Int,
+                &[],
+            )],
             imports: vec![],
             manifest: Some(ManifestContract {
                 package: "runtime-test".to_owned(),
@@ -6602,6 +7558,65 @@ mod tests {
                 optional_capabilities: optional,
                 https_origins,
                 limits,
+                exec_commands,
+                exec_environment: vec![],
+                required_tools: vec![],
+                tool_contract_digest: compute_tool_contract_digest(&[]),
+            }),
+        };
+        decode_and_verify(&encode(&artifact).unwrap(), &DecodeLimits::default()).unwrap()
+    }
+
+    fn verified_input_artifact(input_type: &ValueType) -> VerifiedArtifact {
+        let artifact = Artifact {
+            metadata: ArtifactMetadata {
+                bytecode_version: BYTECODE_VERSION,
+                ..ArtifactMetadata::default()
+            },
+            module: Module {
+                constants: vec![],
+                enum_types: vec![],
+                effect_sets: vec![vec![]],
+                functions: vec![Function {
+                    name: package_test_symbol("runtime-input-test"),
+                    parameters: vec![0],
+                    parameter_names: vec!["_arg0".to_owned()],
+                    parameter_default_digests: vec![None],
+                    captures: vec![],
+                    registers: vec![input_type.clone()],
+                    return_type: input_type.clone(),
+                    effects: 0,
+                    code: vec![Instruction::Return { source: 0 }],
+                }],
+                async_functions: vec![],
+                entry: 0,
+            },
+            templates: vec![],
+            record_invariants: vec![],
+            debug: None,
+            schemas: vec![StrictSchema {
+                value_type: input_type.clone(),
+            }],
+            entries: vec![unvalidated_entry(
+                "main",
+                0,
+                0,
+                0,
+                input_type.clone(),
+                input_type.clone(),
+                &[],
+            )],
+            imports: vec![],
+            manifest: Some(ManifestContract {
+                package: "runtime-input-test".to_owned(),
+                version: "0.1.0".to_owned(),
+                language_requirement: "^0.1".to_owned(),
+                required_capabilities: vec![],
+                optional_capabilities: vec![],
+                https_origins: vec![],
+                limits: vec![],
+                exec_commands: vec![],
+                exec_environment: vec![],
                 required_tools: vec![],
                 tool_contract_digest: compute_tool_contract_digest(&[]),
             }),
@@ -6626,6 +7641,8 @@ mod tests {
                 functions: vec![Function {
                     name: package_test_symbol("runtime-capability-inspection-test"),
                     parameters: vec![],
+                    parameter_names: Vec::new(),
+                    parameter_default_digests: Vec::new(),
                     captures: vec![],
                     registers: vec![output_type.clone()],
                     return_type: output_type.clone(),
@@ -6642,21 +7659,26 @@ mod tests {
                 async_functions: vec![],
                 entry: 0,
             },
+            templates: vec![],
+            record_invariants: vec![],
             debug: None,
             schemas: vec![
                 StrictSchema {
                     value_type: ValueType::Unit,
                 },
                 StrictSchema {
-                    value_type: output_type,
+                    value_type: output_type.clone(),
                 },
             ],
-            entries: vec![EntryContract {
-                name: "main".to_owned(),
-                function: 0,
-                input_schema: 0,
-                output_schema: 1,
-            }],
+            entries: vec![unvalidated_entry(
+                "main",
+                0,
+                0,
+                1,
+                ValueType::Unit,
+                output_type.clone(),
+                &[],
+            )],
             imports: vec![],
             manifest: Some(ManifestContract {
                 package: "runtime-capability-inspection-test".to_owned(),
@@ -6666,6 +7688,8 @@ mod tests {
                 optional_capabilities: optional,
                 https_origins: vec![],
                 limits: vec![],
+                exec_commands: vec![],
+                exec_environment: vec![],
                 required_tools: vec![],
                 tool_contract_digest: compute_tool_contract_digest(&[]),
             }),
@@ -6686,6 +7710,8 @@ mod tests {
                 functions: vec![Function {
                     name: package_test_symbol("runtime-stop-test"),
                     parameters: vec![],
+                    parameter_names: Vec::new(),
+                    parameter_default_digests: Vec::new(),
                     captures: vec![],
                     registers: vec![ValueType::String],
                     return_type: ValueType::Int,
@@ -6701,6 +7727,8 @@ mod tests {
                 async_functions: vec![],
                 entry: 0,
             },
+            templates: vec![],
+            record_invariants: vec![],
             debug: None,
             schemas: vec![
                 StrictSchema {
@@ -6710,12 +7738,15 @@ mod tests {
                     value_type: ValueType::Int,
                 },
             ],
-            entries: vec![EntryContract {
-                name: "main".to_owned(),
-                function: 0,
-                input_schema: 0,
-                output_schema: 1,
-            }],
+            entries: vec![unvalidated_entry(
+                "main",
+                0,
+                0,
+                1,
+                ValueType::Unit,
+                ValueType::Int,
+                &[],
+            )],
             imports: vec![],
             manifest: Some(ManifestContract {
                 package: "runtime-stop-test".to_owned(),
@@ -6725,6 +7756,8 @@ mod tests {
                 optional_capabilities: vec![],
                 https_origins: vec![],
                 limits: vec![],
+                exec_commands: vec![],
+                exec_environment: vec![],
                 required_tools: vec![],
                 tool_contract_digest: compute_tool_contract_digest(&[]),
             }),
@@ -6752,6 +7785,8 @@ mod tests {
                 functions: vec![Function {
                     name: package_test_symbol("runtime-fs-test"),
                     parameters: vec![],
+                    parameter_names: Vec::new(),
+                    parameter_default_digests: Vec::new(),
                     captures: vec![],
                     registers: vec![
                         ValueType::Workspace,
@@ -6782,21 +7817,26 @@ mod tests {
                 async_functions: vec![0],
                 entry: 0,
             },
+            templates: vec![],
+            record_invariants: vec![],
             debug: None,
             schemas: vec![
                 StrictSchema {
                     value_type: ValueType::Unit,
                 },
                 StrictSchema {
-                    value_type: result_type,
+                    value_type: result_type.clone(),
                 },
             ],
-            entries: vec![EntryContract {
-                name: "main".to_owned(),
-                function: 0,
-                input_schema: 0,
-                output_schema: 1,
-            }],
+            entries: vec![unvalidated_entry(
+                "main",
+                0,
+                0,
+                1,
+                ValueType::Unit,
+                result_type.clone(),
+                &[],
+            )],
             imports: vec![],
             manifest: Some(ManifestContract {
                 package: "runtime-fs-test".to_owned(),
@@ -6806,6 +7846,8 @@ mod tests {
                 optional_capabilities: optional,
                 https_origins: vec![],
                 limits: vec![],
+                exec_commands: vec![],
+                exec_environment: vec![],
                 required_tools: vec![],
                 tool_contract_digest: compute_tool_contract_digest(&[]),
             }),
@@ -6820,6 +7862,181 @@ mod tests {
             *byte = u8::from_str_radix(&hex[index * 2..index * 2 + 2], 16).unwrap();
         }
         output
+    }
+
+    fn exec_manifest(commands: Vec<&str>, environment: Vec<&str>) -> ManifestContract {
+        ManifestContract {
+            package: "exec-test".to_owned(),
+            version: "0.1.0".to_owned(),
+            language_requirement: "0.1".to_owned(),
+            required_capabilities: vec!["exec.run".to_owned()],
+            optional_capabilities: Vec::new(),
+            limits: Vec::new(),
+            https_origins: Vec::new(),
+            exec_commands: commands.into_iter().map(str::to_owned).collect(),
+            exec_environment: environment.into_iter().map(str::to_owned).collect(),
+            required_tools: Vec::new(),
+            tool_contract_digest: compute_tool_contract_digest(&[]),
+        }
+    }
+
+    #[test]
+    fn exec_authority_accepts_only_narrower_grants_and_reserved_environment_is_denied() {
+        let manifest = exec_manifest(vec!["env"], vec!["SECRET"]);
+        let mut broader = HostPolicy::default();
+        broader.granted_exec.insert("env *".to_owned());
+        let prepared = prepare_exec_authority(&manifest, &["exec.run".to_owned()], &broader)
+            .expect("a broader host pattern is ignored rather than widened");
+        assert!(prepared.0.is_none());
+        assert!(prepared.1.is_empty());
+
+        let mut invalid_environment = HostPolicy::default();
+        invalid_environment.granted_exec.insert("env".to_owned());
+        invalid_environment
+            .granted_exec_environment
+            .insert("LC_ALL".to_owned());
+        assert_eq!(
+            prepare_exec_authority(&manifest, &["exec.run".to_owned()], &invalid_environment)
+                .unwrap_err()
+                .code,
+            RuntimeErrorCode::CapabilityDenied
+        );
+    }
+
+    #[test]
+    fn exec_preflight_is_linux_pinned_and_macos_fail_closed() {
+        let manifest = exec_manifest(vec!["env *"], vec!["SECRET"]);
+        let mut snapshot = EnvironmentSnapshot::empty();
+        snapshot.insert(OsString::from("PATH"), OsString::from("/usr/bin:/bin"));
+        snapshot.insert(OsString::from("SECRET"), OsString::from("not-for-inspect"));
+        snapshot.insert(
+            OsString::from("UNREQUESTED"),
+            OsString::from("must-not-copy"),
+        );
+        let mut policy = HostPolicy {
+            exec_environment_snapshot: snapshot,
+            ..HostPolicy::default()
+        };
+        policy.granted_exec.insert("env".to_owned());
+        policy.granted_exec_environment.insert("SECRET".to_owned());
+
+        let prepared = prepare_exec_authority(&manifest, &["exec.run".to_owned()], &policy);
+        #[cfg(target_os = "macos")]
+        assert_eq!(
+            prepared.unwrap_err().code,
+            RuntimeErrorCode::CapabilityDenied
+        );
+        #[cfg(target_os = "linux")]
+        {
+            let (authority, grants, environment, environment_digest, identity_digest) =
+                prepared.unwrap();
+            assert!(authority.is_some());
+            assert_eq!(grants, ["env"]);
+            assert_eq!(environment, ["SECRET"]);
+            assert_ne!(environment_digest, [0; 32]);
+            assert_ne!(identity_digest, [0; 32]);
+        }
+    }
+
+    #[test]
+    fn required_exec_preflight_uses_only_effective_command_authority() {
+        let artifact = verified_runtime_artifact_for_version(
+            BYTECODE_VERSION,
+            vec!["exec.run".to_owned()],
+            vec![],
+            vec![],
+            vec!["exec.run".to_owned()],
+            vec![],
+            vec!["env".to_owned()],
+        );
+        let mut snapshot = EnvironmentSnapshot::empty();
+        snapshot.insert(OsString::from("PATH"), OsString::from("/usr/bin:/bin"));
+        let mut policy = HostPolicy {
+            exec_environment_snapshot: snapshot,
+            strict_preflight_authority: true,
+            ..HostPolicy::default()
+        };
+        policy.granted_exec.insert("env".to_owned());
+
+        let prepared = prepare_launch(&artifact, &launch_request(), &policy);
+        #[cfg(target_os = "linux")]
+        {
+            let prepared = prepared.expect("--grant-exec alone supplies required exec authority");
+            assert!(prepared.exec.is_some());
+            assert!(prepared.effective_manifest_grants.contains("exec.run"));
+            assert!(prepared.optional_grants.is_empty());
+        }
+        #[cfg(target_os = "macos")]
+        assert_eq!(
+            prepared.unwrap_err().code,
+            RuntimeErrorCode::CapabilityDenied
+        );
+
+        for mut denied in [
+            HostPolicy {
+                strict_preflight_authority: true,
+                ..HostPolicy::default()
+            },
+            HostPolicy {
+                granted_capabilities: BTreeSet::from(["exec.run".to_owned()]),
+                strict_preflight_authority: true,
+                ..HostPolicy::default()
+            },
+        ] {
+            denied.exec_environment_snapshot = policy.exec_environment_snapshot.clone();
+            assert_eq!(
+                prepare_launch(&artifact, &launch_request(), &denied)
+                    .unwrap_err()
+                    .code,
+                RuntimeErrorCode::CapabilityDenied
+            );
+        }
+
+        let unavailable = verified_runtime_artifact_for_version(
+            BYTECODE_VERSION,
+            vec!["exec.run".to_owned()],
+            vec![],
+            vec![],
+            vec!["exec.run".to_owned()],
+            vec![],
+            vec!["allen-executable-that-must-not-exist".to_owned()],
+        );
+        let mut unavailable_policy = policy;
+        unavailable_policy
+            .granted_exec
+            .insert("allen-executable-that-must-not-exist".to_owned());
+        assert_eq!(
+            prepare_launch(&unavailable, &launch_request(), &unavailable_policy)
+                .unwrap_err()
+                .code,
+            RuntimeErrorCode::CapabilityDenied
+        );
+
+        let optional = verified_runtime_artifact_for_version(
+            BYTECODE_VERSION,
+            vec![],
+            vec!["exec.run".to_owned()],
+            vec![],
+            vec!["exec.run".to_owned()],
+            vec![],
+            vec!["env".to_owned()],
+        );
+        let optional_denied = prepare_launch(
+            &optional,
+            &launch_request(),
+            &HostPolicy {
+                strict_preflight_authority: true,
+                ..HostPolicy::default()
+            },
+        )
+        .expect("an ungranted optional exec request does not fail preflight");
+        assert!(optional_denied.exec.is_none());
+        assert!(optional_denied.optional_grants.is_empty());
+        assert!(
+            !optional_denied
+                .effective_manifest_grants
+                .contains("exec.run")
+        );
     }
 
     #[allow(clippy::too_many_lines)]
@@ -6881,12 +8098,14 @@ mod tests {
             },
             module: Module {
                 constants: vec![Constant::Int(7)],
-                enum_types: vec![tool_error],
+                enum_types: vec![tool_error.clone()],
                 effect_sets: vec![vec![], vec![tool.effect.clone()]],
                 functions: vec![
                     Function {
                         name: package_test_symbol("runtime-tool-test"),
                         parameters: vec![0],
+                        parameter_names: vec!["_arg0".to_owned()],
+                        parameter_default_digests: vec![None],
                         captures: vec![],
                         registers: vec![
                             ValueType::String,
@@ -6911,6 +8130,8 @@ mod tests {
                     Function {
                         name: package_test_symbol("runtime-tool-test").replace("::main", "::pure"),
                         parameters: vec![],
+                        parameter_names: Vec::new(),
+                        parameter_default_digests: Vec::new(),
                         captures: vec![],
                         registers: vec![ValueType::Int],
                         return_type: ValueType::Int,
@@ -6927,12 +8148,16 @@ mod tests {
                 async_functions: vec![0],
                 entry: 0,
             },
+            templates: vec![],
+            record_invariants: vec![],
             debug: None,
             schemas: vec![
                 StrictSchema {
                     value_type: ValueType::String,
                 },
-                StrictSchema { value_type: result },
+                StrictSchema {
+                    value_type: result.clone(),
+                },
                 StrictSchema {
                     value_type: ValueType::Unit,
                 },
@@ -6941,18 +8166,24 @@ mod tests {
                 },
             ],
             entries: vec![
-                EntryContract {
-                    name: "main".to_owned(),
-                    function: 0,
-                    input_schema: 0,
-                    output_schema: 1,
-                },
-                EntryContract {
-                    name: "pure".to_owned(),
-                    function: 1,
-                    input_schema: 2,
-                    output_schema: 3,
-                },
+                unvalidated_entry(
+                    "main",
+                    0,
+                    0,
+                    1,
+                    ValueType::String,
+                    result.clone(),
+                    std::slice::from_ref(&tool_error),
+                ),
+                unvalidated_entry(
+                    "pure",
+                    1,
+                    2,
+                    3,
+                    ValueType::Unit,
+                    ValueType::Int,
+                    std::slice::from_ref(&tool_error),
+                ),
             ],
             imports: vec![],
             manifest: Some(ManifestContract {
@@ -6963,6 +8194,8 @@ mod tests {
                 optional_capabilities: vec![],
                 limits: vec![],
                 https_origins: vec![],
+                exec_commands: vec![],
+                exec_environment: vec![],
                 required_tools: vec![tool.clone()],
                 tool_contract_digest: compute_tool_contract_digest(&[tool]),
             }),
@@ -7139,7 +8372,10 @@ mod tests {
     struct PreVmReplay(PreVmFailure);
 
     #[derive(Default)]
-    struct FinalOutcomeCapture(Vec<&'static str>);
+    struct FinalOutcomeCapture {
+        outcomes: Vec<&'static str>,
+        cancellations: usize,
+    }
 
     impl EffectProvider for FinalOutcomeCapture {
         fn is_replayed(&self) -> bool {
@@ -7159,9 +8395,10 @@ mod tests {
         }
 
         fn finish_execution(&mut self, outcome: EffectExecutionOutcome<'_>) -> Result<(), VmError> {
-            self.0.push(match outcome {
+            self.outcomes.push(match outcome {
                 EffectExecutionOutcome::Completed => "completed",
                 EffectExecutionOutcome::Stopped { .. } => "stopped",
+                EffectExecutionOutcome::Failed { .. } => "program.failed",
                 EffectExecutionOutcome::Terminal {
                     error: VmError::ResourceLimit { .. },
                 } => "resource.limit",
@@ -7169,6 +8406,46 @@ mod tests {
                 EffectExecutionOutcome::RuntimePanic => "runtime.panic",
             });
             Ok(())
+        }
+
+        fn cancel_pending(&mut self) {
+            self.cancellations += 1;
+        }
+    }
+
+    #[derive(Default)]
+    struct RejectingFinalOutcome {
+        finalizations: usize,
+        cancellations: usize,
+    }
+
+    impl EffectProvider for RejectingFinalOutcome {
+        fn is_replayed(&self) -> bool {
+            true
+        }
+
+        fn workspace(&mut self) -> Result<WorkspaceValue, VmError> {
+            Err(VmError::CapabilityMissing)
+        }
+
+        fn call(
+            &mut self,
+            _operation: FsOperation,
+            _arguments: &[Value],
+        ) -> Result<Value, VmError> {
+            Err(VmError::CapabilityMissing)
+        }
+
+        fn finish_execution(
+            &mut self,
+            _outcome: EffectExecutionOutcome<'_>,
+        ) -> Result<(), VmError> {
+            self.finalizations += 1;
+            Err(VmError::ReplayDiverged)
+        }
+
+        fn cancel_pending(&mut self) {
+            self.cancellations += 1;
         }
     }
 
@@ -7860,6 +9137,181 @@ mod tests {
     }
 
     #[test]
+    fn raw_entry_input_uses_the_strict_decode_projector() {
+        let record = ValueType::Record(vec![RecordField {
+            name: "value".to_owned(),
+            value_type: ValueType::Int,
+        }]);
+        let artifact = verified_input_artifact(&record);
+        let request = |input: &[u8]| RawLaunchRequest {
+            entry: "main".to_owned(),
+            input: input.to_vec(),
+        };
+
+        let outcome = launch_raw(
+            &artifact,
+            &request(br#"{"value":41}"#),
+            &HostPolicy::default(),
+        )
+        .unwrap();
+        assert_eq!(outcome.output, serde_json::json!({"value": 41}));
+
+        for input in [
+            br#"{"value":1,"value":2}"#.as_slice(),
+            &[0xff],
+            b"\xef\xbb\xbf{\"value\":1}",
+            br#"{"value":1} null"#,
+            br"{}",
+            br#"{"value":1,"extra":2}"#,
+            br#"{"value":"1"}"#,
+        ] {
+            assert_eq!(
+                prepare_raw_launch(&artifact, &request(input), &HostPolicy::default())
+                    .unwrap_err()
+                    .code,
+                RuntimeErrorCode::InvalidInput,
+                "input: {}",
+                String::from_utf8_lossy(input)
+            );
+        }
+
+        let nested = format!("{}null{}", "[".repeat(129), "]".repeat(129));
+        assert_eq!(
+            prepare_raw_launch(
+                &artifact,
+                &request(nested.as_bytes()),
+                &HostPolicy::default(),
+            )
+            .unwrap_err()
+            .code,
+            RuntimeErrorCode::ResourceLimit
+        );
+    }
+
+    #[test]
+    fn raw_entry_input_rejects_noncanonical_map_pairs() {
+        let map = ValueType::Map(Box::new(ValueType::String), Box::new(ValueType::Int));
+        let artifact = verified_input_artifact(&map);
+        for input in [
+            br#"[["b",1],["a",2]]"#.as_slice(),
+            br#"[["a",1],["a",2]]"#,
+            br#"{"a":1}"#,
+        ] {
+            let error = prepare_raw_launch(
+                &artifact,
+                &RawLaunchRequest {
+                    entry: "main".to_owned(),
+                    input: input.to_vec(),
+                },
+                &HostPolicy::default(),
+            )
+            .unwrap_err();
+            assert_eq!(error.code, RuntimeErrorCode::InvalidInput);
+        }
+    }
+
+    #[test]
+    fn record_invariants_gate_nested_entry_input_and_completed_output() {
+        let catalog = FrozenCatalog::freeze(Vec::new(), &CatalogLimits::default()).unwrap();
+        let input_source = r#"manifest {
+  language: "0.1"
+  entry: main
+  capabilities: []
+}
+record Range { max: Int, min: Int } where { min <= max }
+export fn main(values: List<Range>) returns List<Range> { values }
+"#;
+        let compiled = allen_compiler::assemble_inline_source(input_source, &catalog).unwrap();
+        let artifact = decode_and_verify(
+            &encode(&compiled.artifact).unwrap(),
+            &DecodeLimits::default(),
+        )
+        .unwrap();
+        assert_ne!(
+            artifact.entries()[0].input_contract_digest,
+            compute_strict_schema_digest(
+                &artifact.schemas()[artifact.entries()[0].input_schema as usize]
+            ),
+        );
+        let error = launch_raw(
+            &artifact,
+            &RawLaunchRequest {
+                entry: "main".to_owned(),
+                input: br#"[{"min":2,"max":1}]"#.to_vec(),
+            },
+            &HostPolicy::default(),
+        )
+        .unwrap_err();
+        assert_eq!(error.code, RuntimeErrorCode::EntryInvariantInput);
+        assert_eq!(error.message, "entry input violates a record invariant");
+
+        let valid = launch_raw(
+            &artifact,
+            &RawLaunchRequest {
+                entry: "main".to_owned(),
+                input: br#"[{"min":1,"max":2}]"#.to_vec(),
+            },
+            &HostPolicy::default(),
+        )
+        .unwrap();
+        assert_eq!(valid.output, serde_json::json!([{"max": 2, "min": 1}]));
+
+        let output_source = r"
+record Range { max: Int, min: Int } where { min <= max }
+export fn main() returns Range { Range { min: 2, max: 1 } }
+";
+        let compiled = allen_compiler::assemble_inline_source(output_source, &catalog).unwrap();
+        let artifact = decode_and_verify(
+            &encode(&compiled.artifact).unwrap(),
+            &DecodeLimits::default(),
+        )
+        .unwrap();
+        let error = launch(
+            &artifact,
+            &LaunchRequest {
+                entry: "main".to_owned(),
+                input: serde_json::Value::Null,
+            },
+            &HostPolicy::default(),
+        )
+        .unwrap_err();
+        assert_eq!(error.code, RuntimeErrorCode::EntryInvariantOutput);
+        assert_eq!(error.message, "entry output violates a record invariant");
+    }
+
+    #[test]
+    fn newtype_boundaries_use_bare_json_but_keep_nominal_schema_identity() {
+        let epoch = ValueType::Newtype {
+            name: "src/time.allen::EpochSeconds".to_owned(),
+            underlying: Box::new(ValueType::Int),
+        };
+        let retry = ValueType::Newtype {
+            name: "src/time.allen::RetryCount".to_owned(),
+            underlying: Box::new(ValueType::Int),
+        };
+        let input = serde_json::json!(42);
+        let value = json_to_value(&input, &epoch, &[]).expect("newtype input decodes");
+        let Value::Newtype(value) = &value else {
+            panic!("expected nominal wrapper")
+        };
+        assert_eq!(value.identity(), "src/time.allen::EpochSeconds");
+        assert_eq!(value.value(), &Value::Int(42));
+        assert_eq!(
+            value_to_json(&Value::Newtype(value.clone()), &epoch, &[]).unwrap(),
+            input
+        );
+
+        let descriptor = schema_descriptor(&epoch, &[]);
+        assert_eq!(descriptor["type"], "newtype");
+        assert_eq!(descriptor["identity"], "src/time.allen::EpochSeconds");
+        assert_eq!(descriptor["wire"], serde_json::json!({"type":"integer"}));
+        assert_ne!(
+            compute_strict_schema_digest(&StrictSchema { value_type: epoch }),
+            compute_strict_schema_digest(&StrictSchema { value_type: retry })
+        );
+    }
+
+    #[test]
     fn tool_codec_uses_descriptor_maps_and_flat_tagged_unions_only_at_tool_boundaries() {
         let integer = Descriptor::Int { min: 0, max: 9 };
         let map_descriptor = Descriptor::StringMap {
@@ -8400,6 +9852,7 @@ mod tests {
             None,
             None,
             None,
+            None,
             BTreeMap::new(),
             None,
             vec![],
@@ -8412,6 +9865,7 @@ mod tests {
                 filesystem: Rights::READ_ONLY,
                 permission_request: false,
                 http_get: false,
+                exec_run: false,
             },
             10,
         );
@@ -8444,6 +9898,7 @@ mod tests {
             None,
             None,
             None,
+            None,
             BTreeMap::new(),
             None,
             vec![],
@@ -8456,6 +9911,7 @@ mod tests {
                 filesystem: Rights::READ_ONLY,
                 permission_request: false,
                 http_get: false,
+                exec_run: false,
             },
             10,
         );
@@ -8523,6 +9979,7 @@ mod tests {
             None,
             ExecutionAccounting::new(WorkspaceLimits::default()),
             None,
+            None,
             provider,
             None,
             None,
@@ -8541,6 +9998,7 @@ mod tests {
                 filesystem: Rights::READ_WRITE,
                 permission_request: true,
                 http_get: false,
+                exec_run: false,
             },
             20,
         )
@@ -8774,6 +10232,7 @@ mod tests {
             None,
             None,
             None,
+            None,
             BTreeMap::new(),
             None,
             vec![],
@@ -8786,6 +10245,7 @@ mod tests {
                 filesystem: Rights::NONE,
                 permission_request: false,
                 http_get: true,
+                exec_run: false,
             },
             10,
         );
@@ -8882,9 +10342,11 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)]
     fn replay_finalization_observes_post_output_boundary_terminal_channel() {
         let artifact = verified_runtime_artifact_for_version(
             BYTECODE_VERSION,
+            vec![],
             vec![],
             vec![],
             vec![],
@@ -8913,7 +10375,8 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(error.code, RuntimeErrorCode::ResourceLimit);
-        assert_eq!(capture.0, ["resource.limit"]);
+        assert_eq!(capture.outcomes, ["resource.limit"]);
+        assert_eq!(capture.cancellations, 1);
 
         let mut invalid =
             prepare_launch(&artifact, &launch_request(), &HostPolicy::default()).unwrap();
@@ -8930,7 +10393,62 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(error.code, RuntimeErrorCode::Panic);
-        assert_eq!(capture.0, ["terminal"]);
+        assert_eq!(capture.outcomes, ["terminal"]);
+        assert_eq!(capture.cancellations, 1);
+
+        let catalog = FrozenCatalog::freeze(Vec::new(), &CatalogLimits::default()).unwrap();
+        let compiled = allen_compiler::assemble_inline_source(
+            r"
+record Range { max: Int, min: Int } where { min <= max }
+export fn main() returns Range { Range { min: 2, max: 1 } }
+",
+            &catalog,
+        )
+        .unwrap();
+        let artifact = decode_and_verify(
+            &encode(&compiled.artifact).unwrap(),
+            &DecodeLimits::default(),
+        )
+        .unwrap();
+        let invalid_invariant =
+            prepare_launch(&artifact, &launch_request(), &HostPolicy::default()).unwrap();
+        let mut capture = FinalOutcomeCapture::default();
+        let error = execute_prepared_with_context(
+            invalid_invariant,
+            &mut RuntimeProviders {
+                effect_override: Some(&mut capture),
+                ..RuntimeProviders::default()
+            },
+            &mut NeverCancel,
+            &mut NoObserver,
+        )
+        .unwrap_err();
+        assert_eq!(error.code, RuntimeErrorCode::EntryInvariantOutput);
+        assert_eq!(capture.outcomes, ["terminal"]);
+        assert_eq!(capture.cancellations, 1);
+
+        for replay_failure in ["leftover entries", "mismatched final channel"] {
+            let invalid_invariant =
+                prepare_launch(&artifact, &launch_request(), &HostPolicy::default()).unwrap();
+            let mut replay = RejectingFinalOutcome::default();
+            let error = execute_prepared_with_context(
+                invalid_invariant,
+                &mut RuntimeProviders {
+                    effect_override: Some(&mut replay),
+                    ..RuntimeProviders::default()
+                },
+                &mut NeverCancel,
+                &mut NoObserver,
+            )
+            .unwrap_err();
+            assert_eq!(
+                error.code,
+                RuntimeErrorCode::ReplayRuntimeDiverged,
+                "{replay_failure}"
+            );
+            assert_eq!(replay.finalizations, 1, "{replay_failure}");
+            assert_eq!(replay.cancellations, 1, "{replay_failure}");
+        }
 
         let mut invalid =
             prepare_launch(&artifact, &launch_request(), &HostPolicy::default()).unwrap();

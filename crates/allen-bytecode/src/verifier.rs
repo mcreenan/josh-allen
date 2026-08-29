@@ -1,14 +1,15 @@
 //! Structural, type, control-flow, and ownership verification.
 
 use crate::model::{
-    CANONICAL_NAN_BITS, CapabilityOperation, CheckedIntOperation, CompareOp, Constant, Conversion,
-    EffectOperation, EffectSetId, EnumPayloadType, Function, Instruction, MAX_VALUE_NESTING,
-    Module, RecordField, Register, SafeCollectionOperation, StringOperation,
-    ToolVerificationContract, ValueType, agent_error_type, effect_result_type,
+    CANONICAL_NAN_BITS, CapabilityOperation, CheckedIntOperation, CollectionOperation, CompareOp,
+    Constant, Conversion, EffectOperation, EffectSetId, EnumPayloadType, Function, Instruction,
+    ListCombinator, ListLiteralItem, MAX_VALUE_NESTING, MapLiteralItem, Module, RecordField,
+    Register, SafeCollectionOperation, StandardOperation, StringOperation, TemplateResource,
+    ToolVerificationContract, ValueType, agent_error_type, decode_error_type, effect_result_type,
     external_directory_request_type, external_file_request_type, file_error_type, is_nan_bits,
-    model_error_type, prompt_output_type, sub_agent_error_type, sub_agent_projection_type,
-    task_snapshot_type, tool_declared_error_type, transcript_part_enum_id, transcript_query_type,
-    user_error_type,
+    is_strict_schema_type, model_error_type, prompt_output_type, sub_agent_error_type,
+    sub_agent_projection_type, task_snapshot_type, tool_declared_error_type,
+    transcript_part_enum_id, transcript_query_type, user_error_type,
 };
 use std::collections::BTreeSet;
 use std::fmt;
@@ -54,17 +55,25 @@ impl fmt::Display for VerifyError {
 impl std::error::Error for VerifyError {}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct VerifiedModule(Module);
+pub struct VerifiedModule {
+    module: Module,
+    templates: Vec<TemplateResource>,
+}
 
 impl VerifiedModule {
     #[must_use]
     pub fn module(&self) -> &Module {
-        &self.0
+        &self.module
+    }
+
+    #[must_use]
+    pub fn templates(&self) -> &[TemplateResource] {
+        &self.templates
     }
 
     #[must_use]
     pub fn entry_function(&self) -> &Function {
-        &self.0.functions[self.0.entry as usize]
+        &self.module.functions[self.module.entry as usize]
     }
 }
 
@@ -74,7 +83,7 @@ impl VerifiedModule {
 ///
 /// Returns a bounded location and deterministic message when the module is invalid.
 pub fn verify(module: Module) -> Result<VerifiedModule, VerifyError> {
-    verify_internal(module, None)
+    verify_internal(module, None, None)
 }
 
 /// Verify current-version bytecode against a trusted, frozen tool catalog.
@@ -93,12 +102,13 @@ pub fn verify_with_frozen_tool_catalog(
     module: Module,
     tool_contracts: &[ToolVerificationContract],
 ) -> Result<VerifiedModule, VerifyError> {
-    verify_internal(module, Some(tool_contracts))
+    verify_internal(module, Some(tool_contracts), None)
 }
 
 pub(crate) fn verify_internal(
     module: Module,
     tool_contracts: Option<&[ToolVerificationContract]>,
+    templates: Option<Vec<TemplateResource>>,
 ) -> Result<VerifiedModule, VerifyError> {
     verify_constants(&module.constants)?;
     verify_effect_sets(&module.effect_sets)?;
@@ -143,11 +153,35 @@ pub(crate) fn verify_internal(
         if !function_names.insert(function.name.as_str()) {
             return Err(VerifyError::module("function symbols must be unique"));
         }
+        if function.parameter_names.len() != function.parameters.len()
+            || function
+                .parameter_names
+                .iter()
+                .any(|name| !is_source_identifier(name))
+        {
+            return Err(VerifyError::module(
+                "function parameter names must be canonical and match parameter arity",
+            ));
+        }
+        if function.parameter_default_digests.len() != function.parameters.len() {
+            return Err(VerifyError::module(
+                "function parameter default digests must match parameter arity",
+            ));
+        }
         verify_function_layout(&module, function)?;
-        verify_cfg_function(&module, function_index, function, tool_contracts)?;
+        verify_cfg_function(
+            &module,
+            function_index,
+            function,
+            tool_contracts,
+            templates.as_deref(),
+        )?;
     }
 
-    Ok(VerifiedModule(module))
+    Ok(VerifiedModule {
+        module,
+        templates: templates.unwrap_or_default(),
+    })
 }
 
 fn is_canonical_function_symbol(symbol: &str) -> bool {
@@ -391,7 +425,9 @@ fn verify_expanded_module_types(
         }
         verify_expanded_value_type(&function.return_type, enum_nesting, 0)?;
         for instruction in &function.code {
-            if let Instruction::Narrow { target, .. } = instruction {
+            if let Instruction::Narrow { target, .. } | Instruction::Decode { target, .. } =
+                instruction
+            {
                 verify_expanded_value_type(target, enum_nesting, 0)?;
             }
         }
@@ -420,7 +456,12 @@ fn verify_expanded_value_type(
         ValueType::List(element)
         | ValueType::Option(element)
         | ValueType::Future(element)
-        | ValueType::Task(element) => {
+        | ValueType::Task(element)
+        | ValueType::Sequence(element)
+        | ValueType::Newtype {
+            underlying: element,
+            ..
+        } => {
             verify_expanded_value_type(element, enum_nesting, depth + 1)?;
         }
         ValueType::Map(key, value) | ValueType::Result(key, value) => {
@@ -454,6 +495,7 @@ fn verify_expanded_value_type(
         | ValueType::Bytes
         | ValueType::ExternalFsAccess
         | ValueType::SubAgent
+        | ValueType::Range
         | ValueType::Unit
         | ValueType::Never
         | ValueType::Workspace
@@ -538,9 +580,12 @@ fn verify_expanded_type_nesting(
         ValueType::List(element)
         | ValueType::Option(element)
         | ValueType::Future(element)
-        | ValueType::Task(element) => {
-            Ok(1 + verify_expanded_type_nesting(module, element, marks, nesting, depth + 1)?)
-        }
+        | ValueType::Task(element)
+        | ValueType::Sequence(element)
+        | ValueType::Newtype {
+            underlying: element,
+            ..
+        } => Ok(1 + verify_expanded_type_nesting(module, element, marks, nesting, depth + 1)?),
         ValueType::Map(key, value) | ValueType::Result(key, value) => Ok(1
             + verify_expanded_type_nesting(module, key, marks, nesting, depth + 1)?.max(
                 verify_expanded_type_nesting(module, value, marks, nesting, depth + 1)?,
@@ -594,6 +639,7 @@ fn verify_expanded_type_nesting(
         | ValueType::Bytes
         | ValueType::ExternalFsAccess
         | ValueType::SubAgent
+        | ValueType::Range
         | ValueType::Unit
         | ValueType::Never
         | ValueType::Workspace
@@ -607,8 +653,9 @@ fn verify_cfg_function(
     function_index: usize,
     function: &Function,
     tool_contracts: Option<&[ToolVerificationContract]>,
+    templates: Option<&[TemplateResource]>,
 ) -> Result<(), VerifyError> {
-    verify_instruction_types(module, function_index, function, tool_contracts)?;
+    verify_instruction_types(module, function_index, function, tool_contracts, templates)?;
     let code_len = function.code.len();
     if code_len == 0 {
         return Err(error(
@@ -669,7 +716,7 @@ fn verify_cfg_function(
         }
 
         match instruction {
-            Instruction::Return { .. } | Instruction::Stop { .. } => {}
+            Instruction::Return { .. } | Instruction::Stop { .. } | Instruction::Fail { .. } => {}
             Instruction::Jump { target } => {
                 merge_edge(&mut entry_states, &mut worklist, *target as usize, state);
             }
@@ -818,7 +865,7 @@ fn verify_sub_agent_cfg(
         }
 
         match instruction {
-            Instruction::Return { .. } | Instruction::Stop { .. } => {}
+            Instruction::Return { .. } | Instruction::Stop { .. } | Instruction::Fail { .. } => {}
             Instruction::Jump { target } => merge_sub_agent_edge(
                 function_index,
                 instruction_index,
@@ -925,7 +972,8 @@ fn sub_agent_result_availability(
     match instruction {
         Instruction::Move { source, .. }
         | Instruction::Await { source, .. }
-        | Instruction::TryResult { source, .. } => Ok(state.registers[*source as usize]),
+        | Instruction::TryResult { source, .. }
+        | Instruction::TryOption { source, .. } => Ok(state.registers[*source as usize]),
         Instruction::Spawn { future, .. } => Ok(state.registers[*future as usize]),
         Instruction::DirectCall { arguments, .. } | Instruction::ClosureCall { arguments, .. } => {
             let mut sources = arguments
@@ -1093,7 +1141,9 @@ fn verify_structured_back_edges(
 
     for (source, instruction) in function.code.iter().enumerate() {
         let targets = match instruction {
-            Instruction::Return { .. } | Instruction::Stop { .. } => Vec::new(),
+            Instruction::Return { .. } | Instruction::Stop { .. } | Instruction::Fail { .. } => {
+                Vec::new()
+            }
             Instruction::Jump { target } => vec![*target as usize],
             Instruction::BranchBool {
                 true_target,
@@ -1336,7 +1386,7 @@ fn verify_affine_cfg(
                 return Err(error(
                     function_index,
                     instruction_index,
-                    "Future or Task register is not live",
+                    "affine register is not live",
                 ));
             }
         }
@@ -1505,6 +1555,94 @@ fn verify_affine_cfg(
             Instruction::EffectCall { .. } | Instruction::ToolInvoke { .. } => {
                 result_must_consume = true;
             }
+            Instruction::SequenceMap {
+                destination,
+                sequence,
+                ..
+            }
+            | Instruction::SequenceFilter {
+                destination,
+                sequence,
+                ..
+            }
+            | Instruction::SequenceTake {
+                destination,
+                sequence,
+                ..
+            }
+            | Instruction::SequenceFind {
+                destination,
+                sequence,
+                ..
+            }
+            | Instruction::SequenceAny {
+                destination,
+                sequence,
+                ..
+            }
+            | Instruction::SequenceAll {
+                destination,
+                sequence,
+                ..
+            }
+            | Instruction::SequenceFold {
+                destination,
+                sequence,
+                ..
+            }
+            | Instruction::SequenceToList {
+                destination,
+                sequence,
+            } => {
+                let AffineState::Live {
+                    origin,
+                    must_consume,
+                } = state.registers[*sequence as usize]
+                else {
+                    unreachable!("live sequence source checked above")
+                };
+                if let Instruction::SequenceFold { initial, .. } = instruction {
+                    if *initial == *sequence {
+                        return Err(error(
+                            function_index,
+                            instruction_index,
+                            "sequence fold cannot use one affine value as both source and accumulator",
+                        ));
+                    }
+                }
+                state.registers[*sequence as usize] = AffineState::Consumed;
+                if let Instruction::SequenceFold { initial, .. } = instruction {
+                    if is_affine_type(&function.registers[*initial as usize]) {
+                        let AffineState::Live {
+                            origin: initial_origin,
+                            must_consume: initial_must_consume,
+                        } = state.registers[*initial as usize]
+                        else {
+                            unreachable!("live initial checked above")
+                        };
+                        if initial_origin != 0 && origin != 0 && initial_origin != origin {
+                            return Err(error(
+                                function_index,
+                                instruction_index,
+                                "sequence fold cannot combine affine values from different task scopes",
+                            ));
+                        }
+                        state.registers[*initial as usize] = AffineState::Consumed;
+                        result_origin = if initial_origin != 0 {
+                            initial_origin
+                        } else {
+                            origin
+                        };
+                        result_must_consume = initial_must_consume;
+                    }
+                }
+                if is_affine_type(&function.registers[*destination as usize])
+                    && !matches!(instruction, Instruction::SequenceFold { .. })
+                {
+                    result_origin = origin;
+                    result_must_consume = must_consume;
+                }
+            }
             Instruction::TaskScopeEnter { scope } => state.scopes.push(*scope),
             Instruction::TaskScopeExit { scope } => {
                 if state.scopes.pop() != Some(*scope) {
@@ -1544,7 +1682,7 @@ fn verify_affine_cfg(
                     }
                 }
             }
-            Instruction::TryResult { .. } => {
+            Instruction::TryResult { .. } | Instruction::TryOption { .. } => {
                 for (register, ownership) in state.registers.iter().enumerate() {
                     if matches!(
                         ownership,
@@ -1614,7 +1752,9 @@ fn verify_affine_cfg(
         }
 
         let successors: Vec<usize> = match instruction {
-            Instruction::Return { .. } | Instruction::Stop { .. } => Vec::new(),
+            Instruction::Return { .. } | Instruction::Stop { .. } | Instruction::Fail { .. } => {
+                Vec::new()
+            }
             Instruction::Jump { target } => vec![*target as usize],
             Instruction::BranchBool {
                 true_target,
@@ -1637,7 +1777,7 @@ fn verify_affine_cfg(
                 return Err(error(
                     function_index,
                     instruction_index,
-                    "backward control-flow edge cannot carry a live Future or Task",
+                    "backward control-flow edge cannot carry a live affine value",
                 ));
             }
             normalize_dead_affine_temporaries(
@@ -1702,6 +1842,16 @@ fn instruction_consumes_register(instruction: &Instruction, register: Register) 
         Instruction::DirectCall { arguments, .. }
         | Instruction::ClosureCall { arguments, .. }
         | Instruction::AsyncCall { arguments, .. } => arguments.contains(&register),
+        Instruction::SequenceMap { sequence, .. }
+        | Instruction::SequenceFilter { sequence, .. }
+        | Instruction::SequenceTake { sequence, .. }
+        | Instruction::SequenceFind { sequence, .. }
+        | Instruction::SequenceAny { sequence, .. }
+        | Instruction::SequenceAll { sequence, .. }
+        | Instruction::SequenceToList { sequence, .. } => *sequence == register,
+        Instruction::SequenceFold {
+            sequence, initial, ..
+        } => *sequence == register || *initial == register,
         _ => false,
     }
 }
@@ -1719,21 +1869,32 @@ fn instruction_destination(instruction: &Instruction) -> Option<Register> {
         | Instruction::BoolNot { destination, .. }
         | Instruction::BoolBinary { destination, .. }
         | Instruction::ListNew { destination, .. }
+        | Instruction::ListLiteralBuild { destination, .. }
+        | Instruction::RangeNew { destination, .. }
+        | Instruction::RangeStart { destination, .. }
+        | Instruction::RangeEnd { destination, .. }
+        | Instruction::RangeInclusive { destination, .. }
         | Instruction::Length { destination, .. }
         | Instruction::ListAppend { destination, .. }
         | Instruction::ListSet { destination, .. }
         | Instruction::MapNew { destination, .. }
+        | Instruction::MapLiteralBuild { destination, .. }
         | Instruction::TupleNew { destination, .. }
         | Instruction::IndexGet { destination, .. }
+        | Instruction::SliceGet { destination, .. }
         | Instruction::MapEntryAt { destination, .. }
         | Instruction::TupleGet { destination, .. }
         | Instruction::Convert { destination, .. }
         | Instruction::RecordNew { destination, .. }
         | Instruction::FieldGet { destination, .. }
+        | Instruction::NewtypeWrap { destination, .. }
+        | Instruction::NewtypeUnwrap { destination, .. }
         | Instruction::EnumNew { destination, .. }
         | Instruction::TryResult { destination, .. }
+        | Instruction::TryOption { destination, .. }
         | Instruction::ToUnknown { destination, .. }
         | Instruction::Narrow { destination, .. }
+        | Instruction::Decode { destination, .. }
         | Instruction::DirectCall { destination, .. }
         | Instruction::ClosureNew { destination, .. }
         | Instruction::ClosureCall { destination, .. }
@@ -1744,20 +1905,36 @@ fn instruction_destination(instruction: &Instruction) -> Option<Register> {
         | Instruction::WorkspaceGet { destination }
         | Instruction::EffectCall { destination, .. }
         | Instruction::StringCall { destination, .. }
+        | Instruction::StandardCall { destination, .. }
         | Instruction::CapabilityInspect { destination, .. }
         | Instruction::SafeCollectionCall { destination, .. }
         | Instruction::CheckedIntCall { destination, .. }
-        | Instruction::ToolInvoke { destination, .. } => Some(*destination),
+        | Instruction::CollectionCall { destination, .. }
+        | Instruction::ListFold { destination, .. }
+        | Instruction::ListCombinator { destination, .. }
+        | Instruction::SequenceFromList { destination, .. }
+        | Instruction::SequenceMap { destination, .. }
+        | Instruction::SequenceFilter { destination, .. }
+        | Instruction::SequenceTake { destination, .. }
+        | Instruction::SequenceFind { destination, .. }
+        | Instruction::SequenceAny { destination, .. }
+        | Instruction::SequenceAll { destination, .. }
+        | Instruction::SequenceFold { destination, .. }
+        | Instruction::SequenceToList { destination, .. }
+        | Instruction::ToolInvoke { destination, .. }
+        | Instruction::TemplateRender { destination, .. } => Some(*destination),
         Instruction::BranchBool { .. }
         | Instruction::SwitchEnum { .. }
         | Instruction::Jump { .. }
         | Instruction::TaskScopeEnter { .. }
         | Instruction::TaskScopeExit { .. }
         | Instruction::Stop { .. }
+        | Instruction::Fail { .. }
         | Instruction::Return { .. } => None,
     }
 }
 
+#[allow(clippy::too_many_lines)]
 fn instruction_sources(instruction: &Instruction) -> Vec<Register> {
     match instruction {
         Instruction::Const { .. }
@@ -1770,16 +1947,20 @@ fn instruction_sources(instruction: &Instruction) -> Vec<Register> {
         | Instruction::FloatNegate { source, .. }
         | Instruction::BoolNot { source, .. }
         | Instruction::Convert { source, .. }
+        | Instruction::NewtypeWrap { source, .. }
+        | Instruction::NewtypeUnwrap { source, .. }
         | Instruction::TryResult { source, .. }
+        | Instruction::TryOption { source, .. }
         | Instruction::ToUnknown { source, .. }
         | Instruction::Narrow { source, .. }
+        | Instruction::Decode { source, .. }
         | Instruction::Await { source, .. }
         | Instruction::TaskSnapshot { source, .. }
         | Instruction::ToolInvoke { input: source, .. }
         | Instruction::SwitchEnum { source, .. }
         | Instruction::Return { source } => vec![*source],
         Instruction::Spawn { future, .. } => vec![*future],
-        Instruction::Stop { reason } => vec![*reason],
+        Instruction::Stop { reason } | Instruction::Fail { reason } => vec![*reason],
         Instruction::IntBinary { left, right, .. }
         | Instruction::IntRemainder { left, right, .. }
         | Instruction::FloatBinary { left, right, .. }
@@ -1788,6 +1969,16 @@ fn instruction_sources(instruction: &Instruction) -> Vec<Register> {
         Instruction::ListNew { elements, .. } | Instruction::TupleNew { elements, .. } => {
             elements.clone()
         }
+        Instruction::ListLiteralBuild { items, .. } => items
+            .iter()
+            .map(|item| match item {
+                ListLiteralItem::Element(register) | ListLiteralItem::Spread(register) => *register,
+            })
+            .collect(),
+        Instruction::RangeNew { start, end, .. } => vec![*start, *end],
+        Instruction::RangeStart { range, .. }
+        | Instruction::RangeEnd { range, .. }
+        | Instruction::RangeInclusive { range, .. } => vec![*range],
         Instruction::Length { collection, .. } => vec![*collection],
         Instruction::ListAppend { values, value, .. } => vec![*values, *value],
         Instruction::ListSet {
@@ -1800,9 +1991,22 @@ fn instruction_sources(instruction: &Instruction) -> Vec<Register> {
             .iter()
             .flat_map(|(key, value)| [*key, *value])
             .collect(),
+        Instruction::MapLiteralBuild { items, .. } => items
+            .iter()
+            .flat_map(|item| match item {
+                MapLiteralItem::Entry { key, value } => vec![*key, *value],
+                MapLiteralItem::Spread(register) => vec![*register],
+            })
+            .collect(),
         Instruction::IndexGet {
             collection, index, ..
         } => vec![*collection, *index],
+        Instruction::SliceGet {
+            collection,
+            start,
+            end,
+            ..
+        } => vec![*collection, *start, *end],
         Instruction::MapEntryAt { map, index, .. } => vec![*map, *index],
         Instruction::TupleGet { tuple, .. } => vec![*tuple],
         Instruction::RecordNew { fields, .. } => fields.iter().map(|(_, source)| *source).collect(),
@@ -1814,9 +2018,56 @@ fn instruction_sources(instruction: &Instruction) -> Vec<Register> {
         }
         Instruction::EffectCall { arguments, .. }
         | Instruction::StringCall { arguments, .. }
+        | Instruction::StandardCall { arguments, .. }
         | Instruction::CapabilityInspect { arguments, .. }
         | Instruction::SafeCollectionCall { arguments, .. }
-        | Instruction::CheckedIntCall { arguments, .. } => arguments.clone(),
+        | Instruction::CheckedIntCall { arguments, .. }
+        | Instruction::CollectionCall { arguments, .. }
+        | Instruction::TemplateRender { arguments, .. } => arguments.clone(),
+        Instruction::ListFold {
+            values,
+            initial,
+            callback,
+            ..
+        } => vec![*values, *initial, *callback],
+        Instruction::ListCombinator {
+            values,
+            initial,
+            callback,
+            ..
+        } => {
+            let mut sources = vec![*values, *callback];
+            sources.extend(initial);
+            sources
+        }
+        Instruction::SequenceFromList { values, .. } => vec![*values],
+        Instruction::SequenceMap {
+            sequence, callback, ..
+        }
+        | Instruction::SequenceFilter {
+            sequence, callback, ..
+        }
+        | Instruction::SequenceFind {
+            sequence, callback, ..
+        }
+        | Instruction::SequenceAny {
+            sequence, callback, ..
+        }
+        | Instruction::SequenceAll {
+            sequence, callback, ..
+        } => vec![*sequence, *callback],
+        Instruction::SequenceTake {
+            sequence, count, ..
+        } => vec![*sequence, *count],
+        Instruction::SequenceFold {
+            sequence,
+            initial,
+            callback,
+            ..
+        } => {
+            vec![*sequence, *initial, *callback]
+        }
+        Instruction::SequenceToList { sequence, .. } => vec![*sequence],
         Instruction::ClosureNew { captures, .. } => captures.clone(),
         Instruction::ClosureCall {
             closure, arguments, ..
@@ -1845,6 +2096,7 @@ fn verify_instruction_types(
     function_index: usize,
     function: &Function,
     tool_contracts: Option<&[ToolVerificationContract]>,
+    templates: Option<&[TemplateResource]>,
 ) -> Result<(), VerifyError> {
     let function_id = u32::try_from(function_index).expect("verified function table size fits u32");
     for register_type in &function.registers {
@@ -2110,6 +2362,57 @@ fn verify_instruction_types(
                 }
                 initialized[*destination as usize] = true;
             }
+            Instruction::ListLiteralBuild { destination, items } => {
+                let destination_type =
+                    destination_type(function, function_index, instruction_index, *destination)?;
+                let ValueType::List(element_type) = destination_type else {
+                    return Err(error(
+                        function_index,
+                        instruction_index,
+                        "list literal build destination must be List",
+                    ));
+                };
+                for item in items {
+                    let source = match item {
+                        ListLiteralItem::Element(source) | ListLiteralItem::Spread(source) => {
+                            *source
+                        }
+                    };
+                    let actual = initialized_type(
+                        function,
+                        &initialized,
+                        function_index,
+                        instruction_index,
+                        source,
+                    )?;
+                    match item {
+                        ListLiteralItem::Element(_) => require_type(
+                            function_index,
+                            instruction_index,
+                            actual,
+                            element_type,
+                            "list literal element",
+                        )?,
+                        ListLiteralItem::Spread(_) => {
+                            let ValueType::List(spread_element) = actual else {
+                                return Err(error(
+                                    function_index,
+                                    instruction_index,
+                                    "list literal spread must be List",
+                                ));
+                            };
+                            require_type(
+                                function_index,
+                                instruction_index,
+                                spread_element,
+                                element_type,
+                                "list literal spread element",
+                            )?;
+                        }
+                    }
+                }
+                initialized[*destination as usize] = true;
+            }
             Instruction::Length {
                 destination,
                 collection,
@@ -2171,6 +2474,30 @@ fn verify_instruction_types(
                     destination_type(function, function_index, instruction_index, *destination)?,
                     &signature.result,
                     "String operation result",
+                )?;
+                initialized[*destination as usize] = true;
+            }
+            Instruction::StandardCall {
+                destination,
+                operation,
+                arguments,
+            } => {
+                let signature =
+                    standard_operation_signature(function_index, instruction_index, *operation);
+                verify_call_arguments(
+                    function,
+                    &initialized,
+                    function_index,
+                    instruction_index,
+                    arguments,
+                    signature.parameters.iter(),
+                )?;
+                require_type(
+                    function_index,
+                    instruction_index,
+                    destination_type(function, function_index, instruction_index, *destination)?,
+                    &signature.result,
+                    "standard operation result",
                 )?;
                 initialized[*destination as usize] = true;
             }
@@ -2326,6 +2653,89 @@ fn verify_instruction_types(
                         value_type,
                         "map value",
                     )?;
+                }
+                initialized[*destination as usize] = true;
+            }
+            Instruction::MapLiteralBuild { destination, items } => {
+                let destination_type =
+                    destination_type(function, function_index, instruction_index, *destination)?;
+                let ValueType::Map(key_type, value_type) = destination_type else {
+                    return Err(error(
+                        function_index,
+                        instruction_index,
+                        "map literal build destination must be Map",
+                    ));
+                };
+                if !key_type.is_map_key() {
+                    return Err(error(
+                        function_index,
+                        instruction_index,
+                        "map key type is not allowed",
+                    ));
+                }
+                for item in items {
+                    match item {
+                        MapLiteralItem::Entry { key, value } => {
+                            let actual_key = initialized_type(
+                                function,
+                                &initialized,
+                                function_index,
+                                instruction_index,
+                                *key,
+                            )?;
+                            require_type(
+                                function_index,
+                                instruction_index,
+                                actual_key,
+                                key_type,
+                                "map literal key",
+                            )?;
+                            let actual_value = initialized_type(
+                                function,
+                                &initialized,
+                                function_index,
+                                instruction_index,
+                                *value,
+                            )?;
+                            require_type(
+                                function_index,
+                                instruction_index,
+                                actual_value,
+                                value_type,
+                                "map literal value",
+                            )?;
+                        }
+                        MapLiteralItem::Spread(source) => {
+                            let actual = initialized_type(
+                                function,
+                                &initialized,
+                                function_index,
+                                instruction_index,
+                                *source,
+                            )?;
+                            let ValueType::Map(spread_key, spread_value) = actual else {
+                                return Err(error(
+                                    function_index,
+                                    instruction_index,
+                                    "map literal spread must be Map",
+                                ));
+                            };
+                            require_type(
+                                function_index,
+                                instruction_index,
+                                spread_key,
+                                key_type,
+                                "map literal spread key",
+                            )?;
+                            require_type(
+                                function_index,
+                                instruction_index,
+                                spread_value,
+                                value_type,
+                                "map literal spread value",
+                            )?;
+                        }
+                    }
                 }
                 initialized[*destination as usize] = true;
             }
@@ -2698,6 +3108,64 @@ fn verify_instruction_types(
                 )?;
                 initialized[*destination as usize] = true;
             }
+            Instruction::NewtypeWrap {
+                destination,
+                source,
+            } => {
+                let destination_type =
+                    destination_type(function, function_index, instruction_index, *destination)?;
+                let ValueType::Newtype { underlying, .. } = destination_type else {
+                    return Err(error(
+                        function_index,
+                        instruction_index,
+                        "newtype wrap destination must be Newtype",
+                    ));
+                };
+                let source_type = initialized_type(
+                    function,
+                    &initialized,
+                    function_index,
+                    instruction_index,
+                    *source,
+                )?;
+                require_type(
+                    function_index,
+                    instruction_index,
+                    source_type,
+                    underlying,
+                    "newtype wrap source",
+                )?;
+                initialized[*destination as usize] = true;
+            }
+            Instruction::NewtypeUnwrap {
+                destination,
+                source,
+            } => {
+                let destination_type =
+                    destination_type(function, function_index, instruction_index, *destination)?;
+                let source_type = initialized_type(
+                    function,
+                    &initialized,
+                    function_index,
+                    instruction_index,
+                    *source,
+                )?;
+                let ValueType::Newtype { underlying, .. } = source_type else {
+                    return Err(error(
+                        function_index,
+                        instruction_index,
+                        "newtype unwrap source must be Newtype",
+                    ));
+                };
+                require_type(
+                    function_index,
+                    instruction_index,
+                    destination_type,
+                    underlying,
+                    "newtype unwrap destination",
+                )?;
+                initialized[*destination as usize] = true;
+            }
             Instruction::EnumNew {
                 destination,
                 variant,
@@ -2862,6 +3330,42 @@ fn verify_instruction_types(
                 )?;
                 initialized[*destination as usize] = true;
             }
+            Instruction::TryOption {
+                destination,
+                source,
+            } => {
+                let destination_type =
+                    destination_type(function, function_index, instruction_index, *destination)?;
+                let source_type = initialized_type(
+                    function,
+                    &initialized,
+                    function_index,
+                    instruction_index,
+                    *source,
+                )?;
+                let ValueType::Option(value_type) = source_type else {
+                    return Err(error(
+                        function_index,
+                        instruction_index,
+                        "try option source must be Option",
+                    ));
+                };
+                require_type(
+                    function_index,
+                    instruction_index,
+                    destination_type,
+                    value_type,
+                    "try option destination",
+                )?;
+                if !matches!(function.return_type, ValueType::Option(_)) {
+                    return Err(error(
+                        function_index,
+                        instruction_index,
+                        "try option requires an Option function return type",
+                    ));
+                }
+                initialized[*destination as usize] = true;
+            }
             Instruction::ToUnknown {
                 destination,
                 source,
@@ -2885,6 +3389,7 @@ fn verify_instruction_types(
                         | ValueType::Never
                 ) || contains_workspace(source_type)
                     || contains_sub_agent(source_type)
+                    || contains_affine_type(source_type)
                 {
                     return Err(error(
                         function_index,
@@ -2938,6 +3443,48 @@ fn verify_instruction_types(
                     destination_type,
                     &ValueType::Option(Box::new(target.clone())),
                     "narrow destination",
+                )?;
+                initialized[*destination as usize] = true;
+            }
+            Instruction::Decode {
+                destination,
+                source,
+                target,
+            } => {
+                verify_module_value_type(module, target, 0).map_err(|message| {
+                    VerifyError::instruction(function_index, instruction_index, message)
+                })?;
+                if !is_concrete_type(module, target, &mut concrete_enums)
+                    || !is_strict_schema_type(target)
+                {
+                    return Err(error(
+                        function_index,
+                        instruction_index,
+                        "decode target must be a concrete entry-boundary value type",
+                    ));
+                }
+                let destination_type =
+                    destination_type(function, function_index, instruction_index, *destination)?;
+                let source_type = initialized_type(
+                    function,
+                    &initialized,
+                    function_index,
+                    instruction_index,
+                    *source,
+                )?;
+                require_type(
+                    function_index,
+                    instruction_index,
+                    source_type,
+                    &ValueType::Bytes,
+                    "decode source",
+                )?;
+                require_type(
+                    function_index,
+                    instruction_index,
+                    destination_type,
+                    &ValueType::Result(Box::new(target.clone()), Box::new(decode_error_type())),
+                    "decode destination",
                 )?;
                 initialized[*destination as usize] = true;
             }
@@ -3353,6 +3900,38 @@ fn verify_instruction_types(
                     {
                         ValueType::Option(value.clone())
                     }
+                    (
+                        SafeCollectionOperation::MapInsert,
+                        [ValueType::Map(key, value), lookup, replacement],
+                    ) if key.as_ref() == *lookup && value.as_ref() == *replacement => {
+                        ValueType::Record(vec![
+                            RecordField {
+                                name: "previous".to_owned(),
+                                value_type: ValueType::Option(value.clone()),
+                            },
+                            RecordField {
+                                name: "values".to_owned(),
+                                value_type: ValueType::Map(key.clone(), value.clone()),
+                            },
+                        ])
+                    }
+                    (SafeCollectionOperation::MapRemove, [ValueType::Map(key, value), lookup])
+                        if key.as_ref() == *lookup =>
+                    {
+                        ValueType::Record(vec![
+                            RecordField {
+                                name: "removed".to_owned(),
+                                value_type: ValueType::Option(value.clone()),
+                            },
+                            RecordField {
+                                name: "values".to_owned(),
+                                value_type: ValueType::Map(key.clone(), value.clone()),
+                            },
+                        ])
+                    }
+                    (SafeCollectionOperation::MapKeys, [ValueType::Map(key, _)]) => {
+                        ValueType::List(key.clone())
+                    }
                     _ => {
                         return Err(error(
                             function_index,
@@ -3367,6 +3946,340 @@ fn verify_instruction_types(
                     destination_type(function, function_index, instruction_index, *destination)?,
                     &result,
                     "safe collection operation result",
+                )?;
+                initialized[*destination as usize] = true;
+            }
+            Instruction::CollectionCall {
+                destination,
+                operation,
+                arguments,
+            } => {
+                let types = arguments
+                    .iter()
+                    .map(|register| {
+                        initialized_type(
+                            function,
+                            &initialized,
+                            function_index,
+                            instruction_index,
+                            *register,
+                        )
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                let result = match (operation, types.as_slice()) {
+                    (CollectionOperation::Zip, values) if (2..=8).contains(&values.len()) => {
+                        let mut elements = Vec::with_capacity(values.len());
+                        for value in values {
+                            let ValueType::List(element) = value else {
+                                return Err(error(
+                                    function_index,
+                                    instruction_index,
+                                    "zip arguments must be Lists",
+                                ));
+                            };
+                            elements.push(element.as_ref().clone());
+                        }
+                        ValueType::List(Box::new(ValueType::Tuple(elements)))
+                    }
+                    (
+                        CollectionOperation::ListMin | CollectionOperation::ListMax,
+                        [ValueType::List(item)],
+                    ) if matches!(item.as_ref(), ValueType::Int | ValueType::Float) => {
+                        ValueType::Option(item.clone())
+                    }
+                    (CollectionOperation::ListSumInt, [ValueType::List(item)])
+                        if item.as_ref() == &ValueType::Int =>
+                    {
+                        ValueType::Option(Box::new(ValueType::Int))
+                    }
+                    (CollectionOperation::ListSumFloat, [ValueType::List(item)])
+                        if item.as_ref() == &ValueType::Float =>
+                    {
+                        ValueType::Float
+                    }
+                    _ => {
+                        return Err(error(
+                            function_index,
+                            instruction_index,
+                            "collection operation signature is invalid",
+                        ));
+                    }
+                };
+                require_type(
+                    function_index,
+                    instruction_index,
+                    destination_type(function, function_index, instruction_index, *destination)?,
+                    &result,
+                    "collection operation result",
+                )?;
+                initialized[*destination as usize] = true;
+            }
+            Instruction::ListFold {
+                destination,
+                values,
+                initial,
+                callback,
+            } => {
+                let ValueType::List(item) = initialized_type(
+                    function,
+                    &initialized,
+                    function_index,
+                    instruction_index,
+                    *values,
+                )?
+                else {
+                    return Err(error(
+                        function_index,
+                        instruction_index,
+                        "list fold values must be List",
+                    ));
+                };
+                let initial_type = initialized_type(
+                    function,
+                    &initialized,
+                    function_index,
+                    instruction_index,
+                    *initial,
+                )?;
+                let ValueType::Function {
+                    parameters,
+                    return_type,
+                    effects,
+                } = initialized_type(
+                    function,
+                    &initialized,
+                    function_index,
+                    instruction_index,
+                    *callback,
+                )?
+                else {
+                    return Err(error(
+                        function_index,
+                        instruction_index,
+                        "list fold callback must be Function",
+                    ));
+                };
+                if parameters.as_slice() != [initial_type.clone(), item.as_ref().clone()]
+                    || return_type.as_ref() != initial_type
+                    || !module.effect_sets[*effects as usize].is_empty()
+                {
+                    return Err(error(
+                        function_index,
+                        instruction_index,
+                        "list fold callback signature is invalid",
+                    ));
+                }
+                require_type(
+                    function_index,
+                    instruction_index,
+                    destination_type(function, function_index, instruction_index, *destination)?,
+                    initial_type,
+                    "list fold result",
+                )?;
+                initialized[*destination as usize] = true;
+            }
+            Instruction::ListCombinator {
+                destination,
+                operation,
+                values,
+                initial,
+                callback,
+                callback_result,
+            } => {
+                let ValueType::List(item) = initialized_type(
+                    function,
+                    &initialized,
+                    function_index,
+                    instruction_index,
+                    *values,
+                )?
+                else {
+                    return Err(error(
+                        function_index,
+                        instruction_index,
+                        "list combinator values must be List",
+                    ));
+                };
+                let ValueType::Function {
+                    parameters,
+                    return_type,
+                    effects,
+                } = initialized_type(
+                    function,
+                    &initialized,
+                    function_index,
+                    instruction_index,
+                    *callback,
+                )?
+                else {
+                    return Err(error(
+                        function_index,
+                        instruction_index,
+                        "list combinator callback must be Function",
+                    ));
+                };
+                if !module.effect_sets[*effects as usize].is_empty() {
+                    return Err(error(
+                        function_index,
+                        instruction_index,
+                        "list combinator callback must be pure",
+                    ));
+                }
+                let callback_type = destination_type(
+                    function,
+                    function_index,
+                    instruction_index,
+                    *callback_result,
+                )?;
+                require_type(
+                    function_index,
+                    instruction_index,
+                    callback_type,
+                    return_type,
+                    "list combinator callback result",
+                )?;
+                let result = match operation {
+                    ListCombinator::Map => {
+                        if parameters.as_slice() != [item.as_ref().clone()] {
+                            return Err(error(
+                                function_index,
+                                instruction_index,
+                                "list map callback signature is invalid",
+                            ));
+                        }
+                        ValueType::List(Box::new(return_type.as_ref().clone()))
+                    }
+                    ListCombinator::Filter => {
+                        if parameters.as_slice() != [item.as_ref().clone()]
+                            || return_type.as_ref() != &ValueType::Bool
+                        {
+                            return Err(error(
+                                function_index,
+                                instruction_index,
+                                "list filter callback signature is invalid",
+                            ));
+                        }
+                        ValueType::List(item.clone())
+                    }
+                    ListCombinator::FlatMap => {
+                        if parameters.as_slice() != [item.as_ref().clone()] {
+                            return Err(error(
+                                function_index,
+                                instruction_index,
+                                "list flat_map callback signature is invalid",
+                            ));
+                        }
+                        let ValueType::List(output) = return_type.as_ref() else {
+                            return Err(error(
+                                function_index,
+                                instruction_index,
+                                "list flat_map callback signature is invalid",
+                            ));
+                        };
+                        ValueType::List(output.clone())
+                    }
+                    ListCombinator::FilterMap => {
+                        if parameters.as_slice() != [item.as_ref().clone()] {
+                            return Err(error(
+                                function_index,
+                                instruction_index,
+                                "list filter_map callback signature is invalid",
+                            ));
+                        }
+                        let ValueType::Option(output) = return_type.as_ref() else {
+                            return Err(error(
+                                function_index,
+                                instruction_index,
+                                "list filter_map callback signature is invalid",
+                            ));
+                        };
+                        ValueType::List(output.clone())
+                    }
+                    ListCombinator::Find => {
+                        if parameters.as_slice() != [item.as_ref().clone()]
+                            || return_type.as_ref() != &ValueType::Bool
+                        {
+                            return Err(error(
+                                function_index,
+                                instruction_index,
+                                "list find callback signature is invalid",
+                            ));
+                        }
+                        ValueType::Option(item.clone())
+                    }
+                    ListCombinator::Any | ListCombinator::All => {
+                        if parameters.as_slice() != [item.as_ref().clone()]
+                            || return_type.as_ref() != &ValueType::Bool
+                        {
+                            return Err(error(
+                                function_index,
+                                instruction_index,
+                                "list predicate callback signature is invalid",
+                            ));
+                        }
+                        ValueType::Bool
+                    }
+                    ListCombinator::Partition => {
+                        if parameters.as_slice() != [item.as_ref().clone()]
+                            || return_type.as_ref() != &ValueType::Bool
+                        {
+                            return Err(error(
+                                function_index,
+                                instruction_index,
+                                "list partition callback signature is invalid",
+                            ));
+                        }
+                        ValueType::Record(vec![
+                            RecordField {
+                                name: "matched".to_owned(),
+                                value_type: ValueType::List(item.clone()),
+                            },
+                            RecordField {
+                                name: "rest".to_owned(),
+                                value_type: ValueType::List(item.clone()),
+                            },
+                        ])
+                    }
+                    ListCombinator::Scan => {
+                        let Some(initial) = initial else {
+                            return Err(error(
+                                function_index,
+                                instruction_index,
+                                "list scan requires an initial value",
+                            ));
+                        };
+                        let initial_type = initialized_type(
+                            function,
+                            &initialized,
+                            function_index,
+                            instruction_index,
+                            *initial,
+                        )?;
+                        if parameters.as_slice() != [initial_type.clone(), item.as_ref().clone()]
+                            || return_type.as_ref() != initial_type
+                        {
+                            return Err(error(
+                                function_index,
+                                instruction_index,
+                                "list scan callback signature is invalid",
+                            ));
+                        }
+                        ValueType::List(Box::new(initial_type.clone()))
+                    }
+                };
+                if *operation != ListCombinator::Scan && initial.is_some() {
+                    return Err(error(
+                        function_index,
+                        instruction_index,
+                        "only list scan accepts an initial value",
+                    ));
+                }
+                require_type(
+                    function_index,
+                    instruction_index,
+                    destination_type(function, function_index, instruction_index, *destination)?,
+                    &result,
+                    "list combinator result",
                 )?;
                 initialized[*destination as usize] = true;
             }
@@ -3544,6 +4457,57 @@ fn verify_instruction_types(
                 }
                 initialized[*destination as usize] = true;
             }
+            Instruction::TemplateRender {
+                destination,
+                template,
+                arguments,
+            } => {
+                let templates = templates.ok_or_else(|| {
+                    error(
+                        function_index,
+                        instruction_index,
+                        "template render requires a verified template table",
+                    )
+                })?;
+                let resource = templates.get(*template as usize).ok_or_else(|| {
+                    error(
+                        function_index,
+                        instruction_index,
+                        "template render resource is out of range",
+                    )
+                })?;
+                if arguments.len() != resource.holes.len() {
+                    return Err(error(
+                        function_index,
+                        instruction_index,
+                        "template render operand count does not match its signature",
+                    ));
+                }
+                for (register, hole) in arguments.iter().zip(&resource.holes) {
+                    let actual = initialized_type(
+                        function,
+                        &initialized,
+                        function_index,
+                        instruction_index,
+                        *register,
+                    )?;
+                    if template_scalar_type(actual) != &hole.value_type {
+                        return Err(error(
+                            function_index,
+                            instruction_index,
+                            "template render operand type does not match its signature",
+                        ));
+                    }
+                }
+                require_type(
+                    function_index,
+                    instruction_index,
+                    destination_type(function, function_index, instruction_index, *destination)?,
+                    &ValueType::String,
+                    "template render destination",
+                )?;
+                initialized[*destination as usize] = true;
+            }
             Instruction::TaskScopeEnter { scope } | Instruction::TaskScopeExit { scope } => {
                 if *scope == 0 {
                     return Err(error(
@@ -3560,6 +4524,421 @@ fn verify_instruction_types(
                     ));
                 }
             }
+            Instruction::RangeNew {
+                destination,
+                start,
+                end,
+                ..
+            } => {
+                require_type(
+                    function_index,
+                    instruction_index,
+                    initialized_type(
+                        function,
+                        &initialized,
+                        function_index,
+                        instruction_index,
+                        *start,
+                    )?,
+                    &ValueType::Int,
+                    "range start",
+                )?;
+                require_type(
+                    function_index,
+                    instruction_index,
+                    initialized_type(
+                        function,
+                        &initialized,
+                        function_index,
+                        instruction_index,
+                        *end,
+                    )?,
+                    &ValueType::Int,
+                    "range end",
+                )?;
+                require_type(
+                    function_index,
+                    instruction_index,
+                    destination_type(function, function_index, instruction_index, *destination)?,
+                    &ValueType::Range,
+                    "range destination",
+                )?;
+                initialized[*destination as usize] = true;
+            }
+            Instruction::RangeStart { destination, range }
+            | Instruction::RangeEnd { destination, range } => {
+                require_type(
+                    function_index,
+                    instruction_index,
+                    initialized_type(
+                        function,
+                        &initialized,
+                        function_index,
+                        instruction_index,
+                        *range,
+                    )?,
+                    &ValueType::Range,
+                    "range projection source",
+                )?;
+                require_type(
+                    function_index,
+                    instruction_index,
+                    destination_type(function, function_index, instruction_index, *destination)?,
+                    &ValueType::Int,
+                    "range projection destination",
+                )?;
+                initialized[*destination as usize] = true;
+            }
+            Instruction::RangeInclusive { destination, range } => {
+                require_type(
+                    function_index,
+                    instruction_index,
+                    initialized_type(
+                        function,
+                        &initialized,
+                        function_index,
+                        instruction_index,
+                        *range,
+                    )?,
+                    &ValueType::Range,
+                    "range projection source",
+                )?;
+                require_type(
+                    function_index,
+                    instruction_index,
+                    destination_type(function, function_index, instruction_index, *destination)?,
+                    &ValueType::Bool,
+                    "range projection destination",
+                )?;
+                initialized[*destination as usize] = true;
+            }
+            Instruction::SliceGet {
+                destination,
+                collection,
+                start,
+                end,
+            } => {
+                let source = initialized_type(
+                    function,
+                    &initialized,
+                    function_index,
+                    instruction_index,
+                    *collection,
+                )?;
+                require_type(
+                    function_index,
+                    instruction_index,
+                    initialized_type(
+                        function,
+                        &initialized,
+                        function_index,
+                        instruction_index,
+                        *start,
+                    )?,
+                    &ValueType::Int,
+                    "slice start",
+                )?;
+                require_type(
+                    function_index,
+                    instruction_index,
+                    initialized_type(
+                        function,
+                        &initialized,
+                        function_index,
+                        instruction_index,
+                        *end,
+                    )?,
+                    &ValueType::Int,
+                    "slice end",
+                )?;
+                let expected = match source {
+                    ValueType::List(item) => {
+                        ValueType::Option(Box::new(ValueType::List(item.clone())))
+                    }
+                    ValueType::Bytes => ValueType::Option(Box::new(ValueType::Bytes)),
+                    ValueType::String => ValueType::Option(Box::new(ValueType::String)),
+                    _ => {
+                        return Err(error(
+                            function_index,
+                            instruction_index,
+                            "slice source must be List, Bytes, or String",
+                        ));
+                    }
+                };
+                require_type(
+                    function_index,
+                    instruction_index,
+                    destination_type(function, function_index, instruction_index, *destination)?,
+                    &expected,
+                    "slice destination",
+                )?;
+                initialized[*destination as usize] = true;
+            }
+            Instruction::SequenceFromList {
+                destination,
+                values,
+            } => {
+                let ValueType::List(item) = initialized_type(
+                    function,
+                    &initialized,
+                    function_index,
+                    instruction_index,
+                    *values,
+                )?
+                else {
+                    return Err(error(
+                        function_index,
+                        instruction_index,
+                        "sequence source must be List",
+                    ));
+                };
+                require_type(
+                    function_index,
+                    instruction_index,
+                    destination_type(function, function_index, instruction_index, *destination)?,
+                    &ValueType::Sequence(item.clone()),
+                    "sequence destination",
+                )?;
+                initialized[*destination as usize] = true;
+            }
+            Instruction::SequenceMap {
+                destination,
+                sequence,
+                callback,
+            }
+            | Instruction::SequenceFilter {
+                destination,
+                sequence,
+                callback,
+            }
+            | Instruction::SequenceFind {
+                destination,
+                sequence,
+                callback,
+            }
+            | Instruction::SequenceAny {
+                destination,
+                sequence,
+                callback,
+            }
+            | Instruction::SequenceAll {
+                destination,
+                sequence,
+                callback,
+            } => {
+                let ValueType::Sequence(item) = initialized_type(
+                    function,
+                    &initialized,
+                    function_index,
+                    instruction_index,
+                    *sequence,
+                )?
+                else {
+                    return Err(error(
+                        function_index,
+                        instruction_index,
+                        "sequence operation source must be Sequence",
+                    ));
+                };
+                let ValueType::Function {
+                    parameters,
+                    return_type,
+                    effects,
+                } = initialized_type(
+                    function,
+                    &initialized,
+                    function_index,
+                    instruction_index,
+                    *callback,
+                )?
+                else {
+                    return Err(error(
+                        function_index,
+                        instruction_index,
+                        "sequence callback must be Function",
+                    ));
+                };
+                if !module.effect_sets[*effects as usize].is_empty() {
+                    return Err(error(
+                        function_index,
+                        instruction_index,
+                        "sequence callback must be pure",
+                    ));
+                }
+                if parameters.as_slice() != [item.as_ref().clone()]
+                    || (return_type.as_ref() != &ValueType::Bool
+                        && matches!(
+                            instruction,
+                            Instruction::SequenceFilter { .. }
+                                | Instruction::SequenceAny { .. }
+                                | Instruction::SequenceAll { .. }
+                                | Instruction::SequenceFind { .. }
+                        ))
+                {
+                    return Err(error(
+                        function_index,
+                        instruction_index,
+                        "sequence callback signature is invalid",
+                    ));
+                }
+                let destination_type =
+                    destination_type(function, function_index, instruction_index, *destination)?;
+                let expected = match instruction {
+                    Instruction::SequenceMap { .. } => ValueType::Sequence(return_type.clone()),
+                    Instruction::SequenceFilter { .. } => ValueType::Sequence(item.clone()),
+                    Instruction::SequenceFind { .. } => ValueType::Option(item.clone()),
+                    Instruction::SequenceAny { .. } | Instruction::SequenceAll { .. } => {
+                        ValueType::Bool
+                    }
+                    _ => unreachable!(),
+                };
+                require_type(
+                    function_index,
+                    instruction_index,
+                    destination_type,
+                    &expected,
+                    "sequence destination",
+                )?;
+                initialized[*destination as usize] = true;
+            }
+            Instruction::SequenceTake {
+                destination,
+                sequence,
+                count,
+            } => {
+                let ValueType::Sequence(item) = initialized_type(
+                    function,
+                    &initialized,
+                    function_index,
+                    instruction_index,
+                    *sequence,
+                )?
+                else {
+                    return Err(error(
+                        function_index,
+                        instruction_index,
+                        "sequence source must be Sequence",
+                    ));
+                };
+                require_type(
+                    function_index,
+                    instruction_index,
+                    initialized_type(
+                        function,
+                        &initialized,
+                        function_index,
+                        instruction_index,
+                        *count,
+                    )?,
+                    &ValueType::Int,
+                    "sequence count",
+                )?;
+                require_type(
+                    function_index,
+                    instruction_index,
+                    destination_type(function, function_index, instruction_index, *destination)?,
+                    &ValueType::Sequence(item.clone()),
+                    "sequence destination",
+                )?;
+                initialized[*destination as usize] = true;
+            }
+            Instruction::SequenceFold {
+                destination,
+                sequence,
+                initial,
+                callback,
+            } => {
+                let ValueType::Sequence(item) = initialized_type(
+                    function,
+                    &initialized,
+                    function_index,
+                    instruction_index,
+                    *sequence,
+                )?
+                else {
+                    return Err(error(
+                        function_index,
+                        instruction_index,
+                        "sequence source must be Sequence",
+                    ));
+                };
+                let initial_type = initialized_type(
+                    function,
+                    &initialized,
+                    function_index,
+                    instruction_index,
+                    *initial,
+                )?;
+                let ValueType::Function {
+                    parameters,
+                    return_type,
+                    effects,
+                } = initialized_type(
+                    function,
+                    &initialized,
+                    function_index,
+                    instruction_index,
+                    *callback,
+                )?
+                else {
+                    return Err(error(
+                        function_index,
+                        instruction_index,
+                        "sequence callback must be Function",
+                    ));
+                };
+                if !module.effect_sets[*effects as usize].is_empty() {
+                    return Err(error(
+                        function_index,
+                        instruction_index,
+                        "sequence callback must be pure",
+                    ));
+                }
+                if parameters.as_slice() != [initial_type.clone(), item.as_ref().clone()]
+                    || return_type.as_ref() != initial_type
+                {
+                    return Err(error(
+                        function_index,
+                        instruction_index,
+                        "sequence fold callback signature is invalid",
+                    ));
+                }
+                require_type(
+                    function_index,
+                    instruction_index,
+                    destination_type(function, function_index, instruction_index, *destination)?,
+                    return_type,
+                    "sequence fold destination",
+                )?;
+                initialized[*destination as usize] = true;
+            }
+            Instruction::SequenceToList {
+                destination,
+                sequence,
+            } => {
+                let ValueType::Sequence(item) = initialized_type(
+                    function,
+                    &initialized,
+                    function_index,
+                    instruction_index,
+                    *sequence,
+                )?
+                else {
+                    return Err(error(
+                        function_index,
+                        instruction_index,
+                        "sequence source must be Sequence",
+                    ));
+                };
+                require_type(
+                    function_index,
+                    instruction_index,
+                    destination_type(function, function_index, instruction_index, *destination)?,
+                    &ValueType::List(item.clone()),
+                    "sequence list destination",
+                )?;
+                initialized[*destination as usize] = true;
+            }
             Instruction::Stop { reason } => {
                 let reason_type = initialized_type(
                     function,
@@ -3574,6 +4953,22 @@ fn verify_instruction_types(
                     reason_type,
                     &ValueType::String,
                     "stop reason",
+                )?;
+            }
+            Instruction::Fail { reason } => {
+                let reason_type = initialized_type(
+                    function,
+                    &initialized,
+                    function_index,
+                    instruction_index,
+                    *reason,
+                )?;
+                require_type(
+                    function_index,
+                    instruction_index,
+                    reason_type,
+                    &ValueType::String,
+                    "fail reason",
                 )?;
             }
             Instruction::Return { source } => {
@@ -3603,6 +4998,13 @@ fn verify_instruction_types(
     }
 
     Ok(())
+}
+
+fn template_scalar_type(value_type: &ValueType) -> &ValueType {
+    match value_type {
+        ValueType::Newtype { underlying, .. } => template_scalar_type(underlying),
+        _ => value_type,
+    }
 }
 
 fn function_value_type(function: &Function) -> ValueType {
@@ -3650,6 +5052,10 @@ fn string_operation_signature(
         StringOperation::Join => (vec![list_string, string], ValueType::String),
         StringOperation::TrimAscii => (vec![string], ValueType::String),
         StringOperation::FromUtf8 => (vec![ValueType::Bytes], option_string),
+        StringOperation::Replace => (
+            vec![string.clone(), string.clone(), string],
+            ValueType::String,
+        ),
         StringOperation::TemplateConcat => {
             if argument_count == 0 {
                 return Err(error(
@@ -3662,6 +5068,33 @@ fn string_operation_signature(
         }
     };
     Ok(EffectOperationSignature { parameters, result })
+}
+
+fn standard_operation_signature(
+    _function_index: usize,
+    _instruction_index: usize,
+    operation: StandardOperation,
+) -> EffectOperationSignature {
+    let standard_error = crate::standard_error_type();
+    let (parameters, result) = match operation {
+        StandardOperation::ToInt | StandardOperation::TimeParseUtc => (
+            vec![ValueType::String],
+            ValueType::Result(Box::new(ValueType::Int), Box::new(standard_error)),
+        ),
+        StandardOperation::FloatFormat => (
+            vec![ValueType::Float, ValueType::Int],
+            ValueType::Result(Box::new(ValueType::String), Box::new(standard_error)),
+        ),
+        StandardOperation::TimeFormatUtc => (
+            vec![ValueType::Int],
+            ValueType::Result(Box::new(ValueType::String), Box::new(standard_error)),
+        ),
+        StandardOperation::TimeBucket => (
+            vec![ValueType::Int, ValueType::Int],
+            ValueType::Result(Box::new(ValueType::Int), Box::new(standard_error)),
+        ),
+    };
+    EffectOperationSignature { parameters, result }
 }
 
 #[allow(clippy::too_many_lines)]
@@ -3688,6 +5121,10 @@ fn effect_operation_signature(
         EffectOperation::HttpGet | EffectOperation::AgentMessage => {
             vec![ValueType::String]
         }
+        EffectOperation::ExecRun => vec![
+            ValueType::List(Box::new(ValueType::String)),
+            ValueType::Option(Box::new(ValueType::Bytes)),
+        ],
         EffectOperation::AgentAsk => {
             let [argument] = arguments else {
                 return Err(error(
@@ -3945,6 +5382,7 @@ fn require_effect_subset(
     }
 }
 
+#[allow(clippy::too_many_lines)]
 fn verify_module_value_type(
     module: &Module,
     value_type: &ValueType,
@@ -3960,6 +5398,15 @@ fn verify_module_value_type(
                 || contains_stored_sub_agent(element)
             {
                 return Err("Future and Task cannot be stored in aggregates");
+            }
+            verify_module_value_type(module, element, depth + 1)
+        }
+        ValueType::Sequence(element) => {
+            if contains_affine_type(element)
+                || contains_workspace(element)
+                || contains_stored_sub_agent(element)
+            {
+                return Err("Sequence element type cannot be affine or opaque");
             }
             verify_module_value_type(module, element, depth + 1)
         }
@@ -4029,6 +5476,38 @@ fn verify_module_value_type(
         ValueType::Future(value) | ValueType::Task(value) => {
             verify_module_value_type(module, value, depth + 1)
         }
+        ValueType::Int
+        | ValueType::Bool
+        | ValueType::Float
+        | ValueType::String
+        | ValueType::Bytes
+        | ValueType::Range
+        | ValueType::Unit
+        | ValueType::Never
+        | ValueType::Workspace
+        | ValueType::ExternalFsAccess
+        | ValueType::SubAgent
+        | ValueType::Unknown => Ok(()),
+        ValueType::Newtype { name, underlying } => {
+            let Some((owner, declaration)) = name.rsplit_once("::") else {
+                return Err("newtype identity must be fully qualified");
+            };
+            if owner.is_empty()
+                || owner.chars().any(char::is_control)
+                || declaration.is_empty()
+                || !declaration.bytes().enumerate().all(|(index, byte)| {
+                    byte == b'_'
+                        || byte.is_ascii_alphabetic()
+                        || index != 0 && byte.is_ascii_digit()
+                })
+            {
+                return Err("newtype identity is not canonical");
+            }
+            if !valid_newtype_underlying(underlying) {
+                return Err("newtype underlying type is not an inhabited non-affine value type");
+            }
+            verify_module_value_type(module, underlying, depth + 1)
+        }
         ValueType::Enum(id) => {
             if usize::try_from(*id).is_ok_and(|id| id < module.enum_types.len()) {
                 Ok(())
@@ -4036,24 +5515,14 @@ fn verify_module_value_type(
                 Err("enum type ID is out of range")
             }
         }
-        ValueType::Int
-        | ValueType::Bool
-        | ValueType::Float
-        | ValueType::String
-        | ValueType::Bytes
-        | ValueType::Unit
-        | ValueType::Never
-        | ValueType::Workspace
-        | ValueType::ExternalFsAccess
-        | ValueType::SubAgent
-        | ValueType::Unknown => Ok(()),
     }
 }
 
 fn contains_affine_type(value_type: &ValueType) -> bool {
     match value_type {
-        ValueType::Future(_) | ValueType::Task(_) => true,
+        ValueType::Future(_) | ValueType::Task(_) | ValueType::Sequence(_) => true,
         ValueType::List(value) | ValueType::Option(value) => contains_affine_type(value),
+        ValueType::Newtype { underlying, .. } => contains_affine_type(underlying),
         ValueType::Map(left, right) | ValueType::Result(left, right) => {
             contains_affine_type(left) || contains_affine_type(right)
         }
@@ -4072,6 +5541,7 @@ fn contains_sub_agent(value_type: &ValueType) -> bool {
         | ValueType::Option(value)
         | ValueType::Future(value)
         | ValueType::Task(value) => contains_sub_agent(value),
+        ValueType::Newtype { underlying, .. } => contains_sub_agent(underlying),
         ValueType::Map(left, right) | ValueType::Result(left, right) => {
             contains_sub_agent(left) || contains_sub_agent(right)
         }
@@ -4097,6 +5567,7 @@ pub(crate) fn contains_stored_sub_agent(value_type: &ValueType) -> bool {
         | ValueType::Option(value)
         | ValueType::Future(value)
         | ValueType::Task(value) => contains_stored_sub_agent(value),
+        ValueType::Newtype { underlying, .. } => contains_stored_sub_agent(underlying),
         ValueType::Map(left, right) | ValueType::Result(left, right) => {
             contains_stored_sub_agent(left) || contains_stored_sub_agent(right)
         }
@@ -4115,6 +5586,7 @@ fn contains_workspace(value_type: &ValueType) -> bool {
         | ValueType::Option(value)
         | ValueType::Future(value)
         | ValueType::Task(value) => contains_workspace(value),
+        ValueType::Newtype { underlying, .. } => contains_workspace(underlying),
         ValueType::Map(left, right) | ValueType::Result(left, right) => {
             contains_workspace(left) || contains_workspace(right)
         }
@@ -4140,7 +5612,42 @@ fn is_external_permission_result(value_type: &ValueType) -> bool {
 }
 
 const fn is_affine_type(value_type: &ValueType) -> bool {
-    matches!(value_type, ValueType::Future(_) | ValueType::Task(_))
+    match value_type {
+        ValueType::Future(_) | ValueType::Task(_) | ValueType::Sequence(_) => true,
+        ValueType::Newtype { underlying, .. } => is_affine_type(underlying),
+        _ => false,
+    }
+}
+
+fn valid_newtype_underlying(value_type: &ValueType) -> bool {
+    match value_type {
+        ValueType::Never
+        | ValueType::Unknown
+        | ValueType::Function { .. }
+        | ValueType::Future(_)
+        | ValueType::Task(_)
+        | ValueType::Sequence(_)
+        | ValueType::Workspace
+        | ValueType::ExternalFsAccess
+        | ValueType::SubAgent => false,
+        ValueType::List(value) | ValueType::Option(value) => valid_newtype_underlying(value),
+        ValueType::Map(key, value) | ValueType::Result(key, value) => {
+            valid_newtype_underlying(key) && valid_newtype_underlying(value)
+        }
+        ValueType::Tuple(values) => values.iter().all(valid_newtype_underlying),
+        ValueType::Record(fields) => fields
+            .iter()
+            .all(|field| valid_newtype_underlying(&field.value_type)),
+        ValueType::Newtype { underlying, .. } => valid_newtype_underlying(underlying),
+        ValueType::Int
+        | ValueType::Bool
+        | ValueType::Float
+        | ValueType::String
+        | ValueType::Bytes
+        | ValueType::Range
+        | ValueType::Unit
+        | ValueType::Enum(_) => true,
+    }
 }
 
 fn verify_record_layout(
@@ -4230,10 +5737,12 @@ fn is_concrete_type(
         | ValueType::Never
         | ValueType::Function { .. }
         | ValueType::Future(_)
-        | ValueType::Task(_) => false,
+        | ValueType::Task(_)
+        | ValueType::Sequence(_) => false,
         ValueType::List(element) | ValueType::Option(element) => {
             is_concrete_type(module, element, enum_cache)
         }
+        ValueType::Newtype { underlying, .. } => is_concrete_type(module, underlying, enum_cache),
         ValueType::Map(key, value) | ValueType::Result(key, value) => {
             is_concrete_type(module, key, enum_cache) && is_concrete_type(module, value, enum_cache)
         }
@@ -4271,6 +5780,7 @@ fn is_concrete_type(
         | ValueType::Float
         | ValueType::String
         | ValueType::Bytes
+        | ValueType::Range
         | ValueType::ExternalFsAccess
         | ValueType::Unit => true,
     }
@@ -4287,7 +5797,8 @@ fn is_equatable_in_module(
         | ValueType::Unknown
         | ValueType::Function { .. }
         | ValueType::Future(_)
-        | ValueType::Task(_) => false,
+        | ValueType::Task(_)
+        | ValueType::Sequence(_) => false,
         ValueType::Enum(id) => {
             let index = *id as usize;
             if let Some(equatable) = enum_cache.get(index).and_then(|value| *value) {
@@ -4314,6 +5825,9 @@ fn is_equatable_in_module(
         ValueType::List(element) | ValueType::Option(element) => {
             is_equatable_in_module(module, element, enum_cache)
         }
+        ValueType::Newtype { underlying, .. } => {
+            is_equatable_in_module(module, underlying, enum_cache)
+        }
         ValueType::Map(key, value) | ValueType::Result(key, value) => {
             is_equatable_in_module(module, key, enum_cache)
                 && is_equatable_in_module(module, value, enum_cache)
@@ -4329,6 +5843,7 @@ fn is_equatable_in_module(
         | ValueType::Float
         | ValueType::String
         | ValueType::Bytes
+        | ValueType::Range
         | ValueType::ExternalFsAccess
         | ValueType::Unit
         | ValueType::Never => true,

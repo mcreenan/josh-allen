@@ -1,6 +1,6 @@
 # JOSH protocol reference for AI agents
 
-Status: Operational guide for the current `josh/1.4` protocol
+Status: Operational guide for the current `josh/1.5` protocol
 
 Entry point: [`docs/agents/README.md`](../README.md). The implementation
 specification is authoritative for runtime behavior.
@@ -69,8 +69,8 @@ negotiated protocol version:
   "method": "initialize",
   "params": {
     "host": {"name": "allen-host", "version": "0.1.0"},
-    "protocol_versions": ["josh/1.4"],
-    "language_versions": ["0.1.0"],
+    "protocol_versions": ["josh/1.5"],
+    "language_versions": [">=0.1.0, <0.2.0"],
     "execution_mode": "attached",
     "invoking_session_id": "session-1",
     "limits": {
@@ -91,9 +91,10 @@ negotiated protocol version:
 stable `invoking_session_id`; unattended mode sends it as `null`. Limits and
 standard capability names are canonical, bounded, sorted, and unique.
 
-The runtime either selects `josh/1.4` or rejects initialization. Its result
-returns the runtime identity, effective limits, and these exact feature strings:
-`agent`, `external-fs-grants`, `model`, `record-replay`, `structured-prompts`,
+The runtime either selects `josh/1.5` and language `0.1.1` or rejects
+initialization. Its result returns the runtime identity, effective limits, and
+these exact feature strings:
+`agent`, `exec-run`, `external-fs-grants`, `model`, `record-replay`, `structured-prompts`,
 `catalog-provenance`, `structured-transcript`, `sub-agents`, `typed-responses`, `typed-tools`, and
 `user-interaction`.
 There is no minor-version fallback or alternate feature set.
@@ -114,6 +115,10 @@ Program and execution IDs are connection-local, opaque, bounded, and never
 reused. A failed load creates no program ID. A failed start creates no reusable
 execution ID. A prepared execution is consumed exactly once.
 
+The current artifact accepted by this protocol is bytecode v19. JSON decoding
+inside a program is a pure VM instruction and therefore adds no provider
+request, protocol method, feature string, replay entry, retry, or fallback.
+
 `execution/cancel` is idempotent for an active execution. Cancellation records
 bounded response tombstones so a late provider response remains detectable and
 cannot resume another operation. Disconnect cancels all active execution and
@@ -130,12 +135,24 @@ provider work.
 
 Source bundle paths are normalized relative UTF-8 paths, sorted and unique,
 with no absolute, empty, `.`, or `..` component. Source bytes, manifest bytes,
-file count, and aggregate bundle size are bounded. The runtime compiles source
-through the same compiler path used by the CLI.
+file count, and aggregate bundle size are bounded. Package bundles include each
+declared template at its canonical package-relative path. Non-source files use
+base64 content so the runner transports their exact bytes. The runtime rejects
+missing, undeclared, malformed, oversized, or lock-mismatched resources. It
+compiles the verified snapshot through the same compiler path used by the CLI;
+the host never reopens the caller's package directory.
 
 Artifacts must use the one current format and pass decoding plus independent
 verification. The result identifies the loaded program and its entries,
-capabilities, limits, origins, required tools, and boundary schemas.
+capabilities, limits, origins, required tools, and boundary schemas. Each entry
+also exposes `input_contract_digest` and `output_contract_digest`. These
+directional digests cover the strict schema and all effective named record
+invariant sites, so equal wire schemas can have different boundary contracts.
+The artifact verifier independently derives the exact required site set from
+the exhaustive nominal record-path provenance stored for each direction.
+It also returns sorted `exec_commands` and `exec_environment` lists from the
+verified manifest contract. These expose names and patterns, never environment
+values.
 
 ## 6. Tool catalog
 
@@ -167,12 +184,76 @@ error, unavailable, denied, cancelled, or a protocol failure. Schema failures
 become the generated tool `Error.Schema` result only where the language
 contract allows it.
 
+### 6.1 `josh run` Executor routing
+
+`josh run --executor` supplies a headless provider for `tool/invoke` only. Add
+one repeatable `--grant-tool <canonical-name>` for each exact tool grant.
+Supplying a tool grant without `--executor` is an argument error. The runner
+checks every grant against the frozen catalog, requires an object input and the
+fixed `{code, message}` declared-error contract for granted entries, and sends
+the grants in `execution/start`. Normal host preflight still requires the
+selected artifact and entry to declare each granted tool. With any tool grant,
+an executable named `executor` must resolve from `PATH` before entry execution.
+The MVP provider is Unix-only. A non-Unix runner rejects a nonempty tool-grant
+set before entry execution because user-only temporary-file modes and
+descendant process-group termination are required.
+
+For each invocation, the runner rechecks the execution ID, exact grant, tool
+version, catalog digest, and all three schema digests. It puts at most 1 MiB of
+validated JSON input in a private temporary file and directly starts this
+argument vector without a shell:
+
+```text
+executor call <exact-tool-name> @<private-input-file>
+```
+
+The runner reads bounded stdout and stderr concurrently. Stdout is limited to
+1 MiB, stderr to 64 KiB, and the request deadline bounds the child lifetime.
+It kills and waits for a child that exceeds the deadline, then removes the
+temporary input. Cancellation cannot prove that an upstream mutation did not
+commit.
+
+Accept only one exact JSON result:
+
+```json
+{"ok":true,"data":{}}
+```
+
+or:
+
+```json
+{"ok":false,"error":{"code":"not_found","message":"Issue not found"}}
+```
+
+Unknown envelope fields, multiple values, trailing non-whitespace, invalid
+UTF-8 or JSON, oversized output, nonzero exit, and contract mismatch fail
+closed. The fixed error object has no additional fields; `code` contains 1 to
+128 characters and `message` contains 1 to 2,048. Public errors are stable and
+omit raw input, output, stderr, credentials, and temporary paths. The runner
+never retries, calls `executor resume`, opens an approval flow, or falls back
+to a shell, agent, model, or another provider.
+
+This route uses the current `josh/1.5` `tool/invoke` contract unchanged. It
+does not add a method, feature string, or alternate protocol version. Recording
+stores the validated tool boundary result, and replay uses that result without
+starting Executor.
+
 ## 7. Execution start and result
 
 `execution/start` selects one loaded program entry and supplies exact JSON
 input. It may request only authority declared by the artifact. The runtime
 intersects capabilities, origins, tools, and limits with initialized host
 policy and rejects any broadening.
+
+The request also carries sorted unique `granted_exec` command patterns and
+`granted_exec_environment` names. Patterns and names use the current language
+contract. An effective command grant must be exact or narrower than a loaded
+request. Supplying a command grant implies `exec.run`; no second generic grant
+is sent. The host snapshots its environment once, copies only requested and
+granted names into an otherwise fixed minimal child environment, and resolves
+and pins all effective executables before accepting the execution. macOS
+therefore rejects live exec authority closed; replay remains available and
+must never spawn.
 
 The terminal result has exactly one channel:
 
@@ -184,6 +265,15 @@ The terminal result has exactly one channel:
 The runtime sends the final lifecycle event before the terminal response.
 Provider detail, credentials, paths, prompts, transcript content, tool data,
 and hidden reasoning never appear in public error messages.
+
+Source `fail(reason)` uses `failed` with code `program.failed`, never `stopped`.
+The runtime cancels and joins owned work before reporting it. Empty text is
+`program failed`; nonempty text is bounded to 2,048 UTF-8 bytes and passes
+through the stop-reason redaction policy. Oversized text fails with
+`resource.limit`. A host boundary with a narrower public message limit replaces
+the reason with fixed `program failed` instead of truncating it or widening the
+protocol. Replay records program failure as its own terminal channel, and hosts
+do not retry, resume, or fall back from it.
 
 ## 8. Invoking agent
 
@@ -276,7 +366,7 @@ must not produce a second terminal response or expose internal error detail.
 
 When writing or reviewing a JOSH client:
 
-1. Offer only `josh/1.4`.
+1. Offer only `josh/1.5`.
 2. Send `initialize` exactly once.
 3. Use strict length framing and exact JSON shapes.
 4. Keep request IDs unique per direction while active.

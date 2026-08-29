@@ -596,7 +596,7 @@ mod ast_matcher_tests {
     }
 }
 
-const AST_PATTERN_IMPORT_DECLARATION: AstPattern = AstPattern::Seq(&[AstPattern::Atom { kind: SyntaxKind::KwImport, label: None }, AstPattern::Atom { kind: SyntaxKind::LBrace, label: None }, AstPattern::Atom { kind: SyntaxKind::ImportName, label: None }, AstPattern::Rep(&AstPattern::Seq(&[AstPattern::Atom { kind: SyntaxKind::Comma, label: None }, AstPattern::Atom { kind: SyntaxKind::ImportName, label: None }])), AstPattern::Opt(&AstPattern::Atom { kind: SyntaxKind::Comma, label: None }), AstPattern::Atom { kind: SyntaxKind::RBrace, label: None }, AstPattern::Atom { kind: SyntaxKind::KwFrom, label: None }, AstPattern::Atom { kind: SyntaxKind::StringLiteral, label: Some(0) }, AstPattern::Atom { kind: SyntaxKind::Semi, label: None }]);
+const AST_PATTERN_IMPORT_DECLARATION: AstPattern = AstPattern::Seq(&[AstPattern::Atom { kind: SyntaxKind::KwImport, label: None }, AstPattern::Opt(&AstPattern::Atom { kind: SyntaxKind::Ident, label: Some(0) }), AstPattern::Atom { kind: SyntaxKind::LBrace, label: None }, AstPattern::Atom { kind: SyntaxKind::ImportName, label: None }, AstPattern::Rep(&AstPattern::Seq(&[AstPattern::Atom { kind: SyntaxKind::Comma, label: None }, AstPattern::Atom { kind: SyntaxKind::ImportName, label: None }])), AstPattern::Opt(&AstPattern::Atom { kind: SyntaxKind::Comma, label: None }), AstPattern::Atom { kind: SyntaxKind::RBrace, label: None }, AstPattern::Atom { kind: SyntaxKind::KwFrom, label: None }, AstPattern::Atom { kind: SyntaxKind::StringLiteral, label: Some(1) }, AstPattern::Atom { kind: SyntaxKind::Semi, label: None }]);
 
 const AST_PATTERN_MANIFEST_FIELD: AstPattern = AstPattern::Alt(&[AstPattern::Seq(&[AstPattern::Atom { kind: SyntaxKind::KwLanguage, label: None }, AstPattern::Atom { kind: SyntaxKind::Colon, label: None }, AstPattern::Atom { kind: SyntaxKind::StringLiteral, label: Some(0) }]), AstPattern::Seq(&[AstPattern::Atom { kind: SyntaxKind::KwEntry, label: None }, AstPattern::Atom { kind: SyntaxKind::Colon, label: None }, AstPattern::Atom { kind: SyntaxKind::Ident, label: Some(1) }]), AstPattern::Seq(&[AstPattern::Atom { kind: SyntaxKind::KwCapabilities, label: None }, AstPattern::Atom { kind: SyntaxKind::Colon, label: None }, AstPattern::Atom { kind: SyntaxKind::LBracket, label: None }, AstPattern::Opt(&AstPattern::Seq(&[AstPattern::Atom { kind: SyntaxKind::Capability, label: None }, AstPattern::Rep(&AstPattern::Seq(&[AstPattern::Atom { kind: SyntaxKind::Comma, label: None }, AstPattern::Atom { kind: SyntaxKind::Capability, label: None }])), AstPattern::Opt(&AstPattern::Atom { kind: SyntaxKind::Comma, label: None })])), AstPattern::Atom { kind: SyntaxKind::RBracket, label: None }]), AstPattern::Seq(&[AstPattern::Atom { kind: SyntaxKind::KwHttpOrigins, label: None }, AstPattern::Atom { kind: SyntaxKind::Colon, label: None }, AstPattern::Atom { kind: SyntaxKind::LBracket, label: None }, AstPattern::Opt(&AstPattern::Seq(&[AstPattern::Atom { kind: SyntaxKind::StringLiteral, label: Some(2) }, AstPattern::Rep(&AstPattern::Seq(&[AstPattern::Atom { kind: SyntaxKind::Comma, label: None }, AstPattern::Atom { kind: SyntaxKind::StringLiteral, label: Some(2) }])), AstPattern::Opt(&AstPattern::Atom { kind: SyntaxKind::Comma, label: None })])), AstPattern::Atom { kind: SyntaxKind::RBracket, label: None }]), AstPattern::Seq(&[AstPattern::Atom { kind: SyntaxKind::KwTools, label: None }, AstPattern::Atom { kind: SyntaxKind::Colon, label: None }, AstPattern::Atom { kind: SyntaxKind::LBrace, label: None }, AstPattern::Atom { kind: SyntaxKind::KwRequired, label: None }, AstPattern::Atom { kind: SyntaxKind::Colon, label: None }, AstPattern::Atom { kind: SyntaxKind::LBracket, label: None }, AstPattern::Opt(&AstPattern::Seq(&[AstPattern::Atom { kind: SyntaxKind::ToolRequirement, label: None }, AstPattern::Rep(&AstPattern::Seq(&[AstPattern::Atom { kind: SyntaxKind::Comma, label: None }, AstPattern::Atom { kind: SyntaxKind::ToolRequirement, label: None }])), AstPattern::Opt(&AstPattern::Atom { kind: SyntaxKind::Comma, label: None })])), AstPattern::Atom { kind: SyntaxKind::RBracket, label: None }, AstPattern::Opt(&AstPattern::Atom { kind: SyntaxKind::Comma, label: None }), AstPattern::Atom { kind: SyntaxKind::RBrace, label: None }])]);
 
@@ -604,35 +604,51 @@ const AST_PATTERN_TOOL_REQUIREMENT: AstPattern = AstPattern::Seq(&[AstPattern::A
 
 const AST_PATTERN_IMPORT_NAME: AstPattern = AstPattern::Seq(&[AstPattern::Atom { kind: SyntaxKind::Ident, label: Some(0) }, AstPattern::Opt(&AstPattern::Seq(&[AstPattern::Atom { kind: SyntaxKind::KwAs, label: None }, AstPattern::Atom { kind: SyntaxKind::Ident, label: Some(1) }]))]);
 
-const AST_PATTERN_STATEMENT: AstPattern = AstPattern::Alt(&[AstPattern::Seq(&[AstPattern::Alt(&[AstPattern::Atom { kind: SyntaxKind::KwLet, label: None }, AstPattern::Atom { kind: SyntaxKind::KwMut, label: None }]), AstPattern::Atom { kind: SyntaxKind::Ident, label: Some(0) }, AstPattern::Opt(&AstPattern::Seq(&[AstPattern::Atom { kind: SyntaxKind::Colon, label: None }, AstPattern::Atom { kind: SyntaxKind::Type, label: None }])), AstPattern::Atom { kind: SyntaxKind::Eq, label: None }, AstPattern::Atom { kind: SyntaxKind::Expression, label: Some(1) }, AstPattern::Atom { kind: SyntaxKind::Semi, label: None }]), AstPattern::Seq(&[AstPattern::Atom { kind: SyntaxKind::Ident, label: Some(2) }, AstPattern::Alt(&[AstPattern::Atom { kind: SyntaxKind::Eq, label: None }, AstPattern::Atom { kind: SyntaxKind::PlusEq, label: None }, AstPattern::Atom { kind: SyntaxKind::MinusEq, label: None }, AstPattern::Atom { kind: SyntaxKind::StarEq, label: None }, AstPattern::Atom { kind: SyntaxKind::SlashEq, label: None }, AstPattern::Atom { kind: SyntaxKind::PercentEq, label: None }]), AstPattern::Atom { kind: SyntaxKind::Expression, label: Some(3) }, AstPattern::Atom { kind: SyntaxKind::Semi, label: None }]), AstPattern::Seq(&[AstPattern::Atom { kind: SyntaxKind::KwReturn, label: None }, AstPattern::Opt(&AstPattern::Atom { kind: SyntaxKind::Expression, label: Some(4) }), AstPattern::Atom { kind: SyntaxKind::Semi, label: None }]), AstPattern::Atom { kind: SyntaxKind::ConditionalExpression, label: None }, AstPattern::Atom { kind: SyntaxKind::WhileStatement, label: None }, AstPattern::Atom { kind: SyntaxKind::LoopStatement, label: None }, AstPattern::Atom { kind: SyntaxKind::ForStatement, label: None }, AstPattern::Seq(&[AstPattern::Atom { kind: SyntaxKind::KwBreak, label: None }, AstPattern::Atom { kind: SyntaxKind::Semi, label: None }]), AstPattern::Seq(&[AstPattern::Atom { kind: SyntaxKind::KwContinue, label: None }, AstPattern::Atom { kind: SyntaxKind::Semi, label: None }])]);
+const AST_PATTERN_RECORD_DECLARATION: AstPattern = AstPattern::Seq(&[AstPattern::Opt(&AstPattern::Atom { kind: SyntaxKind::KwExport, label: None }), AstPattern::Atom { kind: SyntaxKind::KwRecord, label: None }, AstPattern::Atom { kind: SyntaxKind::Ident, label: None }, AstPattern::Atom { kind: SyntaxKind::LBrace, label: None }, AstPattern::Opt(&AstPattern::Seq(&[AstPattern::Atom { kind: SyntaxKind::RecordField, label: None }, AstPattern::Rep(&AstPattern::Seq(&[AstPattern::Opt(&AstPattern::Atom { kind: SyntaxKind::Comma, label: None }), AstPattern::Atom { kind: SyntaxKind::RecordField, label: None }])), AstPattern::Opt(&AstPattern::Atom { kind: SyntaxKind::Comma, label: None })])), AstPattern::Atom { kind: SyntaxKind::RBrace, label: None }, AstPattern::Opt(&AstPattern::Seq(&[AstPattern::Atom { kind: SyntaxKind::KwWhere, label: None }, AstPattern::Atom { kind: SyntaxKind::LBrace, label: None }, AstPattern::Atom { kind: SyntaxKind::Expression, label: Some(0) }, AstPattern::Atom { kind: SyntaxKind::RBrace, label: None }]))]);
+
+const AST_PATTERN_TEST_DECLARATION: AstPattern = AstPattern::Seq(&[AstPattern::Atom { kind: SyntaxKind::KwTest, label: None }, AstPattern::Atom { kind: SyntaxKind::StringLiteral, label: Some(0) }, AstPattern::Opt(&AstPattern::Atom { kind: SyntaxKind::EffectClause, label: None }), AstPattern::Atom { kind: SyntaxKind::Body, label: None }]);
+
+const AST_PATTERN_PARAMETER: AstPattern = AstPattern::Seq(&[AstPattern::Atom { kind: SyntaxKind::Ident, label: None }, AstPattern::Atom { kind: SyntaxKind::Colon, label: None }, AstPattern::Atom { kind: SyntaxKind::Type, label: None }, AstPattern::Opt(&AstPattern::Seq(&[AstPattern::Atom { kind: SyntaxKind::Eq, label: None }, AstPattern::Atom { kind: SyntaxKind::Expression, label: Some(0) }]))]);
+
+const AST_PATTERN_STATEMENT: AstPattern = AstPattern::Alt(&[AstPattern::Seq(&[AstPattern::Alt(&[AstPattern::Atom { kind: SyntaxKind::KwLet, label: None }, AstPattern::Atom { kind: SyntaxKind::KwMut, label: None }]), AstPattern::Atom { kind: SyntaxKind::Ident, label: Some(0) }, AstPattern::Opt(&AstPattern::Seq(&[AstPattern::Atom { kind: SyntaxKind::Colon, label: None }, AstPattern::Atom { kind: SyntaxKind::Type, label: None }])), AstPattern::Atom { kind: SyntaxKind::Eq, label: None }, AstPattern::Atom { kind: SyntaxKind::Expression, label: Some(1) }, AstPattern::Atom { kind: SyntaxKind::Semi, label: None }]), AstPattern::Seq(&[AstPattern::Atom { kind: SyntaxKind::Ident, label: Some(2) }, AstPattern::Alt(&[AstPattern::Atom { kind: SyntaxKind::Eq, label: None }, AstPattern::Atom { kind: SyntaxKind::PlusEq, label: None }, AstPattern::Atom { kind: SyntaxKind::MinusEq, label: None }, AstPattern::Atom { kind: SyntaxKind::StarEq, label: None }, AstPattern::Atom { kind: SyntaxKind::SlashEq, label: None }, AstPattern::Atom { kind: SyntaxKind::PercentEq, label: None }]), AstPattern::Atom { kind: SyntaxKind::Expression, label: Some(3) }, AstPattern::Atom { kind: SyntaxKind::Semi, label: None }]), AstPattern::Seq(&[AstPattern::Atom { kind: SyntaxKind::KwReturn, label: None }, AstPattern::Opt(&AstPattern::Atom { kind: SyntaxKind::Expression, label: Some(4) }), AstPattern::Atom { kind: SyntaxKind::Semi, label: None }]), AstPattern::Atom { kind: SyntaxKind::ConditionalExpression, label: None }, AstPattern::Atom { kind: SyntaxKind::WhileStatement, label: None }, AstPattern::Atom { kind: SyntaxKind::LoopStatement, label: None }, AstPattern::Atom { kind: SyntaxKind::ForStatement, label: None }, AstPattern::Atom { kind: SyntaxKind::LocalFunction, label: None }, AstPattern::Seq(&[AstPattern::Atom { kind: SyntaxKind::KwBreak, label: None }, AstPattern::Atom { kind: SyntaxKind::Semi, label: None }]), AstPattern::Seq(&[AstPattern::Atom { kind: SyntaxKind::KwContinue, label: None }, AstPattern::Atom { kind: SyntaxKind::Semi, label: None }])]);
 
 const AST_PATTERN_CONDITIONAL_EXPRESSION: AstPattern = AstPattern::Seq(&[AstPattern::Atom { kind: SyntaxKind::KwIf, label: None }, AstPattern::Atom { kind: SyntaxKind::LParen, label: None }, AstPattern::Atom { kind: SyntaxKind::Expression, label: Some(0) }, AstPattern::Atom { kind: SyntaxKind::RParen, label: None }, AstPattern::Atom { kind: SyntaxKind::Body, label: Some(1) }, AstPattern::Opt(&AstPattern::Seq(&[AstPattern::Atom { kind: SyntaxKind::KwElse, label: None }, AstPattern::Alt(&[AstPattern::Atom { kind: SyntaxKind::ConditionalExpression, label: Some(2) }, AstPattern::Atom { kind: SyntaxKind::Body, label: Some(3) }])]))]);
 
-const AST_PATTERN_FOR_STATEMENT: AstPattern = AstPattern::Seq(&[AstPattern::Atom { kind: SyntaxKind::KwFor, label: None }, AstPattern::Atom { kind: SyntaxKind::LoopBinding, label: None }, AstPattern::Atom { kind: SyntaxKind::KwIn, label: None }, AstPattern::Atom { kind: SyntaxKind::Expression, label: Some(0) }, AstPattern::Opt(&AstPattern::Seq(&[AstPattern::Atom { kind: SyntaxKind::DotDot, label: None }, AstPattern::Atom { kind: SyntaxKind::Expression, label: Some(1) }])), AstPattern::Atom { kind: SyntaxKind::Body, label: None }]);
+const AST_PATTERN_FOR_STATEMENT: AstPattern = AstPattern::Seq(&[AstPattern::Atom { kind: SyntaxKind::KwFor, label: None }, AstPattern::Atom { kind: SyntaxKind::LoopBinding, label: None }, AstPattern::Atom { kind: SyntaxKind::KwIn, label: None }, AstPattern::Atom { kind: SyntaxKind::Expression, label: Some(0) }, AstPattern::Atom { kind: SyntaxKind::Body, label: None }]);
 
 const AST_PATTERN_NAMED_TYPE: AstPattern = AstPattern::Seq(&[AstPattern::Atom { kind: SyntaxKind::Ident, label: Some(0) }, AstPattern::Rep(&AstPattern::Seq(&[AstPattern::Atom { kind: SyntaxKind::Dot, label: None }, AstPattern::Atom { kind: SyntaxKind::Ident, label: Some(0) }]))]);
 
-const AST_PATTERN_GENERIC_TYPE: AstPattern = AstPattern::Alt(&[AstPattern::Seq(&[AstPattern::Alt(&[AstPattern::Atom { kind: SyntaxKind::KwList, label: None }, AstPattern::Atom { kind: SyntaxKind::KwOption, label: None }, AstPattern::Atom { kind: SyntaxKind::KwFuture, label: None }, AstPattern::Atom { kind: SyntaxKind::KwTask, label: None }, AstPattern::Atom { kind: SyntaxKind::KwPromptType, label: None }]), AstPattern::Atom { kind: SyntaxKind::Lt, label: None }, AstPattern::Atom { kind: SyntaxKind::Type, label: Some(0) }, AstPattern::Atom { kind: SyntaxKind::Gt, label: None }]), AstPattern::Seq(&[AstPattern::Alt(&[AstPattern::Atom { kind: SyntaxKind::KwMapType, label: None }, AstPattern::Atom { kind: SyntaxKind::KwResult, label: None }]), AstPattern::Atom { kind: SyntaxKind::Lt, label: None }, AstPattern::Atom { kind: SyntaxKind::Type, label: Some(1) }, AstPattern::Atom { kind: SyntaxKind::Comma, label: None }, AstPattern::Atom { kind: SyntaxKind::Type, label: Some(2) }, AstPattern::Atom { kind: SyntaxKind::Gt, label: None }])]);
+const AST_PATTERN_GENERIC_TYPE: AstPattern = AstPattern::Alt(&[AstPattern::Seq(&[AstPattern::Alt(&[AstPattern::Atom { kind: SyntaxKind::KwList, label: None }, AstPattern::Atom { kind: SyntaxKind::KwOption, label: None }, AstPattern::Atom { kind: SyntaxKind::KwFuture, label: None }, AstPattern::Atom { kind: SyntaxKind::KwTask, label: None }, AstPattern::Atom { kind: SyntaxKind::KwPromptType, label: None }, AstPattern::Atom { kind: SyntaxKind::KwRange, label: None }, AstPattern::Atom { kind: SyntaxKind::KwSequence, label: None }]), AstPattern::Atom { kind: SyntaxKind::Lt, label: None }, AstPattern::Atom { kind: SyntaxKind::Type, label: Some(0) }, AstPattern::Atom { kind: SyntaxKind::Gt, label: None }]), AstPattern::Seq(&[AstPattern::Alt(&[AstPattern::Atom { kind: SyntaxKind::KwMapType, label: None }, AstPattern::Atom { kind: SyntaxKind::KwResult, label: None }]), AstPattern::Atom { kind: SyntaxKind::Lt, label: None }, AstPattern::Atom { kind: SyntaxKind::Type, label: Some(1) }, AstPattern::Atom { kind: SyntaxKind::Comma, label: None }, AstPattern::Atom { kind: SyntaxKind::Type, label: Some(2) }, AstPattern::Atom { kind: SyntaxKind::Gt, label: None }])]);
 
 const AST_PATTERN_FUNCTION_TYPE: AstPattern = AstPattern::Seq(&[AstPattern::Atom { kind: SyntaxKind::KwFn, label: None }, AstPattern::Atom { kind: SyntaxKind::LParen, label: None }, AstPattern::Opt(&AstPattern::Seq(&[AstPattern::Atom { kind: SyntaxKind::Type, label: Some(0) }, AstPattern::Rep(&AstPattern::Seq(&[AstPattern::Atom { kind: SyntaxKind::Comma, label: None }, AstPattern::Atom { kind: SyntaxKind::Type, label: Some(0) }])), AstPattern::Opt(&AstPattern::Atom { kind: SyntaxKind::Comma, label: None })])), AstPattern::Atom { kind: SyntaxKind::RParen, label: None }, AstPattern::Atom { kind: SyntaxKind::KwReturns, label: None }, AstPattern::Atom { kind: SyntaxKind::Type, label: Some(1) }, AstPattern::Opt(&AstPattern::Atom { kind: SyntaxKind::EffectClause, label: None })]);
 
-const AST_PATTERN_POSTFIX: AstPattern = AstPattern::Seq(&[AstPattern::Atom { kind: SyntaxKind::Primary, label: None }, AstPattern::Rep(&AstPattern::Alt(&[AstPattern::Seq(&[AstPattern::Atom { kind: SyntaxKind::LBracket, label: None }, AstPattern::Atom { kind: SyntaxKind::Expression, label: Some(0) }, AstPattern::Atom { kind: SyntaxKind::RBracket, label: None }]), AstPattern::Seq(&[AstPattern::Atom { kind: SyntaxKind::Dot, label: None }, AstPattern::Atom { kind: SyntaxKind::Ident, label: Some(1) }]), AstPattern::Seq(&[AstPattern::Opt(&AstPattern::Atom { kind: SyntaxKind::TypeArgument, label: Some(2) }), AstPattern::Atom { kind: SyntaxKind::LParen, label: None }, AstPattern::Opt(&AstPattern::Seq(&[AstPattern::Atom { kind: SyntaxKind::Expression, label: Some(3) }, AstPattern::Rep(&AstPattern::Seq(&[AstPattern::Atom { kind: SyntaxKind::Comma, label: None }, AstPattern::Atom { kind: SyntaxKind::Expression, label: Some(3) }])), AstPattern::Opt(&AstPattern::Atom { kind: SyntaxKind::Comma, label: None })])), AstPattern::Atom { kind: SyntaxKind::RParen, label: None }]), AstPattern::Atom { kind: SyntaxKind::Question, label: None }]))]);
+const AST_PATTERN_POSTFIX: AstPattern = AstPattern::Seq(&[AstPattern::Atom { kind: SyntaxKind::Primary, label: None }, AstPattern::Rep(&AstPattern::Alt(&[AstPattern::Atom { kind: SyntaxKind::Slice, label: None }, AstPattern::Seq(&[AstPattern::Atom { kind: SyntaxKind::Dot, label: None }, AstPattern::Atom { kind: SyntaxKind::Ident, label: Some(0) }]), AstPattern::Seq(&[AstPattern::Atom { kind: SyntaxKind::QuestionDot, label: None }, AstPattern::Atom { kind: SyntaxKind::Ident, label: Some(1) }]), AstPattern::Seq(&[AstPattern::Opt(&AstPattern::Atom { kind: SyntaxKind::TypeArgument, label: Some(2) }), AstPattern::Atom { kind: SyntaxKind::LParen, label: None }, AstPattern::Opt(&AstPattern::Seq(&[AstPattern::Atom { kind: SyntaxKind::CallArgument, label: None }, AstPattern::Rep(&AstPattern::Seq(&[AstPattern::Atom { kind: SyntaxKind::Comma, label: None }, AstPattern::Atom { kind: SyntaxKind::CallArgument, label: None }])), AstPattern::Opt(&AstPattern::Atom { kind: SyntaxKind::Comma, label: None })])), AstPattern::Atom { kind: SyntaxKind::RParen, label: None }, AstPattern::Opt(&AstPattern::Alt(&[AstPattern::Atom { kind: SyntaxKind::Closure, label: None }, AstPattern::Atom { kind: SyntaxKind::ShortClosure, label: None }]))]), AstPattern::Atom { kind: SyntaxKind::Question, label: None }]))]);
 
-const AST_PATTERN_TEMPLATE_LITERAL: AstPattern = AstPattern::Seq(&[AstPattern::Atom { kind: SyntaxKind::Backtick, label: Some(0) }, AstPattern::Rep(&AstPattern::Alt(&[AstPattern::Atom { kind: SyntaxKind::TemplateSegment, label: None }, AstPattern::Atom { kind: SyntaxKind::TemplateInterpolation, label: None }])), AstPattern::Atom { kind: SyntaxKind::Backtick, label: Some(1) }]);
+const AST_PATTERN_SLICE: AstPattern = AstPattern::Seq(&[AstPattern::Atom { kind: SyntaxKind::LBracket, label: None }, AstPattern::Atom { kind: SyntaxKind::Expression, label: Some(0) }, AstPattern::Atom { kind: SyntaxKind::RBracket, label: None }]);
+
+const AST_PATTERN_CALL_ARGUMENT: AstPattern = AstPattern::Seq(&[AstPattern::Opt(&AstPattern::Seq(&[AstPattern::Atom { kind: SyntaxKind::Ident, label: Some(0) }, AstPattern::Atom { kind: SyntaxKind::Colon, label: None }])), AstPattern::Alt(&[AstPattern::Atom { kind: SyntaxKind::Underscore, label: None }, AstPattern::Atom { kind: SyntaxKind::Expression, label: Some(1) }])]);
+
+const AST_PATTERN_SHORT_CLOSURE: AstPattern = AstPattern::Seq(&[AstPattern::Atom { kind: SyntaxKind::KwFn, label: None }, AstPattern::Atom { kind: SyntaxKind::LParen, label: None }, AstPattern::Opt(&AstPattern::Seq(&[AstPattern::Atom { kind: SyntaxKind::Ident, label: Some(0) }, AstPattern::Rep(&AstPattern::Seq(&[AstPattern::Atom { kind: SyntaxKind::Comma, label: None }, AstPattern::Atom { kind: SyntaxKind::Ident, label: Some(0) }])), AstPattern::Opt(&AstPattern::Atom { kind: SyntaxKind::Comma, label: None })])), AstPattern::Atom { kind: SyntaxKind::RParen, label: None }, AstPattern::Atom { kind: SyntaxKind::FatArrow, label: None }, AstPattern::Atom { kind: SyntaxKind::Expression, label: Some(1) }]);
+
+const AST_PATTERN_TEMPLATE_LITERAL: AstPattern = AstPattern::Seq(&[AstPattern::Alt(&[AstPattern::Atom { kind: SyntaxKind::Backtick, label: Some(0) }, AstPattern::Atom { kind: SyntaxKind::MultilineStringDelimiter, label: Some(1) }]), AstPattern::Rep(&AstPattern::Alt(&[AstPattern::Atom { kind: SyntaxKind::TemplateSegment, label: None }, AstPattern::Atom { kind: SyntaxKind::TemplateInterpolation, label: None }])), AstPattern::Alt(&[AstPattern::Atom { kind: SyntaxKind::Backtick, label: Some(2) }, AstPattern::Atom { kind: SyntaxKind::MultilineStringDelimiter, label: Some(3) }])]);
 
 const AST_PATTERN_ENUM_RECORD_CONSTRUCTOR: AstPattern = AstPattern::Seq(&[AstPattern::Atom { kind: SyntaxKind::Ident, label: Some(0) }, AstPattern::Atom { kind: SyntaxKind::Dot, label: None }, AstPattern::Atom { kind: SyntaxKind::Ident, label: Some(1) }, AstPattern::Atom { kind: SyntaxKind::LBrace, label: None }, AstPattern::Opt(&AstPattern::Seq(&[AstPattern::Atom { kind: SyntaxKind::RecordValueField, label: None }, AstPattern::Rep(&AstPattern::Seq(&[AstPattern::Opt(&AstPattern::Atom { kind: SyntaxKind::Comma, label: None }), AstPattern::Atom { kind: SyntaxKind::RecordValueField, label: None }])), AstPattern::Opt(&AstPattern::Atom { kind: SyntaxKind::Comma, label: None })])), AstPattern::Atom { kind: SyntaxKind::RBrace, label: None }]);
 
 const AST_PATTERN_QUALIFIED_ENUM: AstPattern = AstPattern::Seq(&[AstPattern::Atom { kind: SyntaxKind::Ident, label: Some(0) }, AstPattern::Atom { kind: SyntaxKind::Dot, label: None }, AstPattern::Atom { kind: SyntaxKind::Ident, label: Some(1) }]);
 
-const AST_PATTERN_MAP_LITERAL: AstPattern = AstPattern::Seq(&[AstPattern::Atom { kind: SyntaxKind::KwMap, label: None }, AstPattern::Atom { kind: SyntaxKind::LBrace, label: None }, AstPattern::Opt(&AstPattern::Seq(&[AstPattern::Atom { kind: SyntaxKind::Expression, label: Some(0) }, AstPattern::Atom { kind: SyntaxKind::Colon, label: None }, AstPattern::Atom { kind: SyntaxKind::Expression, label: Some(1) }, AstPattern::Rep(&AstPattern::Seq(&[AstPattern::Opt(&AstPattern::Atom { kind: SyntaxKind::Comma, label: None }), AstPattern::Atom { kind: SyntaxKind::Expression, label: Some(0) }, AstPattern::Atom { kind: SyntaxKind::Colon, label: None }, AstPattern::Atom { kind: SyntaxKind::Expression, label: Some(1) }])), AstPattern::Opt(&AstPattern::Atom { kind: SyntaxKind::Comma, label: None })])), AstPattern::Atom { kind: SyntaxKind::RBrace, label: None }]);
-
 const AST_PATTERN_MATCH_EXPRESSION: AstPattern = AstPattern::Seq(&[AstPattern::Atom { kind: SyntaxKind::KwMatch, label: None }, AstPattern::Atom { kind: SyntaxKind::Expression, label: Some(0) }, AstPattern::Atom { kind: SyntaxKind::LBrace, label: None }, AstPattern::Atom { kind: SyntaxKind::MatchArm, label: None }, AstPattern::Rep(&AstPattern::Seq(&[AstPattern::Opt(&AstPattern::Atom { kind: SyntaxKind::Comma, label: None }), AstPattern::Atom { kind: SyntaxKind::MatchArm, label: None }])), AstPattern::Opt(&AstPattern::Atom { kind: SyntaxKind::Comma, label: None }), AstPattern::Atom { kind: SyntaxKind::RBrace, label: None }]);
 
-const AST_PATTERN_PATTERN: AstPattern = AstPattern::Alt(&[AstPattern::Atom { kind: SyntaxKind::Underscore, label: None }, AstPattern::Atom { kind: SyntaxKind::KwTrue, label: None }, AstPattern::Atom { kind: SyntaxKind::KwFalse, label: None }, AstPattern::Atom { kind: SyntaxKind::RecordPattern, label: None }, AstPattern::Atom { kind: SyntaxKind::EnumPattern, label: None }, AstPattern::Atom { kind: SyntaxKind::KwNone, label: None }, AstPattern::Seq(&[AstPattern::Alt(&[AstPattern::Atom { kind: SyntaxKind::KwSome, label: None }, AstPattern::Atom { kind: SyntaxKind::KwOk, label: None }, AstPattern::Atom { kind: SyntaxKind::KwErr, label: None }]), AstPattern::Atom { kind: SyntaxKind::LParen, label: None }, AstPattern::Alt(&[AstPattern::Atom { kind: SyntaxKind::Ident, label: Some(0) }, AstPattern::Atom { kind: SyntaxKind::Underscore, label: None }]), AstPattern::Atom { kind: SyntaxKind::RParen, label: None }])]);
+const AST_PATTERN_RECORD_UPDATE_BASE: AstPattern = AstPattern::Seq(&[AstPattern::Atom { kind: SyntaxKind::DotDot, label: None }, AstPattern::Atom { kind: SyntaxKind::Expression, label: Some(0) }]);
 
-const AST_PATTERN_ENUM_PATTERN: AstPattern = AstPattern::Seq(&[AstPattern::Atom { kind: SyntaxKind::Ident, label: Some(0) }, AstPattern::Atom { kind: SyntaxKind::Dot, label: None }, AstPattern::Atom { kind: SyntaxKind::Ident, label: Some(1) }, AstPattern::Opt(&AstPattern::Alt(&[AstPattern::Seq(&[AstPattern::Atom { kind: SyntaxKind::LParen, label: None }, AstPattern::Alt(&[AstPattern::Atom { kind: SyntaxKind::Ident, label: Some(2) }, AstPattern::Atom { kind: SyntaxKind::Underscore, label: None }]), AstPattern::Rep(&AstPattern::Seq(&[AstPattern::Atom { kind: SyntaxKind::Comma, label: None }, AstPattern::Alt(&[AstPattern::Atom { kind: SyntaxKind::Ident, label: Some(2) }, AstPattern::Atom { kind: SyntaxKind::Underscore, label: None }])])), AstPattern::Opt(&AstPattern::Atom { kind: SyntaxKind::Comma, label: None }), AstPattern::Atom { kind: SyntaxKind::RParen, label: None }]), AstPattern::Seq(&[AstPattern::Atom { kind: SyntaxKind::LBrace, label: None }, AstPattern::Opt(&AstPattern::Seq(&[AstPattern::Atom { kind: SyntaxKind::PatternField, label: None }, AstPattern::Rep(&AstPattern::Seq(&[AstPattern::Opt(&AstPattern::Atom { kind: SyntaxKind::Comma, label: None }), AstPattern::Atom { kind: SyntaxKind::PatternField, label: None }])), AstPattern::Opt(&AstPattern::Atom { kind: SyntaxKind::Comma, label: None })])), AstPattern::Atom { kind: SyntaxKind::RBrace, label: None }])]))]);
+const AST_PATTERN_LIST_ITEM: AstPattern = AstPattern::Alt(&[AstPattern::Seq(&[AstPattern::Atom { kind: SyntaxKind::DotDot, label: None }, AstPattern::Atom { kind: SyntaxKind::Expression, label: Some(0) }]), AstPattern::Atom { kind: SyntaxKind::Expression, label: Some(1) }]);
 
-const AST_PATTERN_PATTERN_FIELD: AstPattern = AstPattern::Seq(&[AstPattern::Atom { kind: SyntaxKind::Ident, label: Some(0) }, AstPattern::Opt(&AstPattern::Seq(&[AstPattern::Atom { kind: SyntaxKind::Colon, label: None }, AstPattern::Alt(&[AstPattern::Atom { kind: SyntaxKind::Ident, label: Some(1) }, AstPattern::Atom { kind: SyntaxKind::Underscore, label: None }])]))]);
+const AST_PATTERN_MAP_ITEM: AstPattern = AstPattern::Alt(&[AstPattern::Seq(&[AstPattern::Atom { kind: SyntaxKind::DotDot, label: None }, AstPattern::Atom { kind: SyntaxKind::Expression, label: Some(0) }]), AstPattern::Seq(&[AstPattern::Atom { kind: SyntaxKind::Expression, label: Some(1) }, AstPattern::Atom { kind: SyntaxKind::Colon, label: None }, AstPattern::Atom { kind: SyntaxKind::Expression, label: Some(2) }])]);
+
+const AST_PATTERN_PATTERN_PRIMARY: AstPattern = AstPattern::Alt(&[AstPattern::Atom { kind: SyntaxKind::Underscore, label: None }, AstPattern::Atom { kind: SyntaxKind::KwTrue, label: None }, AstPattern::Atom { kind: SyntaxKind::KwFalse, label: None }, AstPattern::Atom { kind: SyntaxKind::Ident, label: Some(0) }, AstPattern::Atom { kind: SyntaxKind::RecordPattern, label: None }, AstPattern::Atom { kind: SyntaxKind::EnumPattern, label: None }, AstPattern::Atom { kind: SyntaxKind::PatternRange, label: None }, AstPattern::Atom { kind: SyntaxKind::KwNone, label: None }, AstPattern::Seq(&[AstPattern::Alt(&[AstPattern::Atom { kind: SyntaxKind::KwSome, label: None }, AstPattern::Atom { kind: SyntaxKind::KwOk, label: None }, AstPattern::Atom { kind: SyntaxKind::KwErr, label: None }]), AstPattern::Atom { kind: SyntaxKind::LParen, label: None }, AstPattern::Atom { kind: SyntaxKind::Pattern, label: None }, AstPattern::Atom { kind: SyntaxKind::RParen, label: None }])]);
+
+const AST_PATTERN_ENUM_PATTERN: AstPattern = AstPattern::Seq(&[AstPattern::Atom { kind: SyntaxKind::Ident, label: Some(0) }, AstPattern::Atom { kind: SyntaxKind::Dot, label: None }, AstPattern::Atom { kind: SyntaxKind::Ident, label: Some(1) }, AstPattern::Opt(&AstPattern::Alt(&[AstPattern::Seq(&[AstPattern::Atom { kind: SyntaxKind::LParen, label: None }, AstPattern::Atom { kind: SyntaxKind::Pattern, label: None }, AstPattern::Rep(&AstPattern::Seq(&[AstPattern::Atom { kind: SyntaxKind::Comma, label: None }, AstPattern::Atom { kind: SyntaxKind::Pattern, label: None }])), AstPattern::Opt(&AstPattern::Atom { kind: SyntaxKind::Comma, label: None }), AstPattern::Atom { kind: SyntaxKind::RParen, label: None }]), AstPattern::Seq(&[AstPattern::Atom { kind: SyntaxKind::LBrace, label: None }, AstPattern::Opt(&AstPattern::Seq(&[AstPattern::Atom { kind: SyntaxKind::PatternField, label: None }, AstPattern::Rep(&AstPattern::Seq(&[AstPattern::Opt(&AstPattern::Atom { kind: SyntaxKind::Comma, label: None }), AstPattern::Atom { kind: SyntaxKind::PatternField, label: None }])), AstPattern::Opt(&AstPattern::Atom { kind: SyntaxKind::Comma, label: None })])), AstPattern::Atom { kind: SyntaxKind::RBrace, label: None }])]))]);
+
+const AST_PATTERN_PATTERN_FIELD: AstPattern = AstPattern::Seq(&[AstPattern::Atom { kind: SyntaxKind::Ident, label: Some(0) }, AstPattern::Opt(&AstPattern::Seq(&[AstPattern::Atom { kind: SyntaxKind::Colon, label: None }, AstPattern::Atom { kind: SyntaxKind::Pattern, label: None }]))]);
 
 const AST_PATTERN_PROMPT_FIELD: AstPattern = AstPattern::Alt(&[AstPattern::Seq(&[AstPattern::Atom { kind: SyntaxKind::KwSystem, label: None }, AstPattern::Atom { kind: SyntaxKind::Colon, label: None }, AstPattern::Atom { kind: SyntaxKind::Expression, label: Some(0) }]), AstPattern::Seq(&[AstPattern::Atom { kind: SyntaxKind::KwContext, label: None }, AstPattern::Atom { kind: SyntaxKind::Colon, label: None }, AstPattern::Atom { kind: SyntaxKind::Expression, label: Some(1) }]), AstPattern::Seq(&[AstPattern::Atom { kind: SyntaxKind::KwData, label: None }, AstPattern::Atom { kind: SyntaxKind::Colon, label: None }, AstPattern::Atom { kind: SyntaxKind::Expression, label: Some(2) }]), AstPattern::Seq(&[AstPattern::Atom { kind: SyntaxKind::KwOutput, label: None }, AstPattern::Atom { kind: SyntaxKind::Colon, label: None }, AstPattern::Atom { kind: SyntaxKind::Type, label: Some(3) }]), AstPattern::Seq(&[AstPattern::Atom { kind: SyntaxKind::KwPolicy, label: None }, AstPattern::Atom { kind: SyntaxKind::Colon, label: None }, AstPattern::Atom { kind: SyntaxKind::LBrace, label: None }, AstPattern::Atom { kind: SyntaxKind::KwMaxAttempts, label: None }, AstPattern::Atom { kind: SyntaxKind::Colon, label: None }, AstPattern::Atom { kind: SyntaxKind::IntLiteral, label: Some(4) }, AstPattern::Opt(&AstPattern::Atom { kind: SyntaxKind::Comma, label: None }), AstPattern::Atom { kind: SyntaxKind::RBrace, label: None }])]);
 
@@ -758,6 +774,11 @@ impl ImportDeclaration {
     }
 
     #[must_use]
+    pub fn extension_keyword_token(&self) -> Option<SyntaxToken> {
+        ast_fields(&self.syntax, &AST_PATTERN_IMPORT_DECLARATION, 0).into_iter().next().flatten().and_then(rowan::NodeOrToken::into_token)
+    }
+
+    #[must_use]
     pub fn l_brace_token(&self) -> Option<SyntaxToken> {
         support::token(&self.syntax, SyntaxKind::LBrace)
     }
@@ -784,7 +805,7 @@ impl ImportDeclaration {
 
     #[must_use]
     pub fn import_source_token(&self) -> Option<SyntaxToken> {
-        ast_fields(&self.syntax, &AST_PATTERN_IMPORT_DECLARATION, 0).into_iter().next().flatten().and_then(rowan::NodeOrToken::into_token)
+        ast_fields(&self.syntax, &AST_PATTERN_IMPORT_DECLARATION, 1).into_iter().next().flatten().and_then(rowan::NodeOrToken::into_token)
     }
 
     #[must_use]
@@ -832,7 +853,22 @@ impl Declaration {
     }
 
     #[must_use]
+    pub fn newtype_declaration(&self) -> Option<NewtypeDeclaration> {
+        support::child(&self.syntax)
+    }
+
+    #[must_use]
+    pub fn const_declaration(&self) -> Option<ConstDeclaration> {
+        support::child(&self.syntax)
+    }
+
+    #[must_use]
     pub fn function_declaration(&self) -> Option<FunctionDeclaration> {
+        support::child(&self.syntax)
+    }
+
+    #[must_use]
+    pub fn test_declaration(&self) -> Option<TestDeclaration> {
         support::child(&self.syntax)
     }
 }
@@ -1132,8 +1168,8 @@ impl RecordDeclaration {
     }
 
     #[must_use]
-    pub fn l_brace_token(&self) -> Option<SyntaxToken> {
-        support::token(&self.syntax, SyntaxKind::LBrace)
+    pub fn l_brace_tokens(&self) -> impl Iterator<Item = SyntaxToken> + '_ {
+        self.syntax.children_with_tokens().filter_map(rowan::NodeOrToken::into_token).filter(|token| token.kind() == SyntaxKind::LBrace)
     }
 
     #[must_use]
@@ -1147,8 +1183,18 @@ impl RecordDeclaration {
     }
 
     #[must_use]
-    pub fn r_brace_token(&self) -> Option<SyntaxToken> {
-        support::token(&self.syntax, SyntaxKind::RBrace)
+    pub fn r_brace_tokens(&self) -> impl Iterator<Item = SyntaxToken> + '_ {
+        self.syntax.children_with_tokens().filter_map(rowan::NodeOrToken::into_token).filter(|token| token.kind() == SyntaxKind::RBrace)
+    }
+
+    #[must_use]
+    pub fn where_token(&self) -> Option<SyntaxToken> {
+        support::token(&self.syntax, SyntaxKind::KwWhere)
+    }
+
+    #[must_use]
+    pub fn predicate(&self) -> Option<Expression> {
+        ast_fields(&self.syntax, &AST_PATTERN_RECORD_DECLARATION, 0).into_iter().next().flatten().and_then(rowan::NodeOrToken::into_node).and_then(Expression::cast)
     }
 }
 
@@ -1261,6 +1307,119 @@ impl TypeAliasDeclaration {
 }
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub struct NewtypeDeclaration { syntax: SyntaxNode }
+
+impl AstNode for NewtypeDeclaration {
+    type Language = AllenLanguage;
+
+    fn can_cast(kind: SyntaxKind) -> bool { kind == SyntaxKind::NewtypeDeclaration }
+
+    fn cast(syntax: SyntaxNode) -> Option<Self> { Self::can_cast(syntax.kind()).then_some(Self { syntax }) }
+
+    fn syntax(&self) -> &SyntaxNode { &self.syntax }
+}
+
+impl NewtypeDeclaration {
+    #[must_use]
+    pub fn children(&self) -> impl Iterator<Item = SyntaxNode> + '_ { self.syntax.children() }
+
+    /// Returns recovery nodes and tokens owned directly by this grammar node.
+    #[must_use]
+    pub fn errors(&self) -> impl Iterator<Item = AstError> + '_ {
+        self.syntax.children_with_tokens().filter_map(AstError::cast)
+    }
+
+    #[must_use]
+    pub fn export_token(&self) -> Option<SyntaxToken> {
+        support::token(&self.syntax, SyntaxKind::KwExport)
+    }
+
+    #[must_use]
+    pub fn newtype_token(&self) -> Option<SyntaxToken> {
+        support::token(&self.syntax, SyntaxKind::KwNewtype)
+    }
+
+    #[must_use]
+    pub fn ident_token(&self) -> Option<SyntaxToken> {
+        support::token(&self.syntax, SyntaxKind::Ident)
+    }
+
+    #[must_use]
+    pub fn eq_token(&self) -> Option<SyntaxToken> {
+        support::token(&self.syntax, SyntaxKind::Eq)
+    }
+
+    #[must_use]
+    pub fn ty(&self) -> Option<Type> {
+        support::child(&self.syntax)
+    }
+}
+
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub struct ConstDeclaration { syntax: SyntaxNode }
+
+impl AstNode for ConstDeclaration {
+    type Language = AllenLanguage;
+
+    fn can_cast(kind: SyntaxKind) -> bool { kind == SyntaxKind::ConstDeclaration }
+
+    fn cast(syntax: SyntaxNode) -> Option<Self> { Self::can_cast(syntax.kind()).then_some(Self { syntax }) }
+
+    fn syntax(&self) -> &SyntaxNode { &self.syntax }
+}
+
+impl ConstDeclaration {
+    #[must_use]
+    pub fn children(&self) -> impl Iterator<Item = SyntaxNode> + '_ { self.syntax.children() }
+
+    /// Returns recovery nodes and tokens owned directly by this grammar node.
+    #[must_use]
+    pub fn errors(&self) -> impl Iterator<Item = AstError> + '_ {
+        self.syntax.children_with_tokens().filter_map(AstError::cast)
+    }
+
+    #[must_use]
+    pub fn export_token(&self) -> Option<SyntaxToken> {
+        support::token(&self.syntax, SyntaxKind::KwExport)
+    }
+
+    #[must_use]
+    pub fn const_token(&self) -> Option<SyntaxToken> {
+        support::token(&self.syntax, SyntaxKind::KwConst)
+    }
+
+    #[must_use]
+    pub fn ident_token(&self) -> Option<SyntaxToken> {
+        support::token(&self.syntax, SyntaxKind::Ident)
+    }
+
+    #[must_use]
+    pub fn colon_token(&self) -> Option<SyntaxToken> {
+        support::token(&self.syntax, SyntaxKind::Colon)
+    }
+
+    #[must_use]
+    pub fn ty(&self) -> Option<Type> {
+        support::child(&self.syntax)
+    }
+
+    #[must_use]
+    pub fn eq_token(&self) -> Option<SyntaxToken> {
+        support::token(&self.syntax, SyntaxKind::Eq)
+    }
+
+    #[must_use]
+    pub fn expression(&self) -> Option<Expression> {
+        support::child(&self.syntax)
+    }
+
+    #[must_use]
+    pub fn semi_token(&self) -> Option<SyntaxToken> {
+        support::token(&self.syntax, SyntaxKind::Semi)
+    }
+}
+
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct FunctionDeclaration { syntax: SyntaxNode }
 
 impl AstNode for FunctionDeclaration {
@@ -1350,6 +1509,50 @@ impl FunctionDeclaration {
 }
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub struct TestDeclaration { syntax: SyntaxNode }
+
+impl AstNode for TestDeclaration {
+    type Language = AllenLanguage;
+
+    fn can_cast(kind: SyntaxKind) -> bool { kind == SyntaxKind::TestDeclaration }
+
+    fn cast(syntax: SyntaxNode) -> Option<Self> { Self::can_cast(syntax.kind()).then_some(Self { syntax }) }
+
+    fn syntax(&self) -> &SyntaxNode { &self.syntax }
+}
+
+impl TestDeclaration {
+    #[must_use]
+    pub fn children(&self) -> impl Iterator<Item = SyntaxNode> + '_ { self.syntax.children() }
+
+    /// Returns recovery nodes and tokens owned directly by this grammar node.
+    #[must_use]
+    pub fn errors(&self) -> impl Iterator<Item = AstError> + '_ {
+        self.syntax.children_with_tokens().filter_map(AstError::cast)
+    }
+
+    #[must_use]
+    pub fn test_token(&self) -> Option<SyntaxToken> {
+        support::token(&self.syntax, SyntaxKind::KwTest)
+    }
+
+    #[must_use]
+    pub fn test_name_token(&self) -> Option<SyntaxToken> {
+        ast_fields(&self.syntax, &AST_PATTERN_TEST_DECLARATION, 0).into_iter().next().flatten().and_then(rowan::NodeOrToken::into_token)
+    }
+
+    #[must_use]
+    pub fn effect_clause(&self) -> Option<EffectClause> {
+        support::child(&self.syntax)
+    }
+
+    #[must_use]
+    pub fn body(&self) -> Option<Body> {
+        support::child(&self.syntax)
+    }
+}
+
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct RecordField { syntax: SyntaxNode }
 
 impl AstNode for RecordField {
@@ -1384,6 +1587,35 @@ impl RecordField {
 
     #[must_use]
     pub fn ty(&self) -> Option<Type> {
+        support::child(&self.syntax)
+    }
+}
+
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub struct Expression { syntax: SyntaxNode }
+
+impl AstNode for Expression {
+    type Language = AllenLanguage;
+
+    fn can_cast(kind: SyntaxKind) -> bool { kind == SyntaxKind::Expression }
+
+    fn cast(syntax: SyntaxNode) -> Option<Self> { Self::can_cast(syntax.kind()).then_some(Self { syntax }) }
+
+    fn syntax(&self) -> &SyntaxNode { &self.syntax }
+}
+
+impl Expression {
+    #[must_use]
+    pub fn children(&self) -> impl Iterator<Item = SyntaxNode> + '_ { self.syntax.children() }
+
+    /// Returns recovery nodes and tokens owned directly by this grammar node.
+    #[must_use]
+    pub fn errors(&self) -> impl Iterator<Item = AstError> + '_ {
+        self.syntax.children_with_tokens().filter_map(AstError::cast)
+    }
+
+    #[must_use]
+    pub fn range(&self) -> Option<Range> {
         support::child(&self.syntax)
     }
 }
@@ -1581,6 +1813,16 @@ impl Parameter {
     #[must_use]
     pub fn ty(&self) -> Option<Type> {
         support::child(&self.syntax)
+    }
+
+    #[must_use]
+    pub fn eq_token(&self) -> Option<SyntaxToken> {
+        support::token(&self.syntax, SyntaxKind::Eq)
+    }
+
+    #[must_use]
+    pub fn default_value(&self) -> Option<Expression> {
+        ast_fields(&self.syntax, &AST_PATTERN_PARAMETER, 0).into_iter().next().flatten().and_then(rowan::NodeOrToken::into_node).and_then(Expression::cast)
     }
 }
 
@@ -1845,6 +2087,11 @@ impl Statement {
     }
 
     #[must_use]
+    pub fn local_function(&self) -> Option<LocalFunction> {
+        support::child(&self.syntax)
+    }
+
+    #[must_use]
     pub fn break_token(&self) -> Option<SyntaxToken> {
         support::token(&self.syntax, SyntaxKind::KwBreak)
     }
@@ -1852,35 +2099,6 @@ impl Statement {
     #[must_use]
     pub fn continue_token(&self) -> Option<SyntaxToken> {
         support::token(&self.syntax, SyntaxKind::KwContinue)
-    }
-}
-
-#[derive(Clone, Debug, Eq, Hash, PartialEq)]
-pub struct Expression { syntax: SyntaxNode }
-
-impl AstNode for Expression {
-    type Language = AllenLanguage;
-
-    fn can_cast(kind: SyntaxKind) -> bool { kind == SyntaxKind::Expression }
-
-    fn cast(syntax: SyntaxNode) -> Option<Self> { Self::can_cast(syntax.kind()).then_some(Self { syntax }) }
-
-    fn syntax(&self) -> &SyntaxNode { &self.syntax }
-}
-
-impl Expression {
-    #[must_use]
-    pub fn children(&self) -> impl Iterator<Item = SyntaxNode> + '_ { self.syntax.children() }
-
-    /// Returns recovery nodes and tokens owned directly by this grammar node.
-    #[must_use]
-    pub fn errors(&self) -> impl Iterator<Item = AstError> + '_ {
-        self.syntax.children_with_tokens().filter_map(AstError::cast)
-    }
-
-    #[must_use]
-    pub fn disjunction(&self) -> Option<Disjunction> {
-        support::child(&self.syntax)
     }
 }
 
@@ -2075,13 +2293,77 @@ impl ForStatement {
     }
 
     #[must_use]
-    pub fn dot_dot_token(&self) -> Option<SyntaxToken> {
-        support::token(&self.syntax, SyntaxKind::DotDot)
+    pub fn body(&self) -> Option<Body> {
+        support::child(&self.syntax)
+    }
+}
+
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub struct LocalFunction { syntax: SyntaxNode }
+
+impl AstNode for LocalFunction {
+    type Language = AllenLanguage;
+
+    fn can_cast(kind: SyntaxKind) -> bool { kind == SyntaxKind::LocalFunction }
+
+    fn cast(syntax: SyntaxNode) -> Option<Self> { Self::can_cast(syntax.kind()).then_some(Self { syntax }) }
+
+    fn syntax(&self) -> &SyntaxNode { &self.syntax }
+}
+
+impl LocalFunction {
+    #[must_use]
+    pub fn children(&self) -> impl Iterator<Item = SyntaxNode> + '_ { self.syntax.children() }
+
+    /// Returns recovery nodes and tokens owned directly by this grammar node.
+    #[must_use]
+    pub fn errors(&self) -> impl Iterator<Item = AstError> + '_ {
+        self.syntax.children_with_tokens().filter_map(AstError::cast)
     }
 
     #[must_use]
-    pub fn range_end(&self) -> Option<Expression> {
-        ast_fields(&self.syntax, &AST_PATTERN_FOR_STATEMENT, 1).into_iter().next().flatten().and_then(rowan::NodeOrToken::into_node).and_then(Expression::cast)
+    pub fn fn_token(&self) -> Option<SyntaxToken> {
+        support::token(&self.syntax, SyntaxKind::KwFn)
+    }
+
+    #[must_use]
+    pub fn ident_token(&self) -> Option<SyntaxToken> {
+        support::token(&self.syntax, SyntaxKind::Ident)
+    }
+
+    #[must_use]
+    pub fn l_paren_token(&self) -> Option<SyntaxToken> {
+        support::token(&self.syntax, SyntaxKind::LParen)
+    }
+
+    #[must_use]
+    pub fn parameters(&self) -> AstChildren<Parameter> {
+        support::children(&self.syntax)
+    }
+
+    #[must_use]
+    pub fn comma_tokens(&self) -> impl Iterator<Item = SyntaxToken> + '_ {
+        self.syntax.children_with_tokens().filter_map(rowan::NodeOrToken::into_token).filter(|token| token.kind() == SyntaxKind::Comma)
+    }
+
+    #[must_use]
+    pub fn r_paren_token(&self) -> Option<SyntaxToken> {
+        support::token(&self.syntax, SyntaxKind::RParen)
+    }
+
+    #[must_use]
+    pub fn returns_token(&self) -> Option<SyntaxToken> {
+        support::token(&self.syntax, SyntaxKind::KwReturns)
+    }
+
+    #[must_use]
+    pub fn ty(&self) -> Option<Type> {
+        support::child(&self.syntax)
+    }
+
+    #[must_use]
+    pub fn effect_clause(&self) -> Option<EffectClause> {
+        support::child(&self.syntax)
     }
 
     #[must_use]
@@ -2258,6 +2540,16 @@ impl GenericType {
     #[must_use]
     pub fn prompt_type_token(&self) -> Option<SyntaxToken> {
         support::token(&self.syntax, SyntaxKind::KwPromptType)
+    }
+
+    #[must_use]
+    pub fn range_token(&self) -> Option<SyntaxToken> {
+        support::token(&self.syntax, SyntaxKind::KwRange)
+    }
+
+    #[must_use]
+    pub fn sequence_token(&self) -> Option<SyntaxToken> {
+        support::token(&self.syntax, SyntaxKind::KwSequence)
     }
 
     #[must_use]
@@ -2450,6 +2742,152 @@ impl FunctionType {
     #[must_use]
     pub fn effect_clause(&self) -> Option<EffectClause> {
         support::child(&self.syntax)
+    }
+}
+
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub struct Range { syntax: SyntaxNode }
+
+impl AstNode for Range {
+    type Language = AllenLanguage;
+
+    fn can_cast(kind: SyntaxKind) -> bool { kind == SyntaxKind::Range }
+
+    fn cast(syntax: SyntaxNode) -> Option<Self> { Self::can_cast(syntax.kind()).then_some(Self { syntax }) }
+
+    fn syntax(&self) -> &SyntaxNode { &self.syntax }
+}
+
+impl Range {
+    #[must_use]
+    pub fn children(&self) -> impl Iterator<Item = SyntaxNode> + '_ { self.syntax.children() }
+
+    /// Returns recovery nodes and tokens owned directly by this grammar node.
+    #[must_use]
+    pub fn errors(&self) -> impl Iterator<Item = AstError> + '_ {
+        self.syntax.children_with_tokens().filter_map(AstError::cast)
+    }
+
+    #[must_use]
+    pub fn coalescings(&self) -> AstChildren<Coalescing> {
+        support::children(&self.syntax)
+    }
+
+    #[must_use]
+    pub fn dot_dot_token(&self) -> Option<SyntaxToken> {
+        support::token(&self.syntax, SyntaxKind::DotDot)
+    }
+
+    #[must_use]
+    pub fn dot_dot_eq_token(&self) -> Option<SyntaxToken> {
+        support::token(&self.syntax, SyntaxKind::DotDotEq)
+    }
+}
+
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub struct Coalescing { syntax: SyntaxNode }
+
+impl AstNode for Coalescing {
+    type Language = AllenLanguage;
+
+    fn can_cast(kind: SyntaxKind) -> bool { kind == SyntaxKind::Coalescing }
+
+    fn cast(syntax: SyntaxNode) -> Option<Self> { Self::can_cast(syntax.kind()).then_some(Self { syntax }) }
+
+    fn syntax(&self) -> &SyntaxNode { &self.syntax }
+}
+
+impl Coalescing {
+    #[must_use]
+    pub fn children(&self) -> impl Iterator<Item = SyntaxNode> + '_ { self.syntax.children() }
+
+    /// Returns recovery nodes and tokens owned directly by this grammar node.
+    #[must_use]
+    pub fn errors(&self) -> impl Iterator<Item = AstError> + '_ {
+        self.syntax.children_with_tokens().filter_map(AstError::cast)
+    }
+
+    #[must_use]
+    pub fn pipeline(&self) -> Option<Pipeline> {
+        support::child(&self.syntax)
+    }
+
+    #[must_use]
+    pub fn question_question_token(&self) -> Option<SyntaxToken> {
+        support::token(&self.syntax, SyntaxKind::QuestionQuestion)
+    }
+
+    #[must_use]
+    pub fn coalescing(&self) -> Option<Coalescing> {
+        support::child(&self.syntax)
+    }
+}
+
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub struct Pipeline { syntax: SyntaxNode }
+
+impl AstNode for Pipeline {
+    type Language = AllenLanguage;
+
+    fn can_cast(kind: SyntaxKind) -> bool { kind == SyntaxKind::Pipeline }
+
+    fn cast(syntax: SyntaxNode) -> Option<Self> { Self::can_cast(syntax.kind()).then_some(Self { syntax }) }
+
+    fn syntax(&self) -> &SyntaxNode { &self.syntax }
+}
+
+impl Pipeline {
+    #[must_use]
+    pub fn children(&self) -> impl Iterator<Item = SyntaxNode> + '_ { self.syntax.children() }
+
+    /// Returns recovery nodes and tokens owned directly by this grammar node.
+    #[must_use]
+    pub fn errors(&self) -> impl Iterator<Item = AstError> + '_ {
+        self.syntax.children_with_tokens().filter_map(AstError::cast)
+    }
+
+    #[must_use]
+    pub fn compositions(&self) -> AstChildren<Composition> {
+        support::children(&self.syntax)
+    }
+
+    #[must_use]
+    pub fn pipe_gt_tokens(&self) -> impl Iterator<Item = SyntaxToken> + '_ {
+        self.syntax.children_with_tokens().filter_map(rowan::NodeOrToken::into_token).filter(|token| token.kind() == SyntaxKind::PipeGt)
+    }
+}
+
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub struct Composition { syntax: SyntaxNode }
+
+impl AstNode for Composition {
+    type Language = AllenLanguage;
+
+    fn can_cast(kind: SyntaxKind) -> bool { kind == SyntaxKind::Composition }
+
+    fn cast(syntax: SyntaxNode) -> Option<Self> { Self::can_cast(syntax.kind()).then_some(Self { syntax }) }
+
+    fn syntax(&self) -> &SyntaxNode { &self.syntax }
+}
+
+impl Composition {
+    #[must_use]
+    pub fn children(&self) -> impl Iterator<Item = SyntaxNode> + '_ { self.syntax.children() }
+
+    /// Returns recovery nodes and tokens owned directly by this grammar node.
+    #[must_use]
+    pub fn errors(&self) -> impl Iterator<Item = AstError> + '_ {
+        self.syntax.children_with_tokens().filter_map(AstError::cast)
+    }
+
+    #[must_use]
+    pub fn disjunctions(&self) -> AstChildren<Disjunction> {
+        support::children(&self.syntax)
+    }
+
+    #[must_use]
+    pub fn gt_tokens(&self) -> impl Iterator<Item = SyntaxToken> + '_ {
+        self.syntax.children_with_tokens().filter_map(rowan::NodeOrToken::into_token).filter(|token| token.kind() == SyntaxKind::Gt)
     }
 }
 
@@ -2775,18 +3213,8 @@ impl Postfix {
     }
 
     #[must_use]
-    pub fn l_bracket_tokens(&self) -> impl Iterator<Item = SyntaxToken> + '_ {
-        self.syntax.children_with_tokens().filter_map(rowan::NodeOrToken::into_token).filter(|token| token.kind() == SyntaxKind::LBracket)
-    }
-
-    #[must_use]
-    pub fn indices(&self) -> impl Iterator<Item = Expression> {
-        ast_fields(&self.syntax, &AST_PATTERN_POSTFIX, 0).into_iter().flatten().filter_map(rowan::NodeOrToken::into_node).filter_map(Expression::cast)
-    }
-
-    #[must_use]
-    pub fn r_bracket_tokens(&self) -> impl Iterator<Item = SyntaxToken> + '_ {
-        self.syntax.children_with_tokens().filter_map(rowan::NodeOrToken::into_token).filter(|token| token.kind() == SyntaxKind::RBracket)
+    pub fn slices(&self) -> AstChildren<Slice> {
+        support::children(&self.syntax)
     }
 
     #[must_use]
@@ -2796,6 +3224,16 @@ impl Postfix {
 
     #[must_use]
     pub fn field_names_tokens(&self) -> impl Iterator<Item = SyntaxToken> {
+        ast_fields(&self.syntax, &AST_PATTERN_POSTFIX, 0).into_iter().flatten().filter_map(rowan::NodeOrToken::into_token)
+    }
+
+    #[must_use]
+    pub fn question_dot_tokens(&self) -> impl Iterator<Item = SyntaxToken> + '_ {
+        self.syntax.children_with_tokens().filter_map(rowan::NodeOrToken::into_token).filter(|token| token.kind() == SyntaxKind::QuestionDot)
+    }
+
+    #[must_use]
+    pub fn optional_field_names_tokens(&self) -> impl Iterator<Item = SyntaxToken> {
         ast_fields(&self.syntax, &AST_PATTERN_POSTFIX, 1).into_iter().flatten().filter_map(rowan::NodeOrToken::into_token)
     }
 
@@ -2810,8 +3248,8 @@ impl Postfix {
     }
 
     #[must_use]
-    pub fn arguments(&self) -> impl Iterator<Item = Expression> {
-        ast_fields(&self.syntax, &AST_PATTERN_POSTFIX, 3).into_iter().flatten().filter_map(rowan::NodeOrToken::into_node).filter_map(Expression::cast)
+    pub fn call_arguments(&self) -> AstChildren<CallArgument> {
+        support::children(&self.syntax)
     }
 
     #[must_use]
@@ -2822,6 +3260,16 @@ impl Postfix {
     #[must_use]
     pub fn r_paren_tokens(&self) -> impl Iterator<Item = SyntaxToken> + '_ {
         self.syntax.children_with_tokens().filter_map(rowan::NodeOrToken::into_token).filter(|token| token.kind() == SyntaxKind::RParen)
+    }
+
+    #[must_use]
+    pub fn closures(&self) -> AstChildren<Closure> {
+        support::children(&self.syntax)
+    }
+
+    #[must_use]
+    pub fn short_closures(&self) -> AstChildren<ShortClosure> {
+        support::children(&self.syntax)
     }
 
     #[must_use]
@@ -2939,6 +3387,11 @@ impl Primary {
     }
 
     #[must_use]
+    pub fn short_closure(&self) -> Option<ShortClosure> {
+        support::child(&self.syntax)
+    }
+
+    #[must_use]
     pub fn prompt_expression(&self) -> Option<PromptExpression> {
         support::child(&self.syntax)
     }
@@ -2946,6 +3399,45 @@ impl Primary {
     #[must_use]
     pub fn await_block(&self) -> Option<AwaitBlock> {
         support::child(&self.syntax)
+    }
+}
+
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub struct Slice { syntax: SyntaxNode }
+
+impl AstNode for Slice {
+    type Language = AllenLanguage;
+
+    fn can_cast(kind: SyntaxKind) -> bool { kind == SyntaxKind::Slice }
+
+    fn cast(syntax: SyntaxNode) -> Option<Self> { Self::can_cast(syntax.kind()).then_some(Self { syntax }) }
+
+    fn syntax(&self) -> &SyntaxNode { &self.syntax }
+}
+
+impl Slice {
+    #[must_use]
+    pub fn children(&self) -> impl Iterator<Item = SyntaxNode> + '_ { self.syntax.children() }
+
+    /// Returns recovery nodes and tokens owned directly by this grammar node.
+    #[must_use]
+    pub fn errors(&self) -> impl Iterator<Item = AstError> + '_ {
+        self.syntax.children_with_tokens().filter_map(AstError::cast)
+    }
+
+    #[must_use]
+    pub fn l_bracket_token(&self) -> Option<SyntaxToken> {
+        support::token(&self.syntax, SyntaxKind::LBracket)
+    }
+
+    #[must_use]
+    pub fn index(&self) -> Option<Expression> {
+        ast_fields(&self.syntax, &AST_PATTERN_SLICE, 0).into_iter().next().flatten().and_then(rowan::NodeOrToken::into_node).and_then(Expression::cast)
+    }
+
+    #[must_use]
+    pub fn r_bracket_token(&self) -> Option<SyntaxToken> {
+        support::token(&self.syntax, SyntaxKind::RBracket)
     }
 }
 
@@ -2985,6 +3477,178 @@ impl TypeArgument {
     #[must_use]
     pub fn gt_token(&self) -> Option<SyntaxToken> {
         support::token(&self.syntax, SyntaxKind::Gt)
+    }
+}
+
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub struct CallArgument { syntax: SyntaxNode }
+
+impl AstNode for CallArgument {
+    type Language = AllenLanguage;
+
+    fn can_cast(kind: SyntaxKind) -> bool { kind == SyntaxKind::CallArgument }
+
+    fn cast(syntax: SyntaxNode) -> Option<Self> { Self::can_cast(syntax.kind()).then_some(Self { syntax }) }
+
+    fn syntax(&self) -> &SyntaxNode { &self.syntax }
+}
+
+impl CallArgument {
+    #[must_use]
+    pub fn children(&self) -> impl Iterator<Item = SyntaxNode> + '_ { self.syntax.children() }
+
+    /// Returns recovery nodes and tokens owned directly by this grammar node.
+    #[must_use]
+    pub fn errors(&self) -> impl Iterator<Item = AstError> + '_ {
+        self.syntax.children_with_tokens().filter_map(AstError::cast)
+    }
+
+    #[must_use]
+    pub fn argument_label_token(&self) -> Option<SyntaxToken> {
+        ast_fields(&self.syntax, &AST_PATTERN_CALL_ARGUMENT, 0).into_iter().next().flatten().and_then(rowan::NodeOrToken::into_token)
+    }
+
+    #[must_use]
+    pub fn colon_token(&self) -> Option<SyntaxToken> {
+        support::token(&self.syntax, SyntaxKind::Colon)
+    }
+
+    #[must_use]
+    pub fn underscore_token(&self) -> Option<SyntaxToken> {
+        support::token(&self.syntax, SyntaxKind::Underscore)
+    }
+
+    #[must_use]
+    pub fn value(&self) -> Option<Expression> {
+        ast_fields(&self.syntax, &AST_PATTERN_CALL_ARGUMENT, 1).into_iter().next().flatten().and_then(rowan::NodeOrToken::into_node).and_then(Expression::cast)
+    }
+}
+
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub struct Closure { syntax: SyntaxNode }
+
+impl AstNode for Closure {
+    type Language = AllenLanguage;
+
+    fn can_cast(kind: SyntaxKind) -> bool { kind == SyntaxKind::Closure }
+
+    fn cast(syntax: SyntaxNode) -> Option<Self> { Self::can_cast(syntax.kind()).then_some(Self { syntax }) }
+
+    fn syntax(&self) -> &SyntaxNode { &self.syntax }
+}
+
+impl Closure {
+    #[must_use]
+    pub fn children(&self) -> impl Iterator<Item = SyntaxNode> + '_ { self.syntax.children() }
+
+    /// Returns recovery nodes and tokens owned directly by this grammar node.
+    #[must_use]
+    pub fn errors(&self) -> impl Iterator<Item = AstError> + '_ {
+        self.syntax.children_with_tokens().filter_map(AstError::cast)
+    }
+
+    #[must_use]
+    pub fn fn_token(&self) -> Option<SyntaxToken> {
+        support::token(&self.syntax, SyntaxKind::KwFn)
+    }
+
+    #[must_use]
+    pub fn l_paren_token(&self) -> Option<SyntaxToken> {
+        support::token(&self.syntax, SyntaxKind::LParen)
+    }
+
+    #[must_use]
+    pub fn parameters(&self) -> AstChildren<Parameter> {
+        support::children(&self.syntax)
+    }
+
+    #[must_use]
+    pub fn comma_tokens(&self) -> impl Iterator<Item = SyntaxToken> + '_ {
+        self.syntax.children_with_tokens().filter_map(rowan::NodeOrToken::into_token).filter(|token| token.kind() == SyntaxKind::Comma)
+    }
+
+    #[must_use]
+    pub fn r_paren_token(&self) -> Option<SyntaxToken> {
+        support::token(&self.syntax, SyntaxKind::RParen)
+    }
+
+    #[must_use]
+    pub fn returns_token(&self) -> Option<SyntaxToken> {
+        support::token(&self.syntax, SyntaxKind::KwReturns)
+    }
+
+    #[must_use]
+    pub fn ty(&self) -> Option<Type> {
+        support::child(&self.syntax)
+    }
+
+    #[must_use]
+    pub fn effect_clause(&self) -> Option<EffectClause> {
+        support::child(&self.syntax)
+    }
+
+    #[must_use]
+    pub fn body(&self) -> Option<Body> {
+        support::child(&self.syntax)
+    }
+}
+
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub struct ShortClosure { syntax: SyntaxNode }
+
+impl AstNode for ShortClosure {
+    type Language = AllenLanguage;
+
+    fn can_cast(kind: SyntaxKind) -> bool { kind == SyntaxKind::ShortClosure }
+
+    fn cast(syntax: SyntaxNode) -> Option<Self> { Self::can_cast(syntax.kind()).then_some(Self { syntax }) }
+
+    fn syntax(&self) -> &SyntaxNode { &self.syntax }
+}
+
+impl ShortClosure {
+    #[must_use]
+    pub fn children(&self) -> impl Iterator<Item = SyntaxNode> + '_ { self.syntax.children() }
+
+    /// Returns recovery nodes and tokens owned directly by this grammar node.
+    #[must_use]
+    pub fn errors(&self) -> impl Iterator<Item = AstError> + '_ {
+        self.syntax.children_with_tokens().filter_map(AstError::cast)
+    }
+
+    #[must_use]
+    pub fn fn_token(&self) -> Option<SyntaxToken> {
+        support::token(&self.syntax, SyntaxKind::KwFn)
+    }
+
+    #[must_use]
+    pub fn l_paren_token(&self) -> Option<SyntaxToken> {
+        support::token(&self.syntax, SyntaxKind::LParen)
+    }
+
+    #[must_use]
+    pub fn parameter_names_tokens(&self) -> impl Iterator<Item = SyntaxToken> {
+        ast_fields(&self.syntax, &AST_PATTERN_SHORT_CLOSURE, 0).into_iter().flatten().filter_map(rowan::NodeOrToken::into_token)
+    }
+
+    #[must_use]
+    pub fn comma_tokens(&self) -> impl Iterator<Item = SyntaxToken> + '_ {
+        self.syntax.children_with_tokens().filter_map(rowan::NodeOrToken::into_token).filter(|token| token.kind() == SyntaxKind::Comma)
+    }
+
+    #[must_use]
+    pub fn r_paren_token(&self) -> Option<SyntaxToken> {
+        support::token(&self.syntax, SyntaxKind::RParen)
+    }
+
+    #[must_use]
+    pub fn fat_arrow_token(&self) -> Option<SyntaxToken> {
+        support::token(&self.syntax, SyntaxKind::FatArrow)
+    }
+
+    #[must_use]
+    pub fn body(&self) -> Option<Expression> {
+        ast_fields(&self.syntax, &AST_PATTERN_SHORT_CLOSURE, 1).into_iter().next().flatten().and_then(rowan::NodeOrToken::into_node).and_then(Expression::cast)
     }
 }
 
@@ -3086,6 +3750,11 @@ impl TemplateLiteral {
     }
 
     #[must_use]
+    pub fn open_multiline_delimiter_token(&self) -> Option<SyntaxToken> {
+        ast_fields(&self.syntax, &AST_PATTERN_TEMPLATE_LITERAL, 1).into_iter().next().flatten().and_then(rowan::NodeOrToken::into_token)
+    }
+
+    #[must_use]
     pub fn template_segments(&self) -> AstChildren<TemplateSegment> {
         support::children(&self.syntax)
     }
@@ -3097,7 +3766,12 @@ impl TemplateLiteral {
 
     #[must_use]
     pub fn close_backtick_token(&self) -> Option<SyntaxToken> {
-        ast_fields(&self.syntax, &AST_PATTERN_TEMPLATE_LITERAL, 1).into_iter().next().flatten().and_then(rowan::NodeOrToken::into_token)
+        ast_fields(&self.syntax, &AST_PATTERN_TEMPLATE_LITERAL, 2).into_iter().next().flatten().and_then(rowan::NodeOrToken::into_token)
+    }
+
+    #[must_use]
+    pub fn close_multiline_delimiter_token(&self) -> Option<SyntaxToken> {
+        ast_fields(&self.syntax, &AST_PATTERN_TEMPLATE_LITERAL, 3).into_iter().next().flatten().and_then(rowan::NodeOrToken::into_token)
     }
 }
 
@@ -3233,13 +3907,18 @@ impl RecordConstructor {
     }
 
     #[must_use]
-    pub fn record_value_fields(&self) -> AstChildren<RecordValueField> {
-        support::children(&self.syntax)
+    pub fn record_update_base(&self) -> Option<RecordUpdateBase> {
+        support::child(&self.syntax)
     }
 
     #[must_use]
     pub fn comma_tokens(&self) -> impl Iterator<Item = SyntaxToken> + '_ {
         self.syntax.children_with_tokens().filter_map(rowan::NodeOrToken::into_token).filter(|token| token.kind() == SyntaxKind::Comma)
+    }
+
+    #[must_use]
+    pub fn record_value_fields(&self) -> AstChildren<RecordValueField> {
+        support::children(&self.syntax)
     }
 
     #[must_use]
@@ -3277,13 +3956,18 @@ impl AnonymousRecord {
     }
 
     #[must_use]
-    pub fn record_value_fields(&self) -> AstChildren<RecordValueField> {
-        support::children(&self.syntax)
+    pub fn record_update_base(&self) -> Option<RecordUpdateBase> {
+        support::child(&self.syntax)
     }
 
     #[must_use]
     pub fn comma_tokens(&self) -> impl Iterator<Item = SyntaxToken> + '_ {
         self.syntax.children_with_tokens().filter_map(rowan::NodeOrToken::into_token).filter(|token| token.kind() == SyntaxKind::Comma)
+    }
+
+    #[must_use]
+    pub fn record_value_fields(&self) -> AstChildren<RecordValueField> {
+        support::children(&self.syntax)
     }
 
     #[must_use]
@@ -3321,7 +4005,7 @@ impl ListLiteral {
     }
 
     #[must_use]
-    pub fn expressions(&self) -> AstChildren<Expression> {
+    pub fn list_items(&self) -> AstChildren<ListItem> {
         support::children(&self.syntax)
     }
 
@@ -3370,18 +4054,8 @@ impl MapLiteral {
     }
 
     #[must_use]
-    pub fn keys(&self) -> impl Iterator<Item = Expression> {
-        ast_fields(&self.syntax, &AST_PATTERN_MAP_LITERAL, 0).into_iter().flatten().filter_map(rowan::NodeOrToken::into_node).filter_map(Expression::cast)
-    }
-
-    #[must_use]
-    pub fn colon_tokens(&self) -> impl Iterator<Item = SyntaxToken> + '_ {
-        self.syntax.children_with_tokens().filter_map(rowan::NodeOrToken::into_token).filter(|token| token.kind() == SyntaxKind::Colon)
-    }
-
-    #[must_use]
-    pub fn values(&self) -> impl Iterator<Item = Expression> {
-        ast_fields(&self.syntax, &AST_PATTERN_MAP_LITERAL, 1).into_iter().flatten().filter_map(rowan::NodeOrToken::into_node).filter_map(Expression::cast)
+    pub fn map_items(&self) -> AstChildren<MapItem> {
+        support::children(&self.syntax)
     }
 
     #[must_use]
@@ -3490,75 +4164,6 @@ impl MatchExpression {
     #[must_use]
     pub fn r_brace_token(&self) -> Option<SyntaxToken> {
         support::token(&self.syntax, SyntaxKind::RBrace)
-    }
-}
-
-#[derive(Clone, Debug, Eq, Hash, PartialEq)]
-pub struct Closure { syntax: SyntaxNode }
-
-impl AstNode for Closure {
-    type Language = AllenLanguage;
-
-    fn can_cast(kind: SyntaxKind) -> bool { kind == SyntaxKind::Closure }
-
-    fn cast(syntax: SyntaxNode) -> Option<Self> { Self::can_cast(syntax.kind()).then_some(Self { syntax }) }
-
-    fn syntax(&self) -> &SyntaxNode { &self.syntax }
-}
-
-impl Closure {
-    #[must_use]
-    pub fn children(&self) -> impl Iterator<Item = SyntaxNode> + '_ { self.syntax.children() }
-
-    /// Returns recovery nodes and tokens owned directly by this grammar node.
-    #[must_use]
-    pub fn errors(&self) -> impl Iterator<Item = AstError> + '_ {
-        self.syntax.children_with_tokens().filter_map(AstError::cast)
-    }
-
-    #[must_use]
-    pub fn fn_token(&self) -> Option<SyntaxToken> {
-        support::token(&self.syntax, SyntaxKind::KwFn)
-    }
-
-    #[must_use]
-    pub fn l_paren_token(&self) -> Option<SyntaxToken> {
-        support::token(&self.syntax, SyntaxKind::LParen)
-    }
-
-    #[must_use]
-    pub fn parameters(&self) -> AstChildren<Parameter> {
-        support::children(&self.syntax)
-    }
-
-    #[must_use]
-    pub fn comma_tokens(&self) -> impl Iterator<Item = SyntaxToken> + '_ {
-        self.syntax.children_with_tokens().filter_map(rowan::NodeOrToken::into_token).filter(|token| token.kind() == SyntaxKind::Comma)
-    }
-
-    #[must_use]
-    pub fn r_paren_token(&self) -> Option<SyntaxToken> {
-        support::token(&self.syntax, SyntaxKind::RParen)
-    }
-
-    #[must_use]
-    pub fn returns_token(&self) -> Option<SyntaxToken> {
-        support::token(&self.syntax, SyntaxKind::KwReturns)
-    }
-
-    #[must_use]
-    pub fn ty(&self) -> Option<Type> {
-        support::child(&self.syntax)
-    }
-
-    #[must_use]
-    pub fn effect_clause(&self) -> Option<EffectClause> {
-        support::child(&self.syntax)
-    }
-
-    #[must_use]
-    pub fn body(&self) -> Option<Body> {
-        support::child(&self.syntax)
     }
 }
 
@@ -3787,6 +4392,128 @@ impl RecordValueField {
 }
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub struct RecordUpdateBase { syntax: SyntaxNode }
+
+impl AstNode for RecordUpdateBase {
+    type Language = AllenLanguage;
+
+    fn can_cast(kind: SyntaxKind) -> bool { kind == SyntaxKind::RecordUpdateBase }
+
+    fn cast(syntax: SyntaxNode) -> Option<Self> { Self::can_cast(syntax.kind()).then_some(Self { syntax }) }
+
+    fn syntax(&self) -> &SyntaxNode { &self.syntax }
+}
+
+impl RecordUpdateBase {
+    #[must_use]
+    pub fn children(&self) -> impl Iterator<Item = SyntaxNode> + '_ { self.syntax.children() }
+
+    /// Returns recovery nodes and tokens owned directly by this grammar node.
+    #[must_use]
+    pub fn errors(&self) -> impl Iterator<Item = AstError> + '_ {
+        self.syntax.children_with_tokens().filter_map(AstError::cast)
+    }
+
+    #[must_use]
+    pub fn dot_dot_token(&self) -> Option<SyntaxToken> {
+        support::token(&self.syntax, SyntaxKind::DotDot)
+    }
+
+    #[must_use]
+    pub fn base(&self) -> Option<Expression> {
+        ast_fields(&self.syntax, &AST_PATTERN_RECORD_UPDATE_BASE, 0).into_iter().next().flatten().and_then(rowan::NodeOrToken::into_node).and_then(Expression::cast)
+    }
+}
+
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub struct ListItem { syntax: SyntaxNode }
+
+impl AstNode for ListItem {
+    type Language = AllenLanguage;
+
+    fn can_cast(kind: SyntaxKind) -> bool { kind == SyntaxKind::ListItem }
+
+    fn cast(syntax: SyntaxNode) -> Option<Self> { Self::can_cast(syntax.kind()).then_some(Self { syntax }) }
+
+    fn syntax(&self) -> &SyntaxNode { &self.syntax }
+}
+
+impl ListItem {
+    #[must_use]
+    pub fn children(&self) -> impl Iterator<Item = SyntaxNode> + '_ { self.syntax.children() }
+
+    /// Returns recovery nodes and tokens owned directly by this grammar node.
+    #[must_use]
+    pub fn errors(&self) -> impl Iterator<Item = AstError> + '_ {
+        self.syntax.children_with_tokens().filter_map(AstError::cast)
+    }
+
+    #[must_use]
+    pub fn dot_dot_token(&self) -> Option<SyntaxToken> {
+        support::token(&self.syntax, SyntaxKind::DotDot)
+    }
+
+    #[must_use]
+    pub fn spread(&self) -> Option<Expression> {
+        ast_fields(&self.syntax, &AST_PATTERN_LIST_ITEM, 0).into_iter().next().flatten().and_then(rowan::NodeOrToken::into_node).and_then(Expression::cast)
+    }
+
+    #[must_use]
+    pub fn value(&self) -> Option<Expression> {
+        ast_fields(&self.syntax, &AST_PATTERN_LIST_ITEM, 1).into_iter().next().flatten().and_then(rowan::NodeOrToken::into_node).and_then(Expression::cast)
+    }
+}
+
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub struct MapItem { syntax: SyntaxNode }
+
+impl AstNode for MapItem {
+    type Language = AllenLanguage;
+
+    fn can_cast(kind: SyntaxKind) -> bool { kind == SyntaxKind::MapItem }
+
+    fn cast(syntax: SyntaxNode) -> Option<Self> { Self::can_cast(syntax.kind()).then_some(Self { syntax }) }
+
+    fn syntax(&self) -> &SyntaxNode { &self.syntax }
+}
+
+impl MapItem {
+    #[must_use]
+    pub fn children(&self) -> impl Iterator<Item = SyntaxNode> + '_ { self.syntax.children() }
+
+    /// Returns recovery nodes and tokens owned directly by this grammar node.
+    #[must_use]
+    pub fn errors(&self) -> impl Iterator<Item = AstError> + '_ {
+        self.syntax.children_with_tokens().filter_map(AstError::cast)
+    }
+
+    #[must_use]
+    pub fn dot_dot_token(&self) -> Option<SyntaxToken> {
+        support::token(&self.syntax, SyntaxKind::DotDot)
+    }
+
+    #[must_use]
+    pub fn spread(&self) -> Option<Expression> {
+        ast_fields(&self.syntax, &AST_PATTERN_MAP_ITEM, 0).into_iter().next().flatten().and_then(rowan::NodeOrToken::into_node).and_then(Expression::cast)
+    }
+
+    #[must_use]
+    pub fn key(&self) -> Option<Expression> {
+        ast_fields(&self.syntax, &AST_PATTERN_MAP_ITEM, 1).into_iter().next().flatten().and_then(rowan::NodeOrToken::into_node).and_then(Expression::cast)
+    }
+
+    #[must_use]
+    pub fn colon_token(&self) -> Option<SyntaxToken> {
+        support::token(&self.syntax, SyntaxKind::Colon)
+    }
+
+    #[must_use]
+    pub fn value(&self) -> Option<Expression> {
+        ast_fields(&self.syntax, &AST_PATTERN_MAP_ITEM, 2).into_iter().next().flatten().and_then(rowan::NodeOrToken::into_node).and_then(Expression::cast)
+    }
+}
+
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct MatchArm { syntax: SyntaxNode }
 
 impl AstNode for MatchArm {
@@ -3849,6 +4576,69 @@ impl Pattern {
     }
 
     #[must_use]
+    pub fn pattern_or(&self) -> Option<PatternOr> {
+        support::child(&self.syntax)
+    }
+}
+
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub struct PatternOr { syntax: SyntaxNode }
+
+impl AstNode for PatternOr {
+    type Language = AllenLanguage;
+
+    fn can_cast(kind: SyntaxKind) -> bool { kind == SyntaxKind::PatternOr }
+
+    fn cast(syntax: SyntaxNode) -> Option<Self> { Self::can_cast(syntax.kind()).then_some(Self { syntax }) }
+
+    fn syntax(&self) -> &SyntaxNode { &self.syntax }
+}
+
+impl PatternOr {
+    #[must_use]
+    pub fn children(&self) -> impl Iterator<Item = SyntaxNode> + '_ { self.syntax.children() }
+
+    /// Returns recovery nodes and tokens owned directly by this grammar node.
+    #[must_use]
+    pub fn errors(&self) -> impl Iterator<Item = AstError> + '_ {
+        self.syntax.children_with_tokens().filter_map(AstError::cast)
+    }
+
+    #[must_use]
+    pub fn pattern_primaries(&self) -> AstChildren<PatternPrimary> {
+        support::children(&self.syntax)
+    }
+
+    #[must_use]
+    pub fn pipe_tokens(&self) -> impl Iterator<Item = SyntaxToken> + '_ {
+        self.syntax.children_with_tokens().filter_map(rowan::NodeOrToken::into_token).filter(|token| token.kind() == SyntaxKind::Pipe)
+    }
+}
+
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub struct PatternPrimary { syntax: SyntaxNode }
+
+impl AstNode for PatternPrimary {
+    type Language = AllenLanguage;
+
+    fn can_cast(kind: SyntaxKind) -> bool { kind == SyntaxKind::PatternPrimary }
+
+    fn cast(syntax: SyntaxNode) -> Option<Self> { Self::can_cast(syntax.kind()).then_some(Self { syntax }) }
+
+    fn syntax(&self) -> &SyntaxNode { &self.syntax }
+}
+
+impl PatternPrimary {
+    #[must_use]
+    pub fn children(&self) -> impl Iterator<Item = SyntaxNode> + '_ { self.syntax.children() }
+
+    /// Returns recovery nodes and tokens owned directly by this grammar node.
+    #[must_use]
+    pub fn errors(&self) -> impl Iterator<Item = AstError> + '_ {
+        self.syntax.children_with_tokens().filter_map(AstError::cast)
+    }
+
+    #[must_use]
     pub fn underscore_token(&self) -> Option<SyntaxToken> {
         support::token(&self.syntax, SyntaxKind::Underscore)
     }
@@ -3864,12 +4654,22 @@ impl Pattern {
     }
 
     #[must_use]
+    pub fn binding_name_token(&self) -> Option<SyntaxToken> {
+        ast_fields(&self.syntax, &AST_PATTERN_PATTERN_PRIMARY, 0).into_iter().next().flatten().and_then(rowan::NodeOrToken::into_token)
+    }
+
+    #[must_use]
     pub fn record_pattern(&self) -> Option<RecordPattern> {
         support::child(&self.syntax)
     }
 
     #[must_use]
     pub fn enum_pattern(&self) -> Option<EnumPattern> {
+        support::child(&self.syntax)
+    }
+
+    #[must_use]
+    pub fn pattern_range(&self) -> Option<PatternRange> {
         support::child(&self.syntax)
     }
 
@@ -3899,8 +4699,8 @@ impl Pattern {
     }
 
     #[must_use]
-    pub fn binding_name_token(&self) -> Option<SyntaxToken> {
-        ast_fields(&self.syntax, &AST_PATTERN_PATTERN, 0).into_iter().next().flatten().and_then(rowan::NodeOrToken::into_token)
+    pub fn pattern(&self) -> Option<Pattern> {
+        support::child(&self.syntax)
     }
 
     #[must_use]
@@ -4002,13 +4802,8 @@ impl EnumPattern {
     }
 
     #[must_use]
-    pub fn binding_names_tokens(&self) -> impl Iterator<Item = SyntaxToken> {
-        ast_fields(&self.syntax, &AST_PATTERN_ENUM_PATTERN, 2).into_iter().flatten().filter_map(rowan::NodeOrToken::into_token)
-    }
-
-    #[must_use]
-    pub fn underscore_tokens(&self) -> impl Iterator<Item = SyntaxToken> + '_ {
-        self.syntax.children_with_tokens().filter_map(rowan::NodeOrToken::into_token).filter(|token| token.kind() == SyntaxKind::Underscore)
+    pub fn patterns(&self) -> AstChildren<Pattern> {
+        support::children(&self.syntax)
     }
 
     #[must_use]
@@ -4034,6 +4829,50 @@ impl EnumPattern {
     #[must_use]
     pub fn r_brace_token(&self) -> Option<SyntaxToken> {
         support::token(&self.syntax, SyntaxKind::RBrace)
+    }
+}
+
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub struct PatternRange { syntax: SyntaxNode }
+
+impl AstNode for PatternRange {
+    type Language = AllenLanguage;
+
+    fn can_cast(kind: SyntaxKind) -> bool { kind == SyntaxKind::PatternRange }
+
+    fn cast(syntax: SyntaxNode) -> Option<Self> { Self::can_cast(syntax.kind()).then_some(Self { syntax }) }
+
+    fn syntax(&self) -> &SyntaxNode { &self.syntax }
+}
+
+impl PatternRange {
+    #[must_use]
+    pub fn children(&self) -> impl Iterator<Item = SyntaxNode> + '_ { self.syntax.children() }
+
+    /// Returns recovery nodes and tokens owned directly by this grammar node.
+    #[must_use]
+    pub fn errors(&self) -> impl Iterator<Item = AstError> + '_ {
+        self.syntax.children_with_tokens().filter_map(AstError::cast)
+    }
+
+    #[must_use]
+    pub fn minus_tokens(&self) -> impl Iterator<Item = SyntaxToken> + '_ {
+        self.syntax.children_with_tokens().filter_map(rowan::NodeOrToken::into_token).filter(|token| token.kind() == SyntaxKind::Minus)
+    }
+
+    #[must_use]
+    pub fn literals(&self) -> AstChildren<Literal> {
+        support::children(&self.syntax)
+    }
+
+    #[must_use]
+    pub fn dot_dot_token(&self) -> Option<SyntaxToken> {
+        support::token(&self.syntax, SyntaxKind::DotDot)
+    }
+
+    #[must_use]
+    pub fn dot_dot_eq_token(&self) -> Option<SyntaxToken> {
+        support::token(&self.syntax, SyntaxKind::DotDotEq)
     }
 }
 
@@ -4071,13 +4910,8 @@ impl PatternField {
     }
 
     #[must_use]
-    pub fn binding_name_token(&self) -> Option<SyntaxToken> {
-        ast_fields(&self.syntax, &AST_PATTERN_PATTERN_FIELD, 1).into_iter().next().flatten().and_then(rowan::NodeOrToken::into_token)
-    }
-
-    #[must_use]
-    pub fn underscore_token(&self) -> Option<SyntaxToken> {
-        support::token(&self.syntax, SyntaxKind::Underscore)
+    pub fn pattern(&self) -> Option<Pattern> {
+        support::child(&self.syntax)
     }
 }
 

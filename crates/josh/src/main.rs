@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 
 mod cli;
+mod executor_provider;
 mod runner;
 
 fn main() -> std::process::ExitCode {

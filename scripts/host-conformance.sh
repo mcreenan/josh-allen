@@ -327,18 +327,18 @@ run_check fuzz-report-claims jq -e '
   (.required | has("fuzz_targets") | not)
 ' "$report_path"
 run_check error-registry-json jq -e '
-  (.channels == ["diagnostic", "result", "trap", "stopped"]) and
+  (.channels == ["diagnostic", "failed", "result", "trap", "stopped"]) and
   (([.registry[] | .code] | length) == ([.registry[] | .code] | unique | length)) and
   ([.registry[] | select(.code == "stopped")] | length == 0) and
-  (.outcomes == [{"outcome":"stopped","channel":"stopped"}]) and
+  (.outcomes == [{"outcome":"failed","channel":"failed"},{"outcome":"stopped","channel":"stopped"}]) and
   ([.registry[].code] == ([.registry[].code] | sort)) and
   ([.registry[] | select(.code as $code | ["runtime.entry_not_found", "runtime.manifest_invalid", "runtime.capability_denied", "tool.catalog_mismatch", "runtime.invalid_input", "resource.input_bytes", "runtime.workspace_unavailable", "replay.diverged"] | index($code))] | length == 8) and
   ([.registry[] | select(.code as $code | ["runtime.entry_not_found", "runtime.manifest_invalid", "runtime.capability_denied", "tool.catalog_mismatch", "runtime.invalid_input", "resource.input_bytes", "runtime.workspace_unavailable", "replay.diverged"] | index($code)) | select(.channel != "diagnostic" or has("versions"))] | length == 0) and
   ([.operations[] | select((.operation | type) != "string" or (.codes | type) != "array") ] | length == 0) and
   (([.operations[] | .operation] | length) == ([.operations[] | .operation] | unique | length)) and
   ([.operations[] | .operation] == [
-    "fs.read_text", "fs.read_bytes", "fs.write_text", "fs.write_bytes", "fs.list", "fs.search",
-    "http.get", "agent.message", "agent.ask", "agent.transcript", "model.request",
+    "decode", "fs.read_text", "fs.read_bytes", "fs.write_text", "fs.write_bytes", "fs.list", "fs.search",
+    "http.get", "exec.run", "agent.message", "agent.ask", "agent.transcript", "model.request",
     "user.ask", "sub_agent.create", "sub_agent.run", "sub_agent.message", "sub_agent.ask",
     "permission.request_file", "permission.request_directory", "generated_tool.call"
   ]) and

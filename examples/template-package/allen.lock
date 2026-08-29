@@ -1,0 +1,10 @@
+lock_version = 1
+language = "0.1.1"
+root = "template-example@0.1.0"
+
+[[package]]
+name = "template-example"
+version = "0.1.0"
+source = "."
+digest = "sha256:0c81e91636d85dcf2484dfe8fa2206b8e8c5d58dd1b4018a381bcf300990cfa1"
+dependencies = []

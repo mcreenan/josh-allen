@@ -1,0 +1,44 @@
+record User {
+  name: String
+  active: Bool
+}
+
+fn summarize(users: List<User>) returns Option<String> {
+  let active = list.filter(values: users, callback: fn(user) => user.active);
+  let names = list.map(
+    values: active,
+    callback: fn(user: User) returns String { user.name }
+  );
+  let expanded = list.flat_map(
+    values: names,
+    callback: fn(name: String) returns List<String> { [name] }
+  );
+  let selected = list.filter_map(
+    values: expanded,
+    callback: fn(name: String) returns Option<String> { Some(name) }
+  );
+  let found = list.find(values: selected, callback: fn(name) => name == "Ada");
+  let any_ada = list.any(values: selected, callback: fn(name) => name == "Ada");
+  let all_named = list.all(values: selected, callback: fn(name) => length(name) > 0);
+  let groups = list.partition(values: selected, callback: fn(name) => name == "Ada");
+  let totals = list.scan(values: [1, 2], initial: 0, callback: fn(total, item) => total + item);
+  let first = list.get(values: selected, index: 0)?;
+  let raw = r###"${name} \\d+ "###;
+  let message = """
+    ${first}
+    """;
+  let fallback = found ?? "none";
+  if (any_ada && all_named && length(groups.matched) + length(totals) >= 0) {
+    Some(string.replace(value: message, needle: first, replacement: raw))
+  } else {
+    Some(fallback)
+  }
+}
+
+export fn main() returns Int {
+  let users = [
+    User { name: "Ada", active: true },
+    User { name: "Grace", active: false }
+  ];
+  length(summarize(users) ?? "")
+}

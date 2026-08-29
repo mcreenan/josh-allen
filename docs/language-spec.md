@@ -1,6 +1,6 @@
 # ALLEN language specification
 
-Status: Early alpha; evolving version 0.1 source grammar and implemented profile
+Status: Early alpha; current language version 0.1.1 and `*-0.1` profile
 
 **ALLEN** means **Agent-Level Language, Embedded Natively**. This document defines the high-level specification for ALLEN as a standalone, agent-native programming language.
 
@@ -8,9 +8,10 @@ The key words **MUST**, **MUST NOT**, **SHOULD**, **SHOULD NOT**, and **MAY** st
 
 ## 0. Language status
 
-ALLEN is an early alpha under active development. The `0.1` label and the
-`*-0.1` conformance profile names identify the one current language and
-implementation profile. Source syntax, semantics, standard operations,
+ALLEN is an early alpha under active development. Version `0.1.1` identifies
+the one current language; the `0.1` source-grammar label and `*-0.1`
+conformance profile names identify its alpha compatibility line. Source syntax,
+semantics, standard operations,
 manifests, artifacts, provider contracts, and implementation interfaces MAY
 change together while the language is in alpha.
 
@@ -62,6 +63,8 @@ The baseline type system MUST include:
 - Generic types and generic functions with constraints.
 - `Option<T>` for an optional value.
 - `Result<T, E>` for an operation that can fail.
+- `Range<Int>` for one immutable ascending integer interval.
+- `Sequence<T>` for one affine, single-pass lazy sequence.
 - `Future<T>` for one lazy asynchronous computation.
 - `Task<T>` for one started asynchronous computation.
 - `Workspace` for one opaque execution-scoped working-directory capability.
@@ -135,6 +138,11 @@ Source has no implicit numeric or text conversion. Version 0.1 initially
 provides these total conversions:
 
 - `to_float(Int) returns Float` uses IEEE round-to-nearest, ties-to-even.
+- `to_int(String) returns Result<Int, ParseError>` accepts only `0` or
+  `-?[1-9][0-9]*`. It rejects signs other than `-`, whitespace, separators,
+  leading zeroes, non-ASCII digits, and `-0`; an invalid spelling returns
+  `parse.invalid_int` and a representable spelling outside `Int` returns
+  `parse.int_overflow`.
 - `to_string(Bool|Int|Float|String) returns String` uses the canonical scalar text.
 - `to_bytes(String) returns Bytes` returns the UTF-8 bytes.
 
@@ -158,6 +166,46 @@ Version 0.1 also provides these pure collection and String operations:
   returns `None` for an invalid index and otherwise a new list.
 - `map.get<K, V>(values: Map<K, V>, key: K) returns Option<V>` returns `None` for
   an absent key.
+- `zip<A, B, ...>(left: List<A>, right: List<B>, ...) returns List<(A, B, ...)>`
+  accepts two through eight Lists, evaluates each once left-to-right, and traps
+  with `list.length_mismatch` unless every input has the same length.
+- `list.min` and `list.max` accept `List<Int>` or `List<Float>` and return
+  `Option<T>`; empty lists return `None`, ties retain the first element, and a
+  Float NaN produces canonical NaN. `list.sum(List<Int>)` returns `Some(0)` for
+  empty input and `None` at the first checked overflow, while `list.sum(List<Float>)`
+  returns `+0` for empty input and uses left-to-right IEEE addition.
+- `list.fold(values, initial, callback)` calls a pure exact
+  `(accumulator, item) -> accumulator` callback left-to-right and returns
+  `initial` for an empty list.
+- `list.map(values: List<T>, callback: fn(T) returns U) returns List<U>` applies
+  a pure callback to each item from left to right.
+- `list.filter(values: List<T>, callback: fn(T) returns Bool) returns List<T>`
+  keeps items whose pure predicate returns `true`.
+- `list.flat_map(values: List<T>, callback: fn(T) returns List<U>) returns
+  List<U>` appends each callback list in input order.
+- `list.filter_map(values: List<T>, callback: fn(T) returns Option<U>) returns
+  List<U>` keeps each `Some` payload and drops `None` results.
+- `list.find(values: List<T>, callback: fn(T) returns Bool) returns Option<T>`
+  returns the first item whose pure predicate returns `true`.
+- `list.any(values: List<T>, callback: fn(T) returns Bool) returns Bool` and
+  `list.all(values: List<T>, callback: fn(T) returns Bool) returns Bool` use
+  left-to-right short-circuit evaluation.
+- `list.partition(values: List<T>, callback: fn(T) returns Bool) returns
+  { matched: List<T>, rest: List<T> }` preserves input order in both lists.
+- `list.scan(values: List<T>, initial: A, callback: fn(A, T) returns A)
+  returns List<A>` records each post-callback accumulator and excludes the
+  initial value.
+
+These nine combinators accept pure callbacks only. They precharge the complete
+result allocation before publishing it. Empty inputs return an empty list for
+the list-producing operations, `None` for `find`, `false` for `any`, `true`
+for `all`, and two empty lists for `partition`; `scan` returns an empty list.
+`find` and `any` stop after the first match. `all` stops after the first
+failure. Callback traps and resource limits remain terminal outcomes.
+- `map.insert(values, key, value)` returns `{ previous: Option<V>, values: Map<K, V> }`,
+  `map.remove(values, key)` returns `{ removed: Option<V>, values: Map<K, V> }`, and
+  `map.keys(values)` returns `List<K>` in canonical map-key order. All preserve
+  input aliases and precharge their complete result allocations.
 - `int.checked_add`, `int.checked_sub`, `int.checked_mul`, `int.checked_div`,
   `int.checked_rem`, and `int.checked_neg` return `Option<Int>` instead of
   trapping. They return `None` for overflow or zero division; in particular
@@ -178,6 +226,7 @@ string.split(value: String, separator: String) returns Option<List<String>>
 string.join(values: List<String>, separator: String) returns String
 string.trim_ascii(value: String) returns String
 string.from_utf8(value: Bytes) returns Option<String>
+string.replace(value: String, needle: String, replacement: String) returns String
 ```
 
 Except for `byte_length`, every String index and length counts Unicode scalar
@@ -191,9 +240,87 @@ matching is exact, without normalization or case folding. `contains`,
 `split` returns `None` for an empty separator. Otherwise it preserves empty
 leading, trailing, and adjacent fields and returns `Some([value])` when the
 separator is absent. `join` preserves list order and returns `""` for an empty
-list. `trim_ascii` removes only ASCII space, tab, LF, CR, form feed, and
-vertical tab from both ends. `from_utf8` returns `Some` exactly when all input
-bytes form valid UTF-8; `to_bytes` is its inverse for every String.
+list. `replace` replaces every non-overlapping exact occurrence from left to
+right, without normalization, case folding, or locale rules. An empty needle
+has no occurrences and returns `value` unchanged; this avoids implicit
+boundary insertion and bounds the result by the input and replacement matches.
+`trim_ascii` removes only ASCII space, tab, LF, CR, form feed, and vertical tab
+from both ends. `from_utf8` returns `Some` exactly when all input bytes form
+valid UTF-8; `to_bytes` is its inverse for every String.
+
+`start..end` constructs a half-open `Range<Int>`, while `start..=end`
+constructs an inclusive `Range<Int>`. The compiler evaluates `start` and then
+`end` exactly once. Ranges are ascending only. A start above the end produces
+an empty range; equal bounds produce an empty half-open range and a singleton
+inclusive range. Iteration never increments past `Int::MAX` and therefore
+cannot wrap. A range stores its start, end, and inclusive flag; equality
+compares all three fields. The nonassociative range operators cannot be
+chained or nested without parentheses. Range values are not artifact
+constants and cannot cross entry, tool, prompt, package-data, canonical-value,
+or replay boundaries.
+
+A half-open `Range<Int>` may appear inside brackets after a `List<T>`, `Bytes`,
+or `String`. The result is `Option<List<T>>`, `Option<Bytes>`, or
+`Option<String>`, respectively. The receiver evaluates first, followed by the
+range bounds from left to right, and each evaluates once. A negative bound, a
+start above the end, or an end above the receiver length returns `None`.
+Otherwise slicing returns `Some` containing a fresh immutable value, including
+an empty value for a valid empty range. String bounds count Unicode scalar
+values. An inclusive range is invalid in slice position. `string.slice`
+remains available and has the same bounds and result behavior as String
+bracket slicing.
+
+`Sequence<T>` is an affine, single-pass lazy value. The first sequence API is:
+
+```allen
+seq.from_list<T>(values: List<T>) returns Sequence<T>
+seq.map<T, U>(values: Sequence<T>, callback: fn(T) returns U) returns Sequence<U>
+seq.filter<T>(values: Sequence<T>, callback: fn(T) returns Bool) returns Sequence<T>
+seq.take<T>(values: Sequence<T>, count: Int) returns Sequence<T>
+seq.find<T>(values: Sequence<T>, callback: fn(T) returns Bool) returns Option<T>
+seq.any<T>(values: Sequence<T>, callback: fn(T) returns Bool) returns Bool
+seq.all<T>(values: Sequence<T>, callback: fn(T) returns Bool) returns Bool
+seq.fold<T, A>(values: Sequence<T>, initial: A, callback: fn(A, T) returns A) returns A
+seq.to_list<T>(values: Sequence<T>) returns List<T>
+```
+
+`from_list`, `map`, `filter`, and `take` create adapters without invoking a
+callback or pulling an upstream item. Every callback is pure and runs in pull
+order. `find`, `any`, `all`, `fold`, and `to_list` are terminal operations and
+consume the sequence handle. `take` stops upstream pulls after its declared
+count; a negative count acts as zero. `find` and `any` stop at the first match,
+and `all` stops at the first
+failure. Instruction charges occur when a terminal operation pulls an item.
+`to_list` charges the complete result before publishing it. Source may move a
+sequence, but may not copy or consume it twice. Dropping an unconsumed sequence
+is valid and performs bounded cleanup. A sequence cannot cross entry, tool,
+prompt, package-data, canonical-value, or replay boundaries.
+
+`float.format(value: Float, decimals: Int) returns Result<String, FormatError>`
+is pure fixed-decimal binary64 formatting. `decimals` must be in `0..=18`; it
+returns exactly that many digits after the decimal point, never uses an
+exponent, rounds to nearest with ties to even, and preserves the negative sign
+for `-0.0` and values rounded to negative zero. It returns
+`float.invalid_decimals` for an invalid precision and `float.non_finite` for
+NaN or infinity.
+
+The clockless `time` namespace consumes and produces epoch seconds only:
+
+```allen
+time.format_utc(seconds: Int) returns Result<String, TimeError>
+time.parse_utc(text: String) returns Result<Int, TimeError>
+time.bucket(seconds: Int, width: Int) returns Result<Int, TimeError>
+```
+
+`format_utc` accepts only `-62135596800..=253402300799` and returns exactly the
+20 ASCII bytes `YYYY-MM-DDTHH:MM:SSZ`, using proleptic Gregorian years
+`0001..9999`. `parse_utc` accepts exactly that spelling: no whitespace,
+fractions, leap seconds, offsets, or alternate separators. Invalid text returns
+`time.invalid_format`; text or epoch values outside the supported range return
+`time.out_of_range`. `bucket` accepts the same epoch range and returns
+`floor(seconds / width) * width`, so negative values bucket mathematically
+rather than by truncation; width must be positive or it returns
+`time.invalid_bucket`.
 
 `length` accepts exactly one argument. Each String operation has exactly the
 arity and operand types shown. `list.append` accepts exactly two, and
@@ -224,8 +351,10 @@ order. Bytes order is lexicographic unsigned-byte order. Duplicate keys trap wit
 `map.duplicate_key`. Map construction order does not affect equality,
 iteration, display, or serialization.
 
-Equality is available for all inhabited core values of the same type. It is
-recursive for collections and uses the Float rule above. Ordered operators are
+Equality is available for all inhabited, non-affine core values of the same
+type except callable and `unknown` values. It is recursive for collections,
+uses the Float rule above, and compares a range's start, end, and inclusive
+flag. A `Sequence<T>` is not comparable. Ordered operators are
 available for `Int`, `Float`, `String`, and `Bytes`. `+`, `-`, `*`, and `/`
 require two values of the same numeric type; `%` requires two `Int` values.
 `!`, `&&`, and `||` require `Bool`. Boolean binary operators evaluate their
@@ -237,9 +366,10 @@ index returns an `Int` from 0 through 255. A map index has the map key type and
 returns the value type. A tuple index MUST be a nonnegative integer literal so
 the compiler can select its result type. A missing map key traps with
 `map.key_not_found`. Any invalid sequence index traps with `index.out_of_bounds`.
-String indexing is not part of this profile. String scalar access uses
-`string.get`, and `for scalar in value` iterates one evaluated immutable String
-snapshot in Unicode scalar order.
+Ordinary String indexing is not part of this profile. String scalar access uses
+`string.get`; bracket slicing accepts a half-open `Range<Int>`; and
+`for scalar in value` iterates one evaluated immutable String snapshot in
+Unicode scalar order.
 
 Local bindings use `let name = expression;` or `mut name = expression;`. A type
 annotation MAY follow the name. Assignment is a statement and uses
@@ -281,8 +411,9 @@ bit pattern in big-endian form. Strings use their UTF-8 bytes. The tags are:
 | `08` | Map | Entry count, then encoded keys and values in map order |
 | `09` | Tuple | Element count, then encoded elements |
 
-The encoder MUST reject a length above `u32::MAX`. `Never` has no tag. Future
-value kinds MUST use new tags and MUST NOT change these encodings.
+The encoder MUST reject a length above `u32::MAX`. `Never`, `Range<Int>`, and
+`Sequence<T>` have no tag. Future value kinds MUST use new tags and MUST NOT
+change these encodings.
 
 The first VM accounting hooks use deterministic logical allocation sizes. A
 frame costs 32 bytes plus 16 bytes for each register. A string or bytes payload
@@ -320,7 +451,7 @@ form.
 
 ### 3.2 Version 0.1 data-type profile
 
-This section fixes the first record, enum, pattern, result, and `unknown` rules.
+This section fixes the first record, enum, newtype, pattern, result, and `unknown` rules.
 
 A source file can declare records and enums before its entry function. A record
 declaration has this form:
@@ -329,7 +460,7 @@ declaration has this form:
 record Point {
   x: Int
   y: Int
-}
+} where { x >= 0 && y >= 0 }
 ```
 
 A record declaration introduces a type name and a constructor name. Record
@@ -340,10 +471,46 @@ compares types, creates a runtime value, displays a value, or encodes a value.
 Fields in a declaration, constructor, or pattern MUST be unique. A constructor
 MUST contain every declared field and MUST NOT contain an extra field.
 
+A named record declaration may end with `where { predicate }`. The block
+contains exactly one Boolean expression with at most 256 AST nodes. Its scope
+contains only the record's direct immutable fields. The expression permits
+Boolean literals, scalar or scalar-newtype field references, `!`, `&&`, `||`,
+`==`, `!=`, and ordering comparisons valid for the operand type. Calls
+(including constants and helpers), paths, indexing, arithmetic, construction,
+control flow, effects, `fail`, and `stop` are invalid.
+
+Record types and values remain structural: an invariant is not part of record
+type equality and does not run during construction or inside the VM. Instead,
+the compiler preserves the defining module and declaration identity and emits
+artifact boundary contracts for each named invariant-bearing record reachable
+through an entry input or output, recursively through records, lists, maps,
+tuples, options, results, enums, aliases, and newtypes. The runtime checks input
+contracts after strict entry projection and before the VM starts, and output
+contracts after the entry completes and before JSON acceptance. `decode<T>`,
+tool values, model responses, and other internal values do not run them.
+
+Input and output failures are terminal `runtime.entry_invariant.input` and
+`runtime.entry_invariant.output` errors with fixed content-free messages.
+
 ```allen
 let point = Point { y: 2, x: 1 };
 let x = point.x;
 ```
+
+A named or anonymous record constructor may start with one base spread:
+
+```allen
+let moved = Point { ..point, x: 4 };
+```
+
+The base and result MUST have the same exact record type. The compiler
+evaluates the base once, then evaluates replacement fields once from left to
+right. Explicit fields replace fields with the same names and MUST be unique.
+The source record remains unchanged. The compiler rejects an unknown field, a
+base marker without an expression, a repeated base, more than one base, and a
+spread that changes the record type. It constructs and charges one complete
+fresh record before it publishes the value or applies the record's invariant
+rules.
 
 An enum declaration has payloadless, tuple, or record variants:
 
@@ -384,7 +551,7 @@ MUST resolve alias chains without source-order dependence, MUST reject an
 unknown alias target even when the alias is unused, and MUST reject every
 direct or indirect alias cycle deterministically before bytecode emission.
 
-Alias, record, and enum names share one module type namespace and the same
+Alias, record, enum, and newtype names share one module type namespace and the same
 duplicate-name rules. `export type PublicName = ...` is importable wherever an
 exported record or enum is importable; a private alias is not. The imported
 alias is resolved in its defining module, so its target does not become public
@@ -392,6 +559,69 @@ merely because the alias is exported. A type-alias declaration ends after its
 syntactically complete right-hand-side type. It has no source terminator:
 neither a newline nor a literal semicolon is required or accepted as part of
 the declaration.
+
+A newtype is a nominal wrapper around one complete, inhabited, non-affine,
+non-callable value type:
+
+```allen
+newtype EpochSeconds = Int
+
+let epoch = EpochSeconds(1_700_000_000);
+let raw = epoch.value;
+```
+
+Its identity is the fully qualified defining module and declaration name. Two
+newtypes remain different even when their names or underlying types match, and
+an exported newtype carries that defining identity through an explicit type
+import. Construction requires `Name(value)` with exactly the underlying type;
+the only projection is `.value`. There is no implicit conversion,
+newtype-destructuring pattern, arithmetic forwarding, or cross-newtype
+comparison. Equality, ordering, and map-key support are available only when
+the underlying type supports the corresponding operation, and operands must
+have the same newtype identity.
+
+The compiler MUST reject direct or indirect recursive newtypes and underlying
+types that are incomplete, uninhabited, affine, capability-bearing, or
+callable. Bytecode, verification, runtime values, canonical value encoding,
+`unknown`, and `narrow` preserve the nominal identity. Entry JSON uses the bare
+underlying JSON representation, but the strict schema, entry contract, and
+artifact digests include the canonical identity; decoding an entry value
+reconstructs the wrapper.
+
+Top-level constants are declared with a mandatory type and terminator:
+
+```allen
+const SweepStart: Int = 256;
+export const AlertThreshold: Float = 97.0;
+```
+
+Constants and functions share the module value namespace; record and newtype
+constructor names also occupy that namespace. A constant may refer to a later
+constant in the same module. An explicit import may name an exported constant,
+and the imported value retains the defining module's nominal type identities.
+Private constants cannot be imported and imports do not re-export constants.
+
+The compiler builds a dependency graph over fully resolved constant names,
+orders ready nodes by canonical module path and source name, and rejects every
+cycle before evaluation with a stable list of cycle members. It evaluates each
+constant during compilation under 100,000 instructions, 1,048,576 cumulative
+logical allocation bytes, a 1,048,576-byte maximum allocation, and call depth
+128. Exceeding any bound is a compile-time resource-limit diagnostic.
+
+A constant expression may contain literals, list, map, tuple, record, enum,
+`Option`, `Result`, and newtype construction, references to constants, field or
+index access, and existing pure deterministic operators and built-ins applied
+only to compile-time values. It cannot read an entry argument, use conditional
+or match control flow, call a source function, construct or call a closure, iterate,
+spawn, await, inspect capabilities, invoke an effect or tool, or use `stop` or
+`fail`. The declared type is exact; there is no constant-only coercion.
+
+Successful evaluation produces a canonical typed value. The compiler removes
+constant declarations before final bytecode lowering and materializes each use
+from existing scalar bytecode constants and typed aggregate constructors.
+Artifacts contain no constant initializer function or runtime initialization
+order. User enum IDs and fully qualified newtype identities remain part of the
+materialized value, canonical serialization, schema, and artifact digest.
 
 Version 0.1 requires at least one enum variant and at least one type in a tuple
 variant. It does not support recursive enum payload types. It rejects an
@@ -407,9 +637,10 @@ E>` for the type parameter that has no payload. The compiler MUST reject a
 constructor when it cannot resolve every type parameter.
 
 Field access uses `value.field`. Destructuring uses a match pattern. Version 0.1
-has Boolean patterns, record patterns, enum-variant patterns, and the wildcard
-`_`. A payload subpattern in this profile is a new local binding or `_`.
-Patterns do not have guards, OR operators, or collection forms.
+has Boolean patterns, bindings, record patterns, enum-variant patterns, range
+patterns, OR patterns, and the wildcard `_`. Patterns may nest recursively in
+record and enum payloads. They do not have guards, as-patterns, or collection
+forms.
 
 ```allen
 match reading {
@@ -427,10 +658,42 @@ case that an earlier pattern did not cover. The compiler MUST reject a duplicate
 case and each case after a wildcard as unreachable. For this profile, a record
 pattern or wildcard covers the one possible structural record shape.
 
-Postfix `?` applies only to `Result<T, E>`. It is valid only in a function whose
-return type is `Result<U, E>` with the exact same error type. `Ok(value)?`
-produces `value`. `Err(error)?` returns the original `Err` value from the current
-function. It does not convert or reconstruct that value.
+`literal..literal` and `literal..=literal` are half-open and inclusive range
+patterns. Their endpoints must be compile-time literals with the scrutinee's
+exact `Int`, `String`, or `Bytes` type. Float range patterns are invalid.
+String endpoints compare by Unicode scalar sequence; Bytes endpoints compare
+lexicographically by unsigned byte. A range pattern binds no names and an
+empty range is invalid. The compiler evaluates the scrutinee once, includes
+range coverage in overlap and reachability checks, and reports an arm whose
+complete range an earlier arm covers. Range patterns do not establish
+exhaustiveness unless their finite coverage is complete; otherwise the match
+still needs a catch-all arm.
+
+`left | right` joins alternatives in one arm and is only a pattern operator.
+Alternatives test left to right without reevaluating the scrutinee. Every
+alternative, including a nested alternative, must bind the same names with the
+same exact types and ownership states. The compiler treats all alternatives as
+one arm for exhaustiveness and separately for overlap and reachability. A
+wildcard makes later alternatives in that OR pattern unreachable. An
+alternative cannot duplicate or partially move an affine value.
+
+Postfix `?` applies to `Result<T, E>` and `Option<T>`. On a `Result`, it is
+valid only in a function whose return type is `Result<U, E>` with the exact
+same error type. `Ok(value)?` produces `value`; `Err(error)?` returns the
+original `Err` value from the current function. On an `Option`, it is valid
+only in a function whose return type is `Option<U>`. `Some(value)?` produces
+`value`; `None?` returns `None` from the current function. It never converts
+between `Option` and `Result`, and it evaluates its operand exactly once.
+
+Optional postfix `?.` applies to a field access or extension-style call whose
+receiver has exact type `Option<T>`. The compiler evaluates the receiver once.
+`None` skips that member and all arguments in that optional step. A successful
+non-`Option` result becomes `Some(result)`, while an `Option<U>` result stays
+one layer deep. Every later optional access must write its own `?.`; ordinary
+`.` neither unwraps an `Option` nor continues an optional chain. Field and
+extension resolution use the unwrapped exact type. Ownership at each join is
+the same as an explicit nested `match`, so the compiler rejects a chain that
+would leave an affine value live on only one path.
 
 The type `unknown` is inhabited, but no concrete operation accepts it. Local
 code can create one only with the explicit total operation
@@ -440,6 +703,24 @@ validation. It returns `Some(value)` when the value has type `T` and `None`
 otherwise. Empty collections can validate against a compatible collection type
 because they contain no conflicting element. The target `T` MUST be a complete
 concrete type. Version 0.1 does not provide another cast from `unknown`.
+
+`decode<T>(bytes: Bytes) returns Result<T, DecodeError>` is a pure generic
+operation. `T` MUST be one complete concrete entry-boundary value type. The
+operation accepts exactly one UTF-8 JSON value and applies the same strict wire
+projection as entry input: exact scalar kinds, exact tuple lengths and record
+fields, tagged enum/option/result objects, canonical sorted map pairs, and bare
+wire values rewrapped with the requested nominal newtype identity. It rejects
+a UTF-8 BOM, trailing data, duplicate object keys, missing or unknown fields,
+coercions, malformed tagged values, unordered or duplicate map keys, and every
+target mismatch.
+
+`DecodeError` is the standard `{ code: String, message: String }` error record.
+Its stable codes are `invalid_utf8`, `invalid_json`, `duplicate_key`, and
+`type_mismatch`; messages are deterministic and bounded. Invalid data is an
+`Err`, not a trap. Decode input is cumulatively limited to 1 MiB per execution
+and JSON nesting is limited to 128; either limit terminates through
+`resource.limit` and cannot be caught as `DecodeError`. Instruction and logical
+allocation accounting apply before decoded values become visible.
 
 The source words `any`, `undefined`, and `null` are forbidden. A type suffix
 such as `String?` is also forbidden. Optional data uses `Option<T>`.
@@ -488,10 +769,10 @@ import { Reading as LocalReading } from "./support.allen";
 ```
 
 The compiler resolves the path relative to the importing module. An import can
-name an exported function, record, enum, or type alias. An import does not re-export a
-name. A private declaration cannot be imported. Version 0.1 rejects a
-self-import and every cycle in the module import graph. It does not support a
-wildcard import, namespace import, or re-export.
+name an exported constant, function, record, enum, newtype, or type alias. An import does
+not re-export a name. A private declaration cannot be imported. Version 0.1
+rejects a self-import and every cycle in the module import graph. It does not
+support a wildcard import, namespace import, or re-export.
 
 A package module can import through one dependency alias declared in its
 manifest:
@@ -532,12 +813,69 @@ export fn main() returns Int {
 ```
 
 A parameter and return value use exact declared types. Version 0.1 requires
-these annotations on every named function and closure. Every named function
+these annotations on every named function and ordinary closure. A short
+closure infers them from one exact expected function type. Every named function
 MUST declare every parameter type and its return type; an omitted effect clause
 means the exact empty effect set. A function body has a tail result, an explicit `return expression;`,
 a bare `return;` in a `Void` function, or both on separate control-flow paths.
 Every reachable return MUST have the declared return type. Control MUST NOT reach the end of a
 non-`Void` function without a value.
+
+A function body may declare a named local function before the first statement
+that uses it:
+
+```allen
+fn summarize(value: Int) returns Int {
+  fn normalize(input: Int) returns Int { input + 1 }
+  normalize(value)
+}
+```
+
+A local function is synchronous, nongeneric, and noncapturing. Its scope begins
+at its declaration, so forward calls, self-recursion, and mutual recursion are
+invalid. It may refer only to its parameters, top-level constants, imported
+items, and top-level functions; a reference to an enclosing value or mutable
+binding is a capture error. Ordinary parameter, return-type, effect, body, and
+local-name rules apply. A local function has a stable internal identity derived
+from its containing function and lexical ordinal. It cannot be exported and
+does not create a package-visible name.
+
+#### Source tests
+
+A module may declare test-only blocks:
+
+```allen
+test "empty input is accepted" {
+  ()
+}
+
+test "recorded lookup" effects [tool.lookup@1] {
+  ()
+}
+```
+
+The effect clause is optional; omission denotes exactly the empty effect set.
+Test names must be unique within one module. Tests are never exported or
+importable and do not appear in production functions, artifacts, digests, or
+effect reports. A test is checked and lowered only when selected, as an
+isolated private zero-argument `Void` entry that may call module-private
+helpers and ordinary imports. Only a completed outcome passes. Failure,
+stopping, traps, resource exhaustion, compilation failure, and replay
+divergence fail the test. A test with declared effects may run only from an
+exact artifact-bound `ALLEN-REPLAY/3` journal; a live provider is forbidden.
+For a verified package graph, the selected module's defining package is the
+test artifact root. Only the selected module's ordinary import closure may
+contribute dependency import contracts, source, templates, or other package
+metadata. Package-local template resolution remains tied to each defining
+package, including when two reachable packages use the same template name.
+Manifest-selected tool contracts use the exact frozen catalog schemas during
+both compilation and replay validation. The synthetic entry's manifest
+capability contract is derived from its declared nonlocal, nontool effects;
+unrelated production capabilities are not granted to the test.
+Typed-tool package tests also require the complete canonical JOSH
+`catalog/set` parameters document supplied through `allen test --catalog`.
+That frozen catalog validates replayed results but does not provide a live tool
+provider.
 
 A generic function declares one or more type parameters. Version 0.1 provides
 one reusable constraint, `Eq`:
@@ -558,12 +896,43 @@ constraint other than `Eq`, higher-kinded types, specialization, or generic
 recursion. The compiler monomorphizes each used concrete instantiation and MUST
 bound the number and expanded type depth of instantiations.
 
+A function declaration may give pure defaults to a suffix of its parameters:
+
+```allen
+fn describe(value: String, prefix: String = "value") returns String {
+  prefix
+}
+```
+
+A default may refer only to constants and earlier parameters. It cannot refer
+to a later parameter, local state, a capability, or an effectful operation.
+Positional direct calls may omit only the defaulted suffix. Fully labeled
+direct calls may omit any defaulted parameter. The compiler evaluates supplied
+arguments once in source order, then missing defaults in declaration order,
+and emits one complete positional call. Calls through function values still
+supply every argument. Exported defaults and their canonical source digests are
+part of the artifact and package contract, so changing a public default changes
+that contract. External host and tool operations do not declare defaults.
+
 A closure uses function syntax in an expression:
 
 ```allen
 let offset = 1;
 let add_offset = fn(value: Int) returns Int { value + offset };
 ```
+
+A concise closure has an optional comma-separated list of untyped parameters,
+one expression body, and an arrow:
+
+```allen
+let increment: fn(Int) returns Int = fn(value) => value + 1;
+```
+
+The compiler infers the parameter type, result type, and effect set from one
+exact expected function type. It rejects the concise form without that exact
+context, including a context that would require overload selection. It then
+checks captures, ownership, and effects as for an ordinary closure. Concise
+closures do not infer public function declarations.
 
 A closure captures an immutable local by value. Version 0.1 rejects mutable
 captures, recursive closures, and cyclic closure environments. A closure is not
@@ -577,6 +946,83 @@ fn apply(callback: fn(Int) returns Int, value: Int) returns Int {
   callback(value)
 }
 ```
+
+Direct calls may label every argument with the declaration's parameter name:
+
+```allen
+let replaced = string.replace(
+  value: "old old", needle: "old", replacement: "new"
+);
+```
+
+A direct call is either fully positional or fully labeled. Labels must be
+known and unique. Every required parameter must be present; a parameter with a
+default may be omitted. Labels do not become part of a function value or
+function type. The compiler evaluates labeled arguments once in source order,
+then passes their values in declaration order. Calls through a function value
+remain positional. Mixed arguments, missing required labels, duplicate labels,
+and unknown labels are errors.
+
+One lambda may follow a direct call's closing parenthesis. It supplies the
+final argument:
+
+```allen
+let active = list.filter(users) fn(user) => user.active;
+```
+
+The final parameter must have one exact function type. The compiler evaluates
+ordinary arguments before it constructs the callback, resolves labels before
+inserting it, and then lowers the form to a normal call. A typed closure or a
+concise closure may use this position. Capture, effect, ownership, and generic
+rules are unchanged. A call cannot have multiple trailing callbacks or a
+trailing block that is not a lambda.
+
+In a direct call, `_` may replace an argument and create a partial closure:
+
+```allen
+let replace_name = string.replace(_, "old", "new");
+```
+
+Each placeholder becomes one closure parameter in source order and has the
+exact corresponding parameter type. The compiler first resolves one named
+callee, including positional or fully labeled arguments. It evaluates every
+non-placeholder argument once in source order when it creates the partial
+closure. Those evaluations contribute their effects at closure creation; a
+later closure call contributes the callee's effects. Repeated placeholders are
+distinct. A placeholder cannot be the callee, occur inside a nested argument
+expression, or appear outside a direct call argument. The compiler rejects a
+partial call whose resolution needs overload selection or another expected
+type guess.
+
+For exact unary function values, `f >> g` creates the typed closure
+`fn(value) { g(f(value)) }`. The result type of `f` must exactly match the input
+type of `g`. The compiler evaluates each operand once when it creates the
+closure, and a later call evaluates `f` before `g`. The closure has the closed
+union of both declared effect sets. Composition associates left and rejects an
+affine function capture, a nonconcrete intermediate type, an implicit
+conversion, or tuple spreading.
+
+The left-associative forward pipe `value |> stage(args)` inserts its left value
+into a direct call. Without a placeholder, it becomes the first argument. With
+exactly one `_` call argument, it replaces that placeholder. A stage cannot
+contain more than one pipe placeholder, pipe into a bare function value, or
+omit the piped value. The compiler evaluates the initial value and each stage
+once from left to right. It resolves each expanded call before lowering the
+next stage, including labels, defaults, and callback rules.
+
+An extension call `receiver.operation(arguments)` may resolve to a namespace
+function whose first parameter has the receiver's exact static type. The
+compiler inserts the receiver as the first positional argument and evaluates
+it once. The compiler-owned mappings are `List<T>` to `list`, `Map<K, V>` to
+`map`, `String` to `string`, and `Bytes` to `bytes`.
+
+`import extension { render as display } from "package";` adds only the named
+imported function to extension lookup, under its local alias. Ordinary imports
+and local functions do not enter that lookup. A real field wins over an
+extension candidate. Otherwise the compiler requires exactly one candidate
+whose first parameter matches without conversion. It does not search unrelated
+imports or add dynamic dispatch. Effects, labels, defaults, callbacks, source
+order, generics, and ownership match the expanded direct call.
 
 Callback parameter types, return type, and effect set MUST match exactly in
 version 0.1. An omitted callback-type effect clause is the exact empty set.
@@ -664,8 +1110,29 @@ async fn http.get(url: String) returns Result<{
 }`. The URL is parsed and validated when the lazy operation starts. A non-2xx
 status is not a transport error.
 
+The standard subprocess namespace provides one argv-only operation:
+
+```allen
+async fn exec.run(argv: List<String>, stdin: Option<Bytes>) returns Result<{
+  status: Int
+  stderr: Bytes
+  stdout: Bytes
+}, ExecError> effects [exec.run]
+```
+
+`exec.run` never invokes a shell. Metacharacters are ordinary argument data.
+An empty argv, a path-bearing executable name, a NUL, more than 256 arguments,
+an argument longer than 64 KiB, or a total argv larger than 1 MiB returns
+`exec.invalid_argv`. Nonzero process status is `Ok` data. Each execution permits
+at most 16 calls; stdin, stdout, and stderr are each limited to 1 MiB; and each
+call has a five-second wall limit. The closed error codes are `exec.denied`,
+`exec.invalid_argv`, `exec.stdin_limit`, `exec.stdout_limit`,
+`exec.stderr_limit`, `exec.timeout`, `exec.unavailable`, and `exec.limit`.
+There is no retry.
+
 `FileError`, `NetworkError`, `AgentError`, `UserError`, `SubAgentError`,
-`ModelError`, and `PermissionError` are each the exact structural record
+`ModelError`, `PermissionError`, `ExecError`, `TimeError`, `ParseError`, `FormatError`, and `DecodeError`
+are each the exact structural record
 `{ code: String, message: String }`. Their code is the only programmatic
 discriminator; messages are bounded, safe, and nonsecret.
 Its code and safe message do not expose an ambient path. A filesystem call is
@@ -718,7 +1185,9 @@ need not request it. The inspected set is
 frozen before execution. It contains sorted unique canonical manifest
 capability names that were both requested and effectively granted for this
 execution. In this profile those inspectable names are `fs.read`, `fs.write`,
-`net.http_get`, and `permission.request_external_fs`. It contains no local
+`net.http_get`, `exec.run`, and `permission.request_external_fs`. `exec.run`
+appears only when at least one requested command has an effective narrower or
+exact host grant. It contains no local
 effect, tool, provider, network origin, filesystem path, opaque handle,
 credential, dynamic external grant, or undeclared authority. `is_granted`
 returns false for every malformed,
@@ -769,22 +1238,27 @@ An `identifier` is an ASCII letter or `_`, followed by zero or more ASCII
 letters, decimal digits, or `_`. Identifiers are case-sensitive.
 
 The reserved words are `as`, `async`, `await`, `break`, `continue`, `effects`,
-`else`, `enum`, `export`, `false`, `fn`, `for`, `from`, `if`, `import`, `in`,
-`let`, `loop`, `manifest`, `map`, `match`, `mut`, `prompt`, `record`, `return`,
-`returns`, `spawn`, `true`, `type`, and `while`. `None`,
+`else`, `enum`, `export`, `extension`, `false`, `fn`, `for`, `from`, `if`, `import`, `in`,
+`const`, `let`, `loop`, `manifest`, `map`, `match`, `mut`, `newtype`, `prompt`, `record`, `return`,
+`returns`, `spawn`, `test`, `true`, `type`, `where`, and `while`. `None`,
 `Some`, `Ok`, `Err`, the
 built-in type names, and standard-library names are not general declarations
 when their specified meaning is required. A program cannot use `any`,
 `undefined`, or `null` as a value or type.
 
 An `int-literal` is one or more decimal digits and denotes an `Int` in range;
-its sign is supplied by unary `-`. A `float-literal` is decimal digits, `.`,
-decimal digits, and an optional exponent `e` or `E`, optional `+` or `-`, and
-one or more decimal digits. `NaN`, `Infinity`, and `-Infinity` are display
-spellings, not source literals.
+its sign is supplied by unary `-`. A numeric literal may contain `_` only
+between two decimal digits in its integer, fractional, or exponent digits; the
+separator is removed before range or Float parsing. A `float-literal` is
+decimal digits, `.`, decimal digits, and an optional exponent `e` or `E`,
+optional `+` or `-`, and one or more decimal digits. Leading, trailing,
+doubled, sign-adjacent, and punctuation-adjacent separators are invalid.
+`NaN`, `Infinity`, and `-Infinity` are display spellings, not source literals.
 
-A `string-literal` is `"` followed by zero or more non-control Unicode scalar
-values other than `"` and `\\`, followed by `"`. Its only escapes are
+A `string-literal` is an ordinary string, an indentation-trimmed multiline
+string, or a raw string. An ordinary string is `"` followed by zero or more
+non-control Unicode scalar values other than `"` and `\\`, followed by `"`.
+Its only escapes are
 `\\"`, `\\\\`, `\\n`, `\\r`, `\\t`, `\\0`, `\\b`, and `\\f`. It cannot
 contain an unescaped line break or control character. A `bytes-literal` starts
 with `b"`, ends with `"`, and contains only printable ASCII other than `"` and
@@ -808,6 +1282,25 @@ comments are comments, braces nest, and a nested template has its own literal
 and interpolation modes. Interpolation expressions evaluate once from left to
 right and must have type `String`. A template is an ordinary String; it does
 not merge or reinterpret prompt segments.
+
+A multiline string begins with `"""` and must have a line break immediately
+after that delimiter. Its closing `"""` starts on its own line. After source
+line-ending normalization, the compiler removes one delimiter-adjacent line
+break at each end and removes the longest common indentation from every
+nonblank content line. Blank lines do not affect that indentation. Tabs and
+spaces are distinct scalars, and a nonblank line indented less than the closing
+delimiter is an error. Multiline strings use the ordinary escapes and
+`${expression}` interpolation rules. Interpolations are evaluated once from
+left to right and must have type `String`.
+
+A raw string starts with `r` followed by zero through 16 `#` characters and a
+quote, and closes with the matching quote and hash count, for example `r"..."`
+or `r#"..."#`. Raw strings may contain line breaks. They preserve every
+enclosed source scalar after line-ending normalization, including quotes,
+backslashes, and `${...}` text. They perform no escape decoding or
+interpolation. A mismatched hash count does not close the literal. An
+unterminated raw string is diagnosed at its opening delimiter and names the
+required closing delimiter.
 
 The lexical terminal `template-text-scalar` below means one permitted literal
 segment scalar: any non-control Unicode scalar other than backtick or
@@ -849,13 +1342,15 @@ manifest-field     = "language" ":" string-literal
 capability         = effect-id [ "(" identifier ")" ] ;
 tool-requirement   = "{" "name" ":" string-literal ","
                      "version" ":" string-literal [ "," ] "}" ;
-import-declaration = "import" "{" import-name { "," import-name } [ "," ] "}"
+import-declaration = "import" [ "extension" ] "{" import-name { "," import-name } [ "," ] "}"
                      "from" string-literal ";" ;
 import-name        = identifier [ "as" identifier ] ;
 declaration        = record-declaration | enum-declaration | type-alias-declaration
-                   | function-declaration ;
+                   | newtype-declaration | const-declaration | function-declaration
+                   | test-declaration ;
 record-declaration = [ "export" ] "record" identifier "{"
-                     [ record-field { [ "," ] record-field } [ "," ] ] "}" ;
+                     [ record-field { [ "," ] record-field } [ "," ] ] "}"
+                     [ "where" "{" expression "}" ] ;
 record-field       = identifier ":" type ;
 enum-declaration   = [ "export" ] "enum" identifier "{"
                      enum-variant { [ "," ] enum-variant } [ "," ] "}" ;
@@ -863,12 +1358,15 @@ enum-variant       = identifier
                    | identifier "(" type { "," type } [ "," ] ")"
                    | identifier "{" [ record-field { [ "," ] record-field } [ "," ] ] "}" ;
 type-alias-declaration = [ "export" ] "type" identifier "=" type ;
+newtype-declaration = [ "export" ] "newtype" identifier "=" type ;
+const-declaration  = [ "export" ] "const" identifier ":" type "=" expression ";" ;
 function-declaration = [ "export" ] [ "async" ] "fn" identifier [ generic-parameters ]
                      "(" [ parameter { "," parameter } [ "," ] ] ")" "returns" type
                      [ effect-clause ] body ;
+test-declaration   = "test" string-literal [ effect-clause ] body ;
 generic-parameters = "<" generic-parameter { "," generic-parameter } [ "," ] ">" ;
 generic-parameter  = identifier ":" "Eq" ;
-parameter          = identifier ":" type ;
+parameter          = identifier ":" type [ "=" expression ] ;
 effect-clause      = "effects" "[" [ effect-id { "," effect-id } [ "," ] ] "]" ;
 body               = "{" { statement } [ expression ] "}" ;
 statement          = ( "let" | "mut" ) identifier [ ":" type ] "=" expression ";"
@@ -876,23 +1374,30 @@ statement          = ( "let" | "mut" ) identifier [ ":" type ] "=" expression ";
                    | "return" [ expression ] ";"
                    | conditional-expression
                    | while-statement | loop-statement | for-statement
+                   | local-function
                    | "break" ";" | "continue" ";" ;
+local-function     = "fn" identifier "(" [ parameter { "," parameter } [ "," ] ] ")"
+                     "returns" type [ effect-clause ] body ;
 while-statement    = "while" "(" expression ")" body ;
 loop-statement     = "loop" body ;
-for-statement      = "for" loop-binding "in" expression [ ".." expression ] body ;
+for-statement      = "for" loop-binding "in" expression body ;
 loop-binding       = identifier | "_" | "(" loop-binding-item ","
                      [ loop-binding-item { "," loop-binding-item } [ "," ] ] ")" ;
 loop-binding-item  = identifier | "_" ;
 type               = named-type | generic-type | tuple-type | record-type | function-type ;
 named-type         = identifier { "." identifier } ;
-generic-type       = ( "List" | "Option" | "Future" | "Task" | "Prompt" )
+generic-type       = ( "List" | "Option" | "Future" | "Task" | "Prompt" | "Range" | "Sequence" )
                      "<" type ">"
                    | ( "Map" | "Result" ) "<" type "," type ">" ;
 tuple-type         = "(" [ type "," [ type { "," type } [ "," ] ] ] ")" ;
 record-type        = "{" [ record-field { [ "," ] record-field } [ "," ] ] "}" ;
 function-type      = "fn" "(" [ type { "," type } [ "," ] ] ")" "returns" type
                      [ effect-clause ] ;
-expression         = disjunction ;
+expression         = range ;
+range              = coalescing [ ( ".." | "..=" ) coalescing ] ;
+coalescing         = pipeline [ "??" coalescing ] ;
+pipeline           = composition { "|>" composition } ;
+composition        = disjunction { ">>" disjunction } ;
 disjunction        = conjunction { "||" conjunction } ;
 conjunction        = equality { "&&" equality } ;
 equality           = comparison { ( "==" | "!=" ) comparison } ;
@@ -900,14 +1405,17 @@ comparison         = addition { ( "<" | "<=" | ">" | ">=" ) addition } ;
 addition           = multiplication { ( "+" | "-" ) multiplication } ;
 multiplication     = unary { ( "*" | "/" | "%" ) unary } ;
 unary              = ( "!" | "-" | "await" | "spawn" ) unary | postfix ;
-postfix            = primary { "[" expression "]" | "." identifier
-                     | [ type-argument ] "(" [ expression { "," expression } [ "," ] ] ")"
+postfix            = primary { slice | "." identifier | "?." identifier
+                     | [ type-argument ] "(" [ call-argument { "," call-argument } [ "," ] ] ")"
+                       [ closure | short-closure ]
                      | "?" } ;
+slice              = "[" range "]" ;
+call-argument      = [ identifier ":" ] ( expression | "_" ) ;
 type-argument      = "<" type ">" ;
 primary            = literal | template-literal | identifier | "map" | "Some" | "Ok" | "Err"
                    | enum-record-constructor | qualified-enum
                    | record-constructor | anonymous-record | list-literal | map-literal | tuple-or-group | match-expression
-                   | conditional-expression | closure | prompt-expression | await-block ;
+                   | conditional-expression | closure | short-closure | prompt-expression | await-block ;
 literal            = int-literal | float-literal | string-literal | bytes-literal
                    | "true" | "false" | "None" | "(" ")" ;
 template-literal   = "`" { template-segment | template-interpolation } "`" ;
@@ -917,28 +1425,35 @@ template-interpolation = "${" expression "}" ;
 qualified-enum     = identifier "." identifier ;
 enum-record-constructor = identifier "." identifier "{" [ record-value-field
                      { [ "," ] record-value-field } [ "," ] ] "}" ;
-record-constructor = identifier "{" [ record-value-field
-                     { [ "," ] record-value-field } [ "," ] ] "}" ;
-anonymous-record   = "{" [ record-value-field
-                     { [ "," ] record-value-field } [ "," ] ] "}" ;
+record-constructor = identifier "{" [ record-update-base [ "," ] ]
+                     [ record-value-field { [ "," ] record-value-field } [ "," ] ] "}" ;
+anonymous-record   = "{" [ record-update-base [ "," ] ]
+                     [ record-value-field { [ "," ] record-value-field } [ "," ] ] "}" ;
+record-update-base = ".." expression ;
 record-value-field = identifier [ ":" expression ] ;
-list-literal       = "[" [ expression { "," expression } [ "," ] ] "]" ;
-map-literal        = "map" "{" [ expression ":" expression
-                     { [ "," ] expression ":" expression } [ "," ] ] "}" ;
+list-literal       = "[" [ list-item { "," list-item } [ "," ] ] "]" ;
+list-item          = expression | ".." expression ;
+map-literal        = "map" "{" [ map-item { [ "," ] map-item } [ "," ] ] "}" ;
+map-item           = expression ":" expression | ".." expression ;
 tuple-or-group     = "(" expression [ "," [ expression { "," expression } [ "," ] ] ] ")" ;
 match-expression   = "match" expression "{" match-arm { [ "," ] match-arm } [ "," ] "}" ;
 conditional-expression = "if" "(" expression ")" body
                          [ "else" ( conditional-expression | body ) ] ;
 match-arm          = pattern "=>" expression ;
-pattern            = "_" | "true" | "false" | record-pattern | enum-pattern
-                   | "None" | ( "Some" | "Ok" | "Err" ) "(" ( identifier | "_" ) ")" ;
+pattern            = pattern-or ;
+pattern-or         = pattern-primary { "|" pattern-primary } ;
+pattern-primary    = "_" | identifier | "true" | "false" | record-pattern | enum-pattern
+                   | pattern-range | "None"
+                   | ( "Some" | "Ok" | "Err" ) "(" pattern ")" ;
+pattern-range      = literal ( ".." | "..=" ) literal ;
 record-pattern     = identifier "{" [ pattern-field { [ "," ] pattern-field } [ "," ] ] "}" ;
 enum-pattern       = identifier "." identifier
-                   [ "(" ( identifier | "_" ) { "," ( identifier | "_" ) } [ "," ] ")"
+                   [ "(" pattern { "," pattern } [ "," ] ")"
                    | "{" [ pattern-field { [ "," ] pattern-field } [ "," ] ] "}" ] ;
-pattern-field      = identifier [ ":" ( identifier | "_" ) ] ;
+pattern-field      = identifier [ ":" pattern ] ;
 closure            = "fn" "(" [ parameter { "," parameter } [ "," ] ] ")" "returns" type
                      [ effect-clause ] body ;
+short-closure     = "fn" "(" [ identifier { "," identifier } [ "," ] ] ")" "=>" expression ;
 prompt-expression  = "prompt" "{" prompt-field { [ "," ] prompt-field } [ "," ] "}" ;
 prompt-field       = "system" ":" expression | "context" ":" expression
                    | "data" ":" expression | "output" ":" type
@@ -947,17 +1462,34 @@ await-block        = "await" body ;
 ```
 
 `Void`, `Bool`, `Int`, `Float`, `String`, `Bytes`, `Never`, `List`, `Map`,
-`Option`, `Result`, `Future`, `Task`, `Prompt`, `Workspace`,
+`Option`, `Result`, `Range`, `Sequence`, `Future`, `Task`, `Prompt`, `Workspace`,
 `ExternalFsAccess`, `SubAgent`, `ExternalFileRequest`,
-`ExternalDirectoryRequest`, `HttpResponse`, `FileError`, `NetworkError`,
+`ExternalDirectoryRequest`, `HttpResponse`, `FileError`, `NetworkError`, `TimeError`,
+`ParseError`, `FormatError`, `DecodeError`,
 `TranscriptPart`, `TranscriptMessage`, `TranscriptSnapshot`, and `unknown` are
 the built-in named types. `List<T>`,
-`Map<K, V>`, `Option<T>`, `Result<T, E>`, `Future<T>`, `Task<T>`, and
-`Prompt<T>` have the arities shown; a user type or generic parameter is a
+`Map<K, V>`, `Option<T>`, `Result<T, E>`, `Range<Int>`, `Sequence<T>`,
+`Future<T>`, `Task<T>`, and `Prompt<T>` have the arities shown. `Range` accepts
+only `Int`; a user type or generic parameter is a
 single-segment `named-type` with its declared arity. Generated tool schema
 types use their complete `tools.`-qualified `named-type` and cannot be shortened
 or imported. An empty list or map requires an expected
 type. A tuple type or value with one member requires its trailing comma.
+
+List and map literals accept spread items anywhere:
+
+```allen
+let values = [1, ..more, 4];
+let settings = map { "old": 1, ..overrides, "new": 2 };
+```
+
+A list spread requires `List<T>`. A map spread requires the literal's exact
+key and value types. The compiler evaluates ordinary and spread items once
+from left to right. Later map entries replace earlier entries with the same
+key, including keys supplied by a spread. A duplicate key among ordinary
+entries in one map literal remains an error. Empty spreads do nothing. The
+runtime calculates and charges the complete result allocation before it
+publishes the ordinary list or map; a failed item publishes no partial value.
 
 `mut name = expression;` and `mut name: Type = expression;` are the only
 mutable-local declarations. `let mut` is not grammar and is rejected.
@@ -971,8 +1503,9 @@ effect set must remain explicit.
 `Type.Variant`, including `Reading.Empty`, `Reading.Number(value)`, and
 `Reading.Named { label: "cpu", value: 3 }`, is the only user-enum spelling.
 `Type::Variant` is not ALLEN syntax. `None`, `Some`, `Ok`, and `Err` are the
-built-in `Option` and `Result` constructors. A `?` postfix applies only to a
-compatible `Result`; its current function must return the same error type.
+built-in `Option` and `Result` constructors. A `?` postfix applies to a
+compatible `Result` or `Option`; its current function must return the matching
+container and, for `Result`, the same error type.
 `await` and `spawn` require their specified `Future`/`Task` operands, and an
 `await` block uses the separate `await body` production.
 
@@ -1031,12 +1564,14 @@ sequence as successful `string.get` calls at indexes zero through
 `length(value) - 1`. Reassigning a mutable outer binding that supplied
 `values` does not change the snapshot.
 
-`for index in start..end { body }` evaluates `start` and then `end` exactly
-once as `Int`. It yields the ascending half-open range from `start` through
-`end - 1`; it is empty when `start >= end`. The last step is guarded before
-addition, so endpoints at the `Int` boundaries neither overflow nor create an
-extra iteration. `..` exists only in this clause and is not an expression
-operator.
+`Range<Int>` is also iterable. A half-open range yields `start` through
+`end - 1`; an inclusive range yields through `end`. Both are empty when
+`start > end`, while equal inclusive bounds yield once. The final step is
+guarded before addition, so endpoints at the `Int` boundaries neither overflow
+nor create an extra iteration. `for index in start..end { body }` therefore
+retains the previous half-open loop behavior through an ordinary range
+expression. `..` also introduces a record-update base or collection-literal
+spread where those grammars require it.
 
 A loop binding is an identifier, `_`, or a one-level tuple of identifiers and
 wildcards. It is immutable and scoped to one iteration. Tuple arity and element
@@ -1060,7 +1595,7 @@ their structured join or cancel-and-join cleanup rules.
 
 | Precedence, tight to loose | Operators or form | Associativity |
 |---|---|---|
-| 1 | call, index `[]`, field `.`, postfix `?` | left |
+| 1 | call, index `[]`, field `.`, optional member `?.`, postfix `?` | left |
 | 2 | prefix `!`, numeric `-`, `await`, `spawn` | right |
 | 3 | `*`, `/`, `%` | left |
 | 4 | `+`, `-` | left |
@@ -1068,20 +1603,28 @@ their structured join or cancel-and-join cleanup rules.
 | 6 | `==`, `!=` | left |
 | 7 | `&&` | left |
 | 8 | `||` | left |
+| 9 | `>>` | left |
+| 10 | `|>` | left |
+| 11 | `??` | right |
+| 12 | `..`, `..=` | nonassociative |
 | statement only | `=`, `+=`, `-=`, `*=`, `/=`, `%=` on a mutable local | not an expression |
 
-Calls, indexing, field access, and `?` chain left to right. Type arguments are
+Calls, indexing, field access, `?.`, and `?` chain left to right. Type arguments are
 part of a call only; they do not make `<` or `>` expression operators. Only
 `narrow<T>` and typed response operations accept explicit type arguments;
 ordinary generic calls infer them. ALLEN evaluates the left operand of `&&`
 and `||` first. It evaluates the right operand of `&&` only when left is true,
-and the right operand of `||` only when left is false.
+and the right operand of `||` only when left is false. Composition binds below
+Boolean operations and above the forward pipe. The pipe binds above `??`, and
+range construction binds below it. A range operator is nonassociative;
+parentheses are required to place one range expression inside another
+expression position.
 
 #### Reserved syntax
 
 The following forms are deliberately unavailable and MUST NOT be treated as
 extensions of this grammar: `try`, `catch`, `finally`, `throw`, or
-general exception handling. Pattern guards, OR patterns, collection patterns,
+general exception handling. Pattern guards, as-patterns, collection patterns,
 `let mut`, `Type::Variant`, and implicit conversions are also not version 0.1
 syntax.
 
@@ -1111,6 +1654,13 @@ effects, even when short-circuiting skips its right operand at runtime. A
 skipped right operand performs no allocation, arithmetic trap, provider,
 filesystem, network, tool, task-spawn, or `stop` operation.
 
+`Option<T> ?? T` produces `T`. The operator has lower precedence than `||`
+and associates right. It evaluates its left operand once; `Some(value)`
+produces `value`, while `None` evaluates and produces the right operand. The
+compiler rejects a non-`Option` left operand or a right operand whose type is
+not exactly the option payload type. Static effects include both operands even
+when the right operand is skipped.
+
 A loop's static effect set includes its condition or bounds, iterable, and
 body. This remains true for an empty range, collection, or initially false
 `while` condition. Runtime effects, allocation, traps, task creation, and
@@ -1123,6 +1673,16 @@ The effect system does not prove that an external operation is safe. It does not
 `stop(reason)` is a built-in control terminator. Its type is `fn stop(reason: String) returns Never`. It is not an authority effect. The compiler MUST NOT add an effect when a function calls `stop`. The manifest MUST NOT require a stop capability.
 
 `stop(reason)` permanently ends the current language execution. The runtime returns a terminal `Stopped` outcome to the host or standalone caller. The program does not receive this outcome. The operation MUST NOT terminate an invoking agent session. It MUST NOT terminate the host. No exception handler, recovery handler, retry policy, or host callback MAY resume the stopped program instance. The runtime SHOULD flush committed audit records before it returns the outcome.
+
+`fail(reason)` has type `fn fail(reason: String) returns Never`. It is pure and
+requires no capability. It terminates the execution through the failed channel
+with public code `program.failed`, after cancelling and joining owned work.
+An empty reason is reported as `program failed`; a nonempty reason of at most
+2,048 UTF-8 bytes is untrusted program output and follows the same host
+redaction policy as a stop reason. A longer reason terminates with
+`resource.limit`. A host boundary with a narrower public message limit replaces
+the reason with fixed `program failed` instead of truncating it or widening the
+protocol. Failure is not catchable, resumable, or retryable.
 
 For example, a reachable `stop("Approval was not granted.")` expression
 terminates the current execution. A conditional can select whether to evaluate
@@ -1141,7 +1701,9 @@ the selected execution has the matching workspace right.
 
 The first version SHOULD use closed effect sets. A later version MAY add effect polymorphism. Effect polymorphism MUST NOT let a function hide or widen an effect.
 
-`?` MUST return the `Err` value from the current function. It MUST apply only to compatible `Result` values.
+`?` MUST return the `Err` value from a compatible `Result`, or `None` from a
+compatible `Option`, in the current function. It MUST NOT convert between
+these containers.
 
 ### 4.2 Suspension and concurrency
 
@@ -1316,6 +1878,7 @@ trap or stop. The canonical machine-readable registry is
 | checked arithmetic; trapping index/set/map operations | terminal trap | `arithmetic.`, `index.`, `map.` | never | cancel and join owned tasks |
 | limits, cancellation, timeout, invariant/protocol violation, or replay drift detected after execution begins | terminal trap | `resource.`, `runtime.`, `protocol.`, `replay.runtime_diverged` | never | cancel and join owned tasks |
 | `stop(reason)` | `Stopped` | `stopped` is not an error code | never | cancel and join owned tasks |
+| `fail(reason)` | failed | `program.failed` | never | cancel and join owned tasks |
 
 Filesystem, HTTP, and output resource exhaustion terminalizes as the single
 public code `resource.limit`. The registry contains only codes reachable in
@@ -1725,6 +2288,59 @@ hash, and sorted dependency list in the lockfile. A stale or non-canonical
 required lockfile fails before compilation. Registries and network fetching are
 not part of this package profile.
 
+### 10.1 Typed template resources
+
+A filesystem package may declare UTF-8 template files in `allen.toml`:
+
+```toml
+[[templates]]
+name = "notice"
+path = "templates/notice.txt"
+holes = { count = "Int", enabled = "Bool", name = "String" }
+```
+
+Template names and hole names are source identifiers. A hole type is exactly
+`Bool`, `Int`, `Float`, or `String`. The path is a normalized package-relative
+path. It cannot be absolute, traverse a parent, resolve through a symbolic
+link, name a non-regular file, or exceed the package loader's path bounds. A
+template is at most 1 MiB and must be valid UTF-8.
+
+The only marker form is `{{name}}`. Every marker must name a declared hole,
+and every declared hole must occur at least once. Repeated markers are valid.
+Empty, unmatched, nested, or otherwise malformed markers are rejected during
+package loading. Dollar signs, backticks, `${text}`, and single braces are
+ordinary template content and need no escape.
+
+Source renders a template with this exact call form:
+
+```allen
+templates.notice.render({
+  count: 7
+  enabled: true
+  name: "Ada"
+})
+```
+
+`render` takes no type arguments and exactly one anonymous record literal.
+The record must contain every hole exactly once and no other field. Each field
+has the declared scalar type, or a nominal newtype that ultimately wraps that
+scalar. Field expressions evaluate once from left to right. Rendering is pure
+and returns `String`. It uses the canonical scalar text rules: lowercase
+Boolean text, canonical base-10 integer text, canonical float text, and exact
+String bytes.
+
+Template names are package-local. A module can use only templates declared by
+its own package, even when dependency packages declare the same name. The
+compiler embeds every template from the verified local dependency graph in
+the artifact. The VM reads no template file at runtime. Loose source and
+inline-manifest source have no template namespace and cannot declare external
+templates.
+
+The VM calculates the complete UTF-8 output length before allocating. A
+rendered template is limited to 1 MiB. Exceeding that hard limit, the maximum
+single-allocation limit, or the cumulative allocation limit terminates with
+`resource.limit` before output allocation.
+
 An entry names one exported function and exact input and output types. The
 function has zero or one parameter; zero parameters mean `Void` input. Entry
 input and output use exact JSON validation. Void is JSON `null`. Scalars use
@@ -1734,12 +2350,41 @@ Maps use a sorted array of `[key, value]` pairs. Records use exact objects.
 `Option`, `Result`, and user enums use `{ "tag": String, "value": ... }`, with
 `value` absent for a payloadless variant. Unknown fields, missing fields,
 duplicate map keys, unsorted map keys, implicit coercion, and values outside
-declared limits are invalid. Callable, future, task, workspace, and `Never`
-types cannot be entry types.
+declared limits are invalid. Callable, `Range`, `Sequence`, future, task,
+workspace, and `Never` types cannot be entry types. `Range` and `Sequence`
+also cannot appear in tool schemas, prompt data or responses, package data,
+canonical value encoding, or replay values.
 
 The runtime MUST deny file access outside the effective file scopes. It MUST prevent `..` traversal, symbolic-link escape, and equivalent path aliases. It MUST make the access decision on the object that it opens. A path check followed by an unsafe open is not sufficient. A conforming runtime SHOULD use operating system confinement in addition to language checks.
 
-The default sandbox MUST deny subprocess creation. A program can use a subprocess only through a host-supplied tool with a declared schema and capability.
+The default sandbox MUST deny subprocess creation. A package may request the
+first-class `exec.run` effect and its command/environment contract:
+
+```toml
+[capabilities]
+required = ["exec.run"]
+
+[exec]
+commands = ["git status", "git show *"]
+environment = ["GIT_CONFIG_NOSYSTEM"]
+```
+
+Command patterns are printable-ASCII, single-space-delimited argv prefixes.
+The executable token is a bare, slash-free name. Argument-prefix tokens may
+contain slash data. Quoting, escaping, and embedded `*` are invalid; one final
+whole-token `*` matches remaining arguments. Environment
+names use `[A-Za-z_][A-Za-z0-9_]*`; `LC_ALL` and `TZ` are reserved. Both lists
+are sorted and deduplicated before artifact binding. A request is not a grant.
+The host accepts only exact or narrower canonical patterns, and a
+`--grant-exec` grant itself supplies `exec.run` authority without a duplicate
+generic grant. The child environment starts empty with `LC_ALL=C` and `TZ=UTC`,
+then copies only names requested by the manifest and granted by the host from
+the launch snapshot. Values are never shown by inspect or documentation.
+
+Every effective executable is resolved and pinned before launch acceptance.
+Linux executes the retained bytes through a sealed descriptor. Platforms
+without an fd-bound execution API, including macOS in this profile, reject live
+execution closed. Replay never spawns and never falls back to live execution.
 
 The default network interface permits only an HTTP `GET` operation. The
 version 0.1 reference profile accepts absolute `https` URLs only. It rejects
@@ -1765,9 +2410,8 @@ let response = (await http.get("https://example.test/data.json"))?
 let data: Bytes = response.body
 ```
 
-Version 0.1 does not define `decode<T>` or another JSON-decoding source
-operation. A later language change must define its exact failure contract before
-programs can decode a response body into a typed record.
+Programs can pass a response body directly to the strict `decode<T>` operation
+defined in Section 5.
 
 An HTTP `GET` is not necessarily safe. A remote service can change state in response to `GET`. A URL can also disclose data. The runtime MUST treat `net.http_get` as an effect. The host SHOULD let policy restrict destinations. The host SHOULD treat combined file-read and network authority as a data-exfiltration risk.
 
@@ -1863,6 +2507,11 @@ A runtime MUST process a program in these stages:
 8. If the entry point returns, validate and return its result.
 
 If the program calls `stop(reason)`, the runtime MUST go to the resource-cleanup stage. It MUST skip entry-result validation. It MUST then return the terminal `Stopped` outcome and the reason to the host or standalone caller.
+
+If the program calls `fail(reason)`, the runtime MUST likewise clean up owned
+work and skip entry-result validation, then return the failed outcome with
+`program.failed`. Replay records this as a distinct redacted failed terminal
+channel, not as `Stopped` or as an implementation trap.
 
 Standalone and unattended execution MUST be valid modes. In these modes, only operations that require an invoking agent MUST fail because that agent is absent. The runtime MUST continue to allow pure code and permitted local effects. It MUST allow model calls and tool calls when it has the required providers. It MUST allow `user.ask` when it has a user-interaction provider. It MUST allow `sub_agent.create` and `sub_agent.run` when it has a sub-agent provider.
 

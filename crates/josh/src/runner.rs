@@ -1,23 +1,30 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::io::Read;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::{Child, ChildStdin, ChildStdout, Command, ExitCode, Stdio};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use allen_compiler::assemble_loaded_package;
+use allen_package::{LoadLimits, generate_lock, load_verified_package};
+use allen_schema::{
+    CatalogLimits, FrozenCatalog, Idempotency as SchemaIdempotency, SchemaLimits, ToolDefinition,
+};
 use base64::Engine as _;
 use josh_protocol::{
     CatalogMetadata, CatalogSetParams, CatalogSetResult, DEFAULT_MAX_FRAME_BYTES, ExecutionMode,
     ExecutionResult, ExecutionStartParams, FrameReader, InitializeParams, InitializeResult,
     InvokingSessionId, PeerInfo, ProgramLoadParams, ProgramLoadResult, ProtocolLimits,
-    RuntimeReadyParams, SCHEMA_DIALECT, SerializedWriter, SourceFile, Validate, WireError,
-    WireErrorCode, WireMessage, notification_params, response_result,
+    RuntimeReadyParams, SCHEMA_DIALECT, SerializedWriter, SourceFile, ToolInvokeParams, Validate,
+    WireError, WireErrorCode, WireMessage, decode_value, notification_params, request_params,
+    response_result,
 };
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 
 use crate::cli::{RunOptions, argument_error, parse_run};
+use crate::executor_provider::ExecutorProvider;
 
 const MAX_INPUT_BYTES: usize = 1024 * 1024;
 pub(crate) fn run(arguments: &[String]) -> ExitCode {
@@ -55,7 +62,6 @@ pub(crate) fn run(arguments: &[String]) -> ExitCode {
 }
 
 fn execute(options: &RunOptions) -> Result<ExecutionResult, String> {
-    let load = load_params(Path::new(&options.path))?;
     let explicit_input = read_input(options.input.as_deref())?;
     let catalog = read_catalog(options.catalog.as_deref())?;
     let workdir = options
@@ -85,6 +91,15 @@ fn execute(options: &RunOptions) -> Result<ExecutionResult, String> {
         };
         let _: InitializeResult = client.request("h-1", "initialize", &initialize)?;
         let catalog_result: CatalogSetResult = client.request("h-2", "catalog/set", &catalog)?;
+        let frozen_catalog = freeze_catalog(&catalog, &catalog_result)?;
+        let load = load_params(Path::new(&options.path), &frozen_catalog)?;
+        if options.executor {
+            client.executor_provider = Some(ExecutorProvider::preflight(
+                &catalog,
+                &catalog_result,
+                &options.granted_tools,
+            )?);
+        }
         let loaded: ProgramLoadResult = client.request("h-3", "program/load", &load)?;
         let input = if options.catalog_input {
             serde_json::to_value(&catalog_result)
@@ -100,8 +115,10 @@ fn execute(options: &RunOptions) -> Result<ExecutionResult, String> {
             input,
             working_directory: workdir,
             granted_capabilities: options.grants.clone(),
-            granted_tools: Vec::new(),
+            granted_tools: options.granted_tools.clone(),
             allowed_http_origins: options.allowed_http_origins.clone(),
+            granted_exec: options.granted_exec.clone(),
+            granted_exec_environment: options.granted_exec_environment.clone(),
             limits,
         };
         client.request("h-4", "execution/start", &start)
@@ -162,7 +179,7 @@ fn read_input(specification: Option<&str>) -> Result<Value, String> {
     let Some(specification) = specification else {
         return Ok(Value::Null);
     };
-    let text = if specification == "-" {
+    let bytes = if specification == "-" {
         let mut bytes = Vec::new();
         std::io::stdin()
             .take(u64::try_from(MAX_INPUT_BYTES).unwrap_or(u64::MAX) + 1)
@@ -171,21 +188,21 @@ fn read_input(specification: Option<&str>) -> Result<Value, String> {
         if bytes.len() > MAX_INPUT_BYTES {
             return Err("input exceeds 1 MiB".to_owned());
         }
-        String::from_utf8(bytes).map_err(|_| "input from stdin is not UTF-8".to_owned())?
+        bytes
     } else if let Some(path) = specification.strip_prefix('@') {
-        read_bounded_utf8(Path::new(path), MAX_INPUT_BYTES)?
+        read_bounded_bytes(Path::new(path), MAX_INPUT_BYTES)?
     } else {
         if specification.len() > MAX_INPUT_BYTES {
             return Err("input exceeds 1 MiB".to_owned());
         }
-        specification.to_owned()
+        specification.as_bytes().to_vec()
     };
-    serde_json::from_str(&text).map_err(|error| format!("input is not valid JSON: {error}"))
+    decode_value(&bytes).map_err(|error| format!("input is not valid JSON: {error}"))
 }
 
-fn load_params(path: &Path) -> Result<ProgramLoadParams, String> {
+fn load_params(path: &Path, catalog: &FrozenCatalog) -> Result<ProgramLoadParams, String> {
     if path.is_dir() {
-        return load_package(path);
+        return load_package(path, catalog);
     }
     if !path.is_file() {
         return Err(format!("'{}' is not a file or directory", path.display()));
@@ -211,57 +228,114 @@ fn load_params(path: &Path) -> Result<ProgramLoadParams, String> {
     }
 }
 
-fn load_package(root: &Path) -> Result<ProgramLoadParams, String> {
-    let manifest = root.join("allen.toml");
-    if !manifest.is_file() {
-        return Err(format!(
-            "package directory '{}' has no allen.toml",
-            root.display()
-        ));
+fn load_package(root: &Path, catalog: &FrozenCatalog) -> Result<ProgramLoadParams, String> {
+    let limits = LoadLimits::default();
+    let lock_path = root.join("allen.lock");
+    let supplied_lock = match fs::symlink_metadata(&lock_path) {
+        Ok(_) => Some(read_package_utf8_no_follow(
+            &lock_path,
+            DEFAULT_MAX_FRAME_BYTES,
+        )?),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => {
+            return Err(format!("cannot inspect '{}': {error}", lock_path.display()));
+        }
+    };
+    let verification_lock = match &supplied_lock {
+        Some(lock) => lock.clone(),
+        None => generate_lock(root, &limits).map_err(|error| error.to_string())?,
+    };
+    let loaded = load_verified_package(root, &verification_lock, &limits)
+        .map_err(|error| error.to_string())?;
+    let compiled = assemble_loaded_package(&loaded, Some(catalog))?;
+    let artifact = allen_bytecode::encode(&compiled.artifact)
+        .map_err(|_| "verified package artifact could not be encoded".to_owned())?;
+    if artifact.len() > DEFAULT_MAX_FRAME_BYTES {
+        return Err("verified package artifact exceeds the JOSH frame limit".to_owned());
     }
-    let mut paths = vec![PathBuf::from("allen.toml")];
-    if root.join("allen.lock").is_file() {
-        paths.push(PathBuf::from("allen.lock"));
-    }
-    collect_sources(root, Path::new("src"), &mut paths)?;
-    paths.sort();
-    let mut files = Vec::with_capacity(paths.len());
-    for relative in paths {
-        let path = root.join(&relative);
-        files.push(SourceFile {
-            path: relative.to_string_lossy().replace('\\', "/"),
-            encoding: josh_protocol::FileEncoding::Utf8,
-            content: read_bounded_utf8(&path, DEFAULT_MAX_FRAME_BYTES)?,
-        });
-    }
-    Ok(ProgramLoadParams::SourceBundle { files })
+    Ok(ProgramLoadParams::Bytecode {
+        artifact: base64::engine::general_purpose::STANDARD.encode(artifact),
+    })
 }
 
-fn collect_sources(root: &Path, relative: &Path, output: &mut Vec<PathBuf>) -> Result<(), String> {
-    let directory = root.join(relative);
-    let entries = fs::read_dir(&directory)
-        .map_err(|error| format!("cannot read '{}': {error}", directory.display()))?;
-    for entry in entries {
-        let entry = entry.map_err(|error| format!("cannot read package entry: {error}"))?;
-        let file_type = entry
-            .file_type()
-            .map_err(|error| format!("cannot inspect '{}': {error}", entry.path().display()))?;
-        let child = relative.join(entry.file_name());
-        if file_type.is_symlink() {
+fn freeze_catalog(
+    params: &CatalogSetParams,
+    result: &CatalogSetResult,
+) -> Result<FrozenCatalog, String> {
+    let schema_limits = SchemaLimits::default();
+    let definitions = params
+        .tools
+        .iter()
+        .map(|tool| {
+            ToolDefinition::parse(
+                &tool.name,
+                &tool.version,
+                &serde_json::to_string(&tool.input_schema).map_err(|_| ())?,
+                &serde_json::to_string(&tool.output_schema).map_err(|_| ())?,
+                &serde_json::to_string(&tool.error_schema).map_err(|_| ())?,
+                tool.effects.clone(),
+                match tool.idempotency {
+                    josh_protocol::Idempotency::Unknown => SchemaIdempotency::Unknown,
+                    josh_protocol::Idempotency::Idempotent => SchemaIdempotency::Idempotent,
+                    josh_protocol::Idempotency::NonIdempotent => SchemaIdempotency::NonIdempotent,
+                },
+                &schema_limits,
+            )
+            .map_err(|_| ())
+        })
+        .collect::<Result<Vec<_>, ()>>()
+        .map_err(|()| "host accepted a catalog the runner cannot freeze".to_owned())?;
+    let protocol_limits = protocol_limits();
+    let catalog = FrozenCatalog::freeze_with_dialect(
+        &params.schema_dialect,
+        definitions,
+        &CatalogLimits {
+            tools: usize::try_from(protocol_limits.max_catalog_tools).unwrap_or(usize::MAX),
+            decoded_schema_bytes: usize::try_from(protocol_limits.max_catalog_bytes)
+                .unwrap_or(usize::MAX),
+            schema: schema_limits,
+        },
+    )
+    .map_err(|_| "host accepted a catalog the runner cannot freeze".to_owned())?;
+    if catalog.digest() != result.catalog_digest {
+        return Err("runner and host frozen catalog digests differ".to_owned());
+    }
+    Ok(catalog)
+}
+
+fn read_package_utf8_no_follow(path: &Path, maximum: usize) -> Result<String, String> {
+    String::from_utf8(read_package_bytes_no_follow(path, maximum)?)
+        .map_err(|_| format!("'{}' is not UTF-8", path.display()))
+}
+
+fn read_package_bytes_no_follow(path: &Path, maximum: usize) -> Result<Vec<u8>, String> {
+    #[cfg(unix)]
+    let file = {
+        use rustix::fs::{Mode, OFlags, open};
+
+        fs::File::from(
+            open(
+                path,
+                OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NOFOLLOW,
+                Mode::empty(),
+            )
+            .map_err(|error| format!("cannot open '{}': {error}", path.display()))?,
+        )
+    };
+    #[cfg(not(unix))]
+    let file = {
+        let metadata = fs::symlink_metadata(path)
+            .map_err(|error| format!("cannot inspect '{}': {error}", path.display()))?;
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
             return Err(format!(
-                "package source '{}' must not be a symlink",
-                entry.path().display()
+                "'{}' is not a regular package file",
+                path.display()
             ));
         }
-        if file_type.is_dir() {
-            collect_sources(root, &child, output)?;
-        } else if file_type.is_file()
-            && entry.path().extension().and_then(|value| value.to_str()) == Some("allen")
-        {
-            output.push(child);
-        }
-    }
-    Ok(())
+        fs::File::open(path)
+            .map_err(|error| format!("cannot open '{}': {error}", path.display()))?
+    };
+    read_bounded_reader(file, path, maximum)
 }
 
 fn read_bounded_utf8(path: &Path, maximum: usize) -> Result<String, String> {
@@ -272,6 +346,10 @@ fn read_bounded_utf8(path: &Path, maximum: usize) -> Result<String, String> {
 fn read_bounded_bytes(path: &Path, maximum: usize) -> Result<Vec<u8>, String> {
     let file = fs::File::open(path)
         .map_err(|error| format!("cannot open '{}': {error}", path.display()))?;
+    read_bounded_reader(file, path, maximum)
+}
+
+fn read_bounded_reader(file: fs::File, path: &Path, maximum: usize) -> Result<Vec<u8>, String> {
     let mut bytes = Vec::new();
     file.take(u64::try_from(maximum).unwrap_or(u64::MAX) + 1)
         .read_to_end(&mut bytes)
@@ -291,6 +369,7 @@ struct Client {
     writer: Option<SerializedWriter<ChildStdin>>,
     reader: FrameReader<ChildStdout>,
     trace_events: bool,
+    executor_provider: Option<ExecutorProvider>,
 }
 
 impl Client {
@@ -317,6 +396,7 @@ impl Client {
             writer: Some(SerializedWriter::new(stdin, DEFAULT_MAX_FRAME_BYTES)),
             reader: FrameReader::new(stdout, DEFAULT_MAX_FRAME_BYTES),
             trace_events,
+            executor_provider: None,
         })
     }
 
@@ -349,11 +429,7 @@ impl Client {
                         eprintln!("{json}");
                     }
                 }
-                WireMessage::Request {
-                    id: runtime_id,
-                    method,
-                    ..
-                } => self.reject_provider_request(runtime_id, method)?,
+                WireMessage::Request { .. } => self.handle_provider_request(&message)?,
                 WireMessage::Response {
                     id: response_id,
                     error: Some(error),
@@ -378,6 +454,42 @@ impl Client {
                 }
             }
         }
+    }
+
+    fn handle_provider_request(&self, message: &WireMessage) -> Result<(), String> {
+        let WireMessage::Request { id, method, .. } = message else {
+            return Err("expected a provider request".to_owned());
+        };
+        if method != "tool/invoke" || self.executor_provider.is_none() {
+            return self.reject_provider_request(id, method);
+        }
+        let result = request_params::<ToolInvokeParams>(message, "tool/invoke")
+            .map_err(|_| WireError {
+                code: WireErrorCode::ProtocolViolation,
+                message: "executor received invalid tool parameters".to_owned(),
+                data: None,
+            })
+            .and_then(|params| {
+                self.executor_provider
+                    .as_ref()
+                    .expect("provider checked above")
+                    .invoke(&params)
+            });
+        let (result, error) = match result {
+            Ok(result) => (
+                Some(
+                    serde_json::to_value(result)
+                        .map_err(|_| "cannot encode the executor provider response".to_owned())?,
+                ),
+                None,
+            ),
+            Err(error) => (None, Some(error)),
+        };
+        self.send(&WireMessage::Response {
+            id: id.clone(),
+            result,
+            error,
+        })
     }
 
     fn reject_provider_request(&self, id: &str, method: &str) -> Result<(), String> {
@@ -419,7 +531,33 @@ impl Client {
     fn finish(&mut self, graceful: bool) -> Result<(), String> {
         self.writer.take();
         if !graceful {
-            let _ = self.child.kill();
+            match self.child.try_wait() {
+                Ok(Some(status)) => {
+                    if status.success() {
+                        return Ok(());
+                    }
+                    return Err(format!("JOSH endpoint exited with {status}"));
+                }
+                Ok(None) => self
+                    .child
+                    .kill()
+                    .map_err(|_| "cannot terminate the JOSH endpoint".to_owned())?,
+                Err(_) => return Err("cannot inspect the JOSH endpoint".to_owned()),
+            }
+            let deadline = Instant::now()
+                .checked_add(Duration::from_secs(1))
+                .ok_or_else(|| "cannot bound JOSH endpoint cleanup".to_owned())?;
+            loop {
+                match self.child.try_wait() {
+                    Ok(Some(_)) => return Ok(()),
+                    Ok(None) if Instant::now() < deadline => {
+                        std::thread::sleep(Duration::from_millis(1));
+                    }
+                    Ok(None) | Err(_) => {
+                        return Err("cannot reap the terminated JOSH endpoint".to_owned());
+                    }
+                }
+            }
         }
         let status = self
             .child

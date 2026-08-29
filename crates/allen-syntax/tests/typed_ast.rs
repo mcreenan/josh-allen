@@ -1,11 +1,15 @@
 use allen_syntax::{
-    AstError, AstNode, ForStatement, FunctionDeclaration, FunctionType, MapLiteral, Source,
-    SourceFile, SourceFileId, SyntaxKind, SyntaxLimits, TYPED_AST_ACCESSOR_INVENTORY,
-    TYPED_AST_WRAPPER_INVENTORY, ToolRequirement, parse, parse_with_limits,
+    AstError, AstNode, CallArgument, Composition, ForStatement, FunctionDeclaration, FunctionType,
+    ImportDeclaration, ListLiteral, LocalFunction, MapLiteral, PatternOr, PatternRange, Pipeline,
+    Postfix, RecordConstructor, Slice, Source, SourceFile, SourceFileId, SyntaxKind, SyntaxLimits,
+    TYPED_AST_ACCESSOR_INVENTORY, TYPED_AST_WRAPPER_INVENTORY, ToolRequirement, parse,
+    parse_with_limits,
 };
 use std::collections::BTreeSet;
 
 const EXPECTED_ROLE_LABELS: &[&str] = &[
+    "RecordDeclaration.predicate",
+    "ImportDeclaration.extension_keyword",
     "ImportDeclaration.import_source",
     "ManifestField.language_value",
     "ManifestField.entry_name",
@@ -14,6 +18,7 @@ const EXPECTED_ROLE_LABELS: &[&str] = &[
     "ToolRequirement.tool_version",
     "ImportName.imported_name",
     "ImportName.local_name",
+    "TestDeclaration.test_name",
     "Statement.binding_name",
     "Statement.initializer",
     "Statement.assignment_target",
@@ -24,37 +29,45 @@ const EXPECTED_ROLE_LABELS: &[&str] = &[
     "ConditionalExpression.else_if",
     "ConditionalExpression.else_branch",
     "ForStatement.iterable",
-    "ForStatement.range_end",
     "NamedType.segments",
     "GenericType.type_argument",
     "GenericType.first_type_argument",
     "GenericType.second_type_argument",
     "FunctionType.parameter_types",
     "FunctionType.return_type",
-    "Postfix.indices",
+    "Parameter.default_value",
     "Postfix.field_names",
+    "Postfix.optional_field_names",
     "Postfix.call_type_arguments",
-    "Postfix.arguments",
+    "Slice.index",
+    "CallArgument.argument_label",
+    "CallArgument.value",
     "TemplateLiteral.open_backtick",
     "TemplateLiteral.close_backtick",
+    "TemplateLiteral.open_multiline_delimiter",
+    "TemplateLiteral.close_multiline_delimiter",
     "EnumRecordConstructor.enum_name",
     "EnumRecordConstructor.variant_name",
     "QualifiedEnum.enum_name",
     "QualifiedEnum.variant_name",
-    "MapLiteral.keys",
-    "MapLiteral.values",
+    "RecordUpdateBase.base",
+    "ListItem.spread",
+    "ListItem.value",
+    "MapItem.spread",
+    "MapItem.key",
+    "MapItem.value",
     "MatchExpression.scrutinee",
-    "Pattern.binding_name",
+    "PatternPrimary.binding_name",
     "EnumPattern.enum_name",
     "EnumPattern.variant_name",
-    "EnumPattern.binding_names",
     "PatternField.field_name",
-    "PatternField.binding_name",
     "PromptField.system_value",
     "PromptField.context_value",
     "PromptField.data_value",
     "PromptField.output_type",
     "PromptField.max_attempts_value",
+    "ShortClosure.parameter_names",
+    "ShortClosure.body",
 ];
 
 fn source_file(id: u32, text: &str) -> SourceFile {
@@ -76,6 +89,58 @@ fn functions(source: &Source) -> impl Iterator<Item = FunctionDeclaration> + '_ 
     source
         .declarations()
         .filter_map(|declaration| declaration.function_declaration())
+}
+
+#[test]
+fn top_level_constant_accessors_preserve_the_declared_contract() {
+    let source = typed_source(
+        41,
+        "export const SharedAnswer: Int = 40 + 2; export fn main() returns Int { SharedAnswer }",
+    );
+    let constant = source
+        .declarations()
+        .find_map(|declaration| declaration.const_declaration())
+        .expect("constant declaration");
+    assert_eq!(constant.export_token().unwrap().text(), "export");
+    assert_eq!(constant.const_token().unwrap().text(), "const");
+    assert_eq!(constant.ident_token().unwrap().text(), "SharedAnswer");
+    assert_eq!(
+        constant.ty().unwrap().syntax().text().to_string().trim(),
+        "Int"
+    );
+    assert_eq!(
+        constant
+            .expression()
+            .unwrap()
+            .syntax()
+            .text()
+            .to_string()
+            .trim(),
+        "40 + 2"
+    );
+    assert_eq!(constant.semi_token().unwrap().text(), ";");
+}
+
+#[test]
+fn top_level_constants_require_a_type_and_terminator() {
+    for text in [
+        "const MissingType = 1; export fn main() returns Int { 0 }",
+        "const MissingTerminator: Int = 1 export fn main() returns Int { 0 }",
+    ] {
+        let source = source_file(42, text);
+        let parsed = parse(&source);
+        assert!(
+            parsed.has_errors(),
+            "invalid constant syntax must be rejected"
+        );
+        assert!(
+            parsed
+                .syntax()
+                .descendants()
+                .any(|node| node.kind() == SyntaxKind::FunctionDeclaration),
+            "recovery must retain the following function"
+        );
+    }
 }
 
 #[test]
@@ -149,8 +214,8 @@ export async fn main<T: Eq,>(value: List<T>,) returns Result<T, String> effects 
 
 #[test]
 fn generated_inventory_pins_the_complete_public_coverage_contract() {
-    assert_eq!(TYPED_AST_WRAPPER_INVENTORY.len(), 66);
-    assert_eq!(TYPED_AST_ACCESSOR_INVENTORY.len(), 392);
+    assert_eq!(TYPED_AST_WRAPPER_INVENTORY.len(), 83);
+    assert_eq!(TYPED_AST_ACCESSOR_INVENTORY.len(), 474);
     assert_eq!(TYPED_AST_WRAPPER_INVENTORY, allen_syntax::NODE_INVENTORY);
 
     let wrappers = TYPED_AST_WRAPPER_INVENTORY
@@ -253,7 +318,7 @@ fn labeled_function_type_accessors_scale_across_large_valid_parameter_lists() {
 }
 
 #[test]
-fn labeled_for_roles_keep_range_end_distinct_from_a_missing_iterable() {
+fn for_source_uses_the_expression_range_carrier() {
     let valid = typed_source(
         6,
         "fn main() returns Void { for item in start..end { } () }\n",
@@ -263,8 +328,14 @@ fn labeled_for_roles_keep_range_end_distinct_from_a_missing_iterable() {
         .descendants()
         .find_map(ForStatement::cast)
         .expect("for statement");
-    assert_eq!(node_text(&for_statement.iterable().unwrap()), "start");
-    assert_eq!(node_text(&for_statement.range_end().unwrap()), "end");
+    assert_eq!(node_text(&for_statement.iterable().unwrap()), "start..end");
+    let range = for_statement
+        .iterable()
+        .unwrap()
+        .range()
+        .expect("for expression has a range layer");
+    assert_eq!(range.coalescings().count(), 2);
+    assert!(range.dot_dot_token().is_some());
 
     let source = source_file(7, "fn main() returns Void { for item in ..end { } () }\n");
     let parsed = parse(&source);
@@ -275,8 +346,57 @@ fn labeled_for_roles_keep_range_end_distinct_from_a_missing_iterable() {
         .descendants()
         .find_map(ForStatement::cast)
         .expect("recovered for statement");
-    assert_eq!(node_text(&for_statement.iterable().unwrap()), "");
-    assert_eq!(node_text(&for_statement.range_end().unwrap()), "end");
+    assert_eq!(node_text(&for_statement.iterable().unwrap()), "..end");
+}
+
+#[test]
+fn l3_typed_roles_cover_ranges_slices_patterns_and_local_functions() {
+    let source = typed_source(
+        61,
+        "fn outer(values: List<Int>, subject: T) returns Sequence<Int> { fn local(limit: Int) returns Range<Int> { 0..=limit } let window = values[1..3]; let first = values[0]; match subject { 1..=3 | 5..8 => first, other => local(first) } }\n",
+    );
+
+    let local = source
+        .syntax()
+        .descendants()
+        .find_map(LocalFunction::cast)
+        .expect("local function");
+    assert_eq!(local.ident_token().unwrap().text(), "local");
+    assert_eq!(local.parameters().count(), 1);
+    assert_eq!(node_text(&local.ty().unwrap()), "Range<Int>");
+    assert!(local.body().is_some());
+
+    let brackets = source
+        .syntax()
+        .descendants()
+        .filter_map(Slice::cast)
+        .collect::<Vec<_>>();
+    assert_eq!(brackets.len(), 2);
+    assert_eq!(node_text(&brackets[0].index().unwrap()), "1..3");
+    assert_eq!(node_text(&brackets[1].index().unwrap()), "0");
+    assert!(
+        brackets.iter().all(|slice| {
+            slice.l_bracket_token().is_some() && slice.r_bracket_token().is_some()
+        })
+    );
+
+    let or_pattern = source
+        .syntax()
+        .descendants()
+        .filter_map(PatternOr::cast)
+        .find(|pattern| pattern.pipe_tokens().next().is_some())
+        .expect("OR pattern");
+    assert_eq!(or_pattern.pattern_primaries().count(), 2);
+    assert_eq!(or_pattern.pipe_tokens().count(), 1);
+    let ranges = or_pattern
+        .syntax()
+        .descendants()
+        .filter_map(PatternRange::cast)
+        .collect::<Vec<_>>();
+    assert_eq!(ranges.len(), 2);
+    assert!(ranges[0].dot_dot_eq_token().is_some());
+    assert!(ranges[1].dot_dot_token().is_some());
+    assert!(ranges.iter().all(|range| range.literals().count() == 2));
 }
 
 #[test]
@@ -291,12 +411,14 @@ fn labeled_map_roles_partition_entries_and_recovered_values() {
         .find_map(MapLiteral::cast)
         .expect("map literal");
     assert_eq!(
-        map.keys().map(|key| node_text(&key)).collect::<Vec<_>>(),
+        map.map_items()
+            .map(|item| node_text(&item.key().unwrap()))
+            .collect::<Vec<_>>(),
         ["first", "second"]
     );
     assert_eq!(
-        map.values()
-            .map(|value| node_text(&value))
+        map.map_items()
+            .map(|item| node_text(&item.value().unwrap()))
             .collect::<Vec<_>>(),
         ["1", "2"]
     );
@@ -314,12 +436,14 @@ fn labeled_map_roles_partition_entries_and_recovered_values() {
         .find_map(MapLiteral::cast)
         .expect("recovered map literal");
     assert_eq!(
-        map.keys().map(|key| node_text(&key)).collect::<Vec<_>>(),
+        map.map_items()
+            .map(|item| node_text(&item.key().unwrap()))
+            .collect::<Vec<_>>(),
         ["first", "second"]
     );
     assert_eq!(
-        map.values()
-            .map(|value| node_text(&value))
+        map.map_items()
+            .map(|item| node_text(&item.value().unwrap()))
             .collect::<Vec<_>>(),
         ["", "2"]
     );
@@ -400,4 +524,175 @@ fn malformed_and_bounded_fallback_trees_remain_explicit_typed_views() {
         Some(AstError::ErrorToken(token)) if token.text() == fallback_text
     ));
     assert!(fallback.declarations().next().is_none());
+}
+
+#[test]
+fn source_tests_have_typed_accessors_and_recover_to_later_declarations() {
+    let source = typed_source(
+        50,
+        "test \"pure\" { () } test \"effectful\" effects [agent.message] { () }",
+    );
+    let tests = source
+        .declarations()
+        .filter_map(|declaration| declaration.test_declaration())
+        .collect::<Vec<_>>();
+    assert_eq!(tests.len(), 2);
+    assert_eq!(tests[0].test_name_token().unwrap().text(), "\"pure\"");
+    assert!(tests[0].effect_clause().is_none());
+    assert!(tests[1].effect_clause().is_some());
+
+    let text = "test missing-name { () }\nfn later() returns Void { () }";
+    let file = source_file(51, text);
+    let parsed = parse(&file);
+    parsed.assert_round_trip(&file);
+    assert!(parsed.has_errors());
+    let source = Source::cast(parsed.syntax()).unwrap();
+    assert!(
+        source
+            .declarations()
+            .any(|declaration| declaration.test_declaration().is_some())
+    );
+    assert!(
+        source
+            .declarations()
+            .any(|declaration| declaration.function_declaration().is_some())
+    );
+}
+
+#[test]
+#[allow(clippy::too_many_lines)]
+fn l2_surface_forms_have_lossless_typed_roles_and_fixed_precedence() {
+    let text = r#"import extension { render as show } from "ui";
+record User { active: Bool }
+fn configured(count: Int = 3, delay: Int = count) returns Int { count + delay }
+fn main() returns Void {
+  let updated = User { ..user, active: true };
+  let values = [..prefix, item, ..suffix];
+  let settings = map { ..defaults, "mode": selected };
+  let warn = log.write(level: "warn", message: _);
+  let folded = list.fold(values, 0) fn(total, value) => total + value;
+  let chained = maybe?.user?.show();
+  let result = input |> normalize >> render ?? fallback;
+  ()
+}
+"#;
+    let source = typed_source(60, text);
+
+    let import = source
+        .syntax()
+        .descendants()
+        .find_map(ImportDeclaration::cast)
+        .expect("extension import");
+    assert_eq!(
+        import.extension_keyword_token().unwrap().text(),
+        "extension"
+    );
+
+    let configured = functions(&source)
+        .find(|function| function.ident_token().unwrap().text() == "configured")
+        .expect("configured function");
+    let defaults = configured
+        .parameters()
+        .map(|parameter| parameter.default_value().map(|value| node_text(&value)))
+        .collect::<Vec<_>>();
+    assert_eq!(defaults, [Some("3".to_owned()), Some("count".to_owned())]);
+
+    let record = source
+        .syntax()
+        .descendants()
+        .find_map(RecordConstructor::cast)
+        .expect("record update");
+    assert_eq!(
+        node_text(&record.record_update_base().unwrap().base().unwrap()),
+        "user"
+    );
+
+    let list = source
+        .syntax()
+        .descendants()
+        .find_map(ListLiteral::cast)
+        .expect("list spread");
+    assert_eq!(
+        list.list_items()
+            .map(|item| item.dot_dot_token().is_some())
+            .collect::<Vec<_>>(),
+        [true, false, true]
+    );
+
+    let map = source
+        .syntax()
+        .descendants()
+        .find_map(MapLiteral::cast)
+        .expect("map spread");
+    let map_items = map.map_items().collect::<Vec<_>>();
+    assert!(map_items[0].spread().is_some());
+    assert_eq!(node_text(&map_items[1].key().unwrap()), "\"mode\"");
+    assert_eq!(node_text(&map_items[1].value().unwrap()), "selected");
+
+    let hole = source
+        .syntax()
+        .descendants()
+        .filter_map(CallArgument::cast)
+        .find(|argument| argument.underscore_token().is_some())
+        .expect("call placeholder");
+    assert_eq!(hole.argument_label_token().unwrap().text(), "message");
+    assert!(hole.value().is_none());
+
+    let trailing = source
+        .syntax()
+        .descendants()
+        .filter_map(Postfix::cast)
+        .find(|postfix| postfix.short_closures().next().is_some())
+        .expect("trailing callback");
+    assert_eq!(trailing.short_closures().count(), 1);
+
+    let optional = source
+        .syntax()
+        .descendants()
+        .filter_map(Postfix::cast)
+        .find(|postfix| postfix.question_dot_tokens().count() == 2)
+        .expect("optional chain");
+    assert_eq!(
+        optional
+            .optional_field_names_tokens()
+            .map(|token| token.text().to_owned())
+            .collect::<Vec<_>>(),
+        ["user", "show"]
+    );
+
+    let pipeline = source
+        .syntax()
+        .descendants()
+        .filter_map(Pipeline::cast)
+        .find(|pipeline| pipeline.pipe_gt_tokens().next().is_some())
+        .expect("pipeline");
+    assert_eq!(pipeline.compositions().count(), 2);
+    let composed = pipeline
+        .compositions()
+        .nth(1)
+        .expect("composed pipeline stage");
+    assert_eq!(composed.disjunctions().count(), 2);
+    assert_eq!(composed.gt_tokens().count(), 2);
+    assert_eq!(
+        node_text(
+            &source
+                .syntax()
+                .descendants()
+                .filter_map(Composition::cast)
+                .find(|composition| composition.gt_tokens().next().is_some())
+                .unwrap()
+        ),
+        "normalize >> render"
+    );
+}
+
+#[test]
+fn l2_recovery_keeps_later_declarations_after_malformed_spreads_and_callbacks() {
+    let text = "fn broken() returns Void { let values = [.., item]; let call = f() fn(x) => x fn(y) => y; () }\nfn later() returns Int { 1 }\n";
+    let file = source_file(61, text);
+    let parsed = parse(&file);
+    parsed.assert_round_trip(&file);
+    assert!(parsed.has_errors());
+    let source = Source::cast(parsed.syntax()).expect("recovered source");
+    assert!(functions(&source).any(|function| function.ident_token().unwrap().text() == "later"));
 }

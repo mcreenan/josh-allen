@@ -1632,6 +1632,7 @@ fn kind_variant(key: &str) -> String {
         "bytes-literal" => "BytesLiteral".into(),
         "template-text-scalar" => "TemplateTextScalar".into(),
         "template-escape" => "TemplateEscape".into(),
+        "multiline-string-delimiter" => "MultilineStringDelimiter".into(),
         "{" => "LBrace".into(),
         "}" => "RBrace".into(),
         "[" => "LBracket".into(),
@@ -1650,8 +1651,12 @@ fn kind_variant(key: &str) -> String {
         "/=" => "SlashEq".into(),
         "%=" => "PercentEq".into(),
         ".." => "DotDot".into(),
+        "..=" => "DotDotEq".into(),
+        "?." => "QuestionDot".into(),
+        "|>" => "PipeGt".into(),
         "_" => "Underscore".into(),
         "||" => "PipePipe".into(),
+        "|" => "Pipe".into(),
         "&&" => "AmpAmp".into(),
         "==" => "EqEq".into(),
         "!=" => "NotEq".into(),
@@ -1664,6 +1669,7 @@ fn kind_variant(key: &str) -> String {
         "%" => "Percent".into(),
         "!" => "Bang".into(),
         "." => "Dot".into(),
+        "??" => "QuestionQuestion".into(),
         "?" => "Question".into(),
         "`" => "Backtick".into(),
         "${" => "TemplateExprStart".into(),
@@ -1796,10 +1802,10 @@ mod tests {
             .parse::<Grammar>()
             .unwrap();
         let model = typed_ast_model(&grammar).unwrap();
-        assert_eq!(model.len(), 66);
+        assert_eq!(model.len(), 83);
         assert_eq!(
             model.iter().map(|node| node.accessors.len()).sum::<usize>(),
-            392
+            474
         );
 
         let source = model

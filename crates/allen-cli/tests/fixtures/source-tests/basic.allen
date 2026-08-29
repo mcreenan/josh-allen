@@ -1,0 +1,14 @@
+fn helper() returns Int { 41 }
+
+test "passes" {
+  let value = helper();
+  ()
+}
+
+test "fails" {
+  fail("intentional")
+}
+
+test "stops" {
+  stop("not a pass")
+}

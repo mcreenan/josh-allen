@@ -15,7 +15,7 @@ summary_path="$evidence_dir/summary.json"
 max_log_bytes="${SOURCE_CONFORMANCE_MAX_LOG_BYTES:-65536}"
 max_doc_example_bytes="${SOURCE_CONFORMANCE_MAX_DOC_EXAMPLE_BYTES:-262144}"
 allen_bin="${SOURCE_CONFORMANCE_ALLEN_BIN:-$repo_root/target/debug/allen}"
-current_bytecode_version=13
+current_bytecode_version=19
 
 mkdir -p "$logs_dir" "$artifacts_dir" "$docs_dir"
 
@@ -30,7 +30,7 @@ fi
 
 write_summary() {
   local status="$1"
-  printf '{"profile":"source-conformance","status":"%s","example_allen_files":79,"rosetta_programs":40,"comment_modes":4,"control_modes":4,"loop_modes":4,"operator_modes":4,"string_modes":4,"closed_error_model":true}\n' "$status" > "$summary_path"
+  printf '{"profile":"source-conformance","status":"%s","example_allen_files":96,"rosetta_programs":40,"comment_modes":4,"control_modes":5,"loop_modes":4,"operator_modes":4,"string_modes":4,"selected_language_l1":true,"selected_language_l2":true,"selected_language_l3":true,"top_level_constants":true,"typed_template_resources":true,"closed_error_model":true}\n' "$status" > "$summary_path"
 }
 
 on_exit() {
@@ -249,6 +249,10 @@ check_control_flow_conformance() {
     control-flow-modules-control "$fixture_root/parity/modules/main.allen"
   check_and_compare_source_artifact \
     control-flow-inline-control "$fixture_root/parity/inline.allen"
+  check_and_compare_source_artifact \
+    control-flow-fail-coalescing "$fixture_root/fail-coalescing.allen"
+  check_and_compare_source_artifact \
+    control-flow-decode "$fixture_root/decode.allen"
   run_check control-flow-package-lock "$allen_bin" lock "$package_workspace"
   check_and_compare_source_artifact control-flow-package-control "$package_workspace"
 
@@ -475,6 +479,15 @@ check_loop_conformance
 check_operator_conformance
 check_string_conformance
 
+constants_source="$artifacts_dir/top-level-constants.allen"
+printf '%s\n' \
+  'newtype SweepIndex = Int' \
+  'const FinalIndex: SweepIndex = SweepIndex(StartIndex + 16);' \
+  'const StartIndex: Int = 256;' \
+  'export fn main() returns SweepIndex { FinalIndex }' \
+  > "$constants_source"
+check_and_compare_source_artifact top-level-constants "$constants_source"
+
 # The tutorial deliberately declares the required `demo.echo` tool. This
 # catalog-backed compiler integration test freezes that contract and executes
 # its pure entry without weakening required-tool preflight.
@@ -490,6 +503,9 @@ loose_examples=(
   examples/dynamic-collections.allen
   examples/functions-and-effects/main.allen
   examples/josh-answer.allen
+  examples/language-l1.allen
+  examples/language-l2.allen
+  examples/language-l3.allen
   examples/min-int.allen
   examples/operations.allen
   examples/overflow.allen
@@ -498,6 +514,7 @@ loose_examples=(
   examples/stop.allen
   examples/structured-concurrency.allen
   examples/task-debug.allen
+  examples/typed-json.allen
 )
 for source in "${loose_examples[@]}"; do
   name="example-$(basename "$source" .allen)"
@@ -528,6 +545,9 @@ check_and_compare_source_artifact \
   example-filesystem-package "$repo_root/examples/filesystem-package" \
   --entry main --input "$repo_root/examples/filesystem-package/input.json" --workdir "$package_workspace"
 
+check_and_compare_source_artifact \
+  example-template-package "$repo_root/examples/template-package"
+
 # Record how each physical example source is covered. The roots above compile imported and
 # package modules transitively, but this audit makes the complete example surface explicit.
 # The tutorial's catalog-backed test above covers its required tool contract;
@@ -542,15 +562,17 @@ expected="$logs_dir/example-files.expected"
   printf '%s\n' examples/filesystem-inline.allen
   printf '%s\n' examples/learnxinyminutes.allen
   find examples/josh-allen -type f -name '*.allen' -print | sort
+  find examples/aoc -type f -name '*.allen' -print | sort
   printf '%s\n' examples/codex-agent-mvp.allen
   find examples/filesystem-package -type f -name '*.allen' -print | sort
+  find examples/template-package -type f -name '*.allen' -print | sort
   for source in "${rosetta_examples[@]}"; do
     printf '%s\n' "${source#"$repo_root/"}"
   done
 } | sort -u > "$coverage"
 find examples -type f -name '*.allen' -print | sed "s#^$repo_root/##" | sort > "$expected"
-[[ $(wc -l < "$expected") -eq 79 ]] || {
-  printf 'expected exactly 79 ALLEN example files\n' >&2
+[[ $(wc -l < "$expected") -eq 96 ]] || {
+  printf 'expected exactly 96 ALLEN example files\n' >&2
   exit 1
 }
 cmp -s "$coverage" "$expected" || {

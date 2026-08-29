@@ -1,8 +1,9 @@
 {
   "profile": "errors-0.1",
-  "bytecode_version": 13,
+  "bytecode_version": 19,
   "channels": [
     "diagnostic",
+    "failed",
     "result",
     "trap",
     "stopped"
@@ -214,6 +215,16 @@
       "retryable": "never"
     },
     {
+      "code": "E3012",
+      "channel": "diagnostic",
+      "retryable": "never"
+    },
+    {
+      "code": "E3013",
+      "channel": "diagnostic",
+      "retryable": "never"
+    },
+    {
       "code": "agent.denied",
       "channel": "result",
       "retryable": "never"
@@ -236,6 +247,51 @@
     {
       "code": "arithmetic.overflow",
       "channel": "trap",
+      "retryable": "never"
+    },
+    {
+      "code": "duplicate_key",
+      "channel": "result",
+      "retryable": "never"
+    },
+    {
+      "code": "exec.denied",
+      "channel": "result",
+      "retryable": "never"
+    },
+    {
+      "code": "exec.invalid_argv",
+      "channel": "result",
+      "retryable": "never"
+    },
+    {
+      "code": "exec.limit",
+      "channel": "result",
+      "retryable": "never"
+    },
+    {
+      "code": "exec.stderr_limit",
+      "channel": "result",
+      "retryable": "never"
+    },
+    {
+      "code": "exec.stdin_limit",
+      "channel": "result",
+      "retryable": "never"
+    },
+    {
+      "code": "exec.stdout_limit",
+      "channel": "result",
+      "retryable": "never"
+    },
+    {
+      "code": "exec.timeout",
+      "channel": "result",
+      "retryable": "never"
+    },
+    {
+      "code": "exec.unavailable",
+      "channel": "result",
       "retryable": "never"
     },
     {
@@ -306,6 +362,16 @@
     {
       "code": "index.out_of_bounds",
       "channel": "trap",
+      "retryable": "never"
+    },
+    {
+      "code": "invalid_json",
+      "channel": "result",
+      "retryable": "never"
+    },
+    {
+      "code": "invalid_utf8",
+      "channel": "result",
       "retryable": "never"
     },
     {
@@ -559,6 +625,11 @@
       "retryable": "caller"
     },
     {
+      "code": "program.failed",
+      "channel": "failed",
+      "retryable": "never"
+    },
+    {
       "code": "protocol.violation",
       "channel": "trap",
       "retryable": "never"
@@ -591,6 +662,16 @@
     {
       "code": "runtime.capability_denied",
       "channel": "diagnostic",
+      "retryable": "never"
+    },
+    {
+      "code": "runtime.entry_invariant.input",
+      "channel": "trap",
+      "retryable": "never"
+    },
+    {
+      "code": "runtime.entry_invariant.output",
+      "channel": "trap",
       "retryable": "never"
     },
     {
@@ -709,6 +790,11 @@
       "retryable": "caller"
     },
     {
+      "code": "type_mismatch",
+      "channel": "result",
+      "retryable": "never"
+    },
+    {
       "code": "user.denied",
       "channel": "result",
       "retryable": "never"
@@ -725,6 +811,16 @@
     }
   ],
   "operations": [
+    {
+      "operation": "decode",
+      "codes": [
+        "duplicate_key",
+        "invalid_json",
+        "invalid_utf8",
+        "resource.limit",
+        "type_mismatch"
+      ]
+    },
     {
       "operation": "fs.read_text",
       "codes": [
@@ -856,6 +952,19 @@
       ]
     },
     {
+      "operation": "exec.run",
+      "codes": [
+        "exec.denied",
+        "exec.invalid_argv",
+        "exec.limit",
+        "exec.stderr_limit",
+        "exec.stdin_limit",
+        "exec.stdout_limit",
+        "exec.timeout",
+        "exec.unavailable"
+      ]
+    },
+    {
       "operation": "agent.message",
       "codes": [
         "agent.denied",
@@ -947,6 +1056,10 @@
     }
   ],
   "outcomes": [
+    {
+      "outcome": "failed",
+      "channel": "failed"
+    },
     {
       "outcome": "stopped",
       "channel": "stopped"

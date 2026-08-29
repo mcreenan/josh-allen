@@ -1,19 +1,22 @@
 //! Canonical checked conversion from lossless typed syntax into compiler state.
 
 use super::{
-    Binary, Diagnostic, InlineManifest, LoweredBody, LoweredElse, LoweredEnumPayload,
-    LoweredEnumValuePayload, LoweredEnumVariant, LoweredExpr, LoweredExprKind, LoweredForSource,
-    LoweredFunction, LoweredImport, LoweredLoopBinding, LoweredLoopBindingElement, LoweredModule,
-    LoweredPattern, LoweredStatement, LoweredTemplatePart, LoweredType, LoweredTypeDeclaration,
-    Span, Unary, is_canonical_effect, is_forbidden_source_word,
+    Binary, Diagnostic, InlineManifest, LoweredBody, LoweredCallArgument, LoweredConstDeclaration,
+    LoweredElse, LoweredEnumPayload, LoweredEnumValuePayload, LoweredEnumVariant, LoweredExpr,
+    LoweredExprKind, LoweredForSource, LoweredFunction, LoweredImport, LoweredListItem,
+    LoweredLocalFunction, LoweredLoopBinding, LoweredLoopBindingElement, LoweredMapItem,
+    LoweredModule, LoweredParameterDefault, LoweredPattern, LoweredStatement, LoweredTemplatePart,
+    LoweredType, LoweredTypeDeclaration, SourceWordContext, Span, Unary, is_canonical_effect,
+    is_forbidden_source_word,
 };
 use allen_schema::ToolRequirement;
 use allen_syntax::{
-    AstNode, Body, Declaration, EffectClause, EnumDeclaration, EnumVariant, ForStatement,
-    FunctionDeclaration, FunctionType, GenericType, ImportDeclaration,
-    InlineManifest as SyntaxInlineManifest, LoopBinding, LoopBindingItem, NamedType, Parse,
-    RecordDeclaration, RecordField, RecordType, Source, SourceFile, Statement, SyntaxKind,
-    SyntaxNode, SyntaxToken, TupleType, Type, TypeAliasDeclaration, WhileStatement,
+    AstNode, Body, ConstDeclaration, Declaration, EffectClause, EnumDeclaration, EnumVariant,
+    ForStatement, FunctionDeclaration, FunctionType, GenericType, ImportDeclaration,
+    InlineManifest as SyntaxInlineManifest, LocalFunction, LoopBinding, LoopBindingItem, NamedType,
+    NewtypeDeclaration, Parse, RecordDeclaration, RecordField, RecordType, Source, SourceFile,
+    Statement, SyntaxKind, SyntaxNode, SyntaxToken, TestDeclaration, TupleType, Type,
+    TypeAliasDeclaration, WhileStatement,
 };
 use std::collections::BTreeSet;
 
@@ -89,16 +92,36 @@ fn lower_checked(source: &SourceFile, parsed: &Parse) -> LowerResult<CheckedSour
         .map(|import| lower_import(&import))
         .collect::<LowerResult<Vec<_>>>()?;
     let mut types = Vec::new();
+    let mut constants = Vec::new();
     let mut functions = Vec::new();
+    let mut tests = Vec::new();
     for declaration in root.declarations() {
-        lower_declaration(&declaration, &mut types, &mut functions)?;
+        lower_declaration(
+            &declaration,
+            &mut types,
+            &mut constants,
+            &mut functions,
+            &mut tests,
+        )?;
+    }
+    let mut test_names = BTreeSet::new();
+    for test in &tests {
+        if !test_names.insert(test.name.clone()) {
+            return Err(compiler_error(
+                "E3005",
+                format!("duplicate test name {:?}", test.name),
+                test.name_span,
+            ));
+        }
     }
     Ok(CheckedSource {
         manifest,
         module: LoweredModule {
             imports,
             types,
+            constants,
             functions,
+            tests,
         },
     })
 }
@@ -256,7 +279,9 @@ fn tree_matches_source(root: &SyntaxNode, source: &str) -> bool {
 fn lower_declaration(
     declaration: &Declaration,
     types: &mut Vec<LoweredTypeDeclaration>,
+    constants: &mut Vec<LoweredConstDeclaration>,
     functions: &mut Vec<LoweredFunction>,
+    tests: &mut Vec<super::LoweredTest>,
 ) -> LowerResult<()> {
     if let Some(record) = declaration.record_declaration() {
         types.push(lower_record_declaration(&record)?);
@@ -264,8 +289,14 @@ fn lower_declaration(
         types.push(lower_enum_declaration(&enumeration)?);
     } else if let Some(alias) = declaration.type_alias_declaration() {
         types.push(lower_type_alias_declaration(&alias)?);
+    } else if let Some(newtype) = declaration.newtype_declaration() {
+        types.push(lower_newtype_declaration(&newtype)?);
+    } else if let Some(constant) = declaration.const_declaration() {
+        constants.push(lower_const_declaration(&constant)?);
     } else if let Some(function) = declaration.function_declaration() {
         functions.push(lower_function(&function)?);
+    } else if let Some(test) = declaration.test_declaration() {
+        tests.push(lower_test(&test)?);
     } else {
         return Err(malformed_node(
             "declaration alternative",
@@ -273,6 +304,57 @@ fn lower_declaration(
         ));
     }
     Ok(())
+}
+
+fn lower_test(node: &TestDeclaration) -> LowerResult<super::LoweredTest> {
+    let token = required(node.test_name_token(), "test name", node.syntax())?;
+    let name_span = span_token(&token);
+    let name = decode_string(token.text(), name_span)?;
+    let (declared_effects, effects_span) = lower_optional_effects(node.effect_clause())?;
+    Ok(super::LoweredTest {
+        name,
+        name_span,
+        offset: usize::from(node.syntax().text_range().start()),
+        declared_effects: declared_effects.unwrap_or_default(),
+        effects_span,
+        body: lower_body(&required(node.body(), "test body", node.syntax())?)?,
+    })
+}
+
+fn lower_const_declaration(node: &ConstDeclaration) -> LowerResult<LoweredConstDeclaration> {
+    let (name, name_span) = required_ident(node.ident_token(), "constant name", node.syntax())?;
+    let value_type = lower_type(&required(
+        node.ty(),
+        "constant declared type",
+        node.syntax(),
+    )?)?;
+    let value = lower_expression(&required(
+        node.expression(),
+        "constant value",
+        node.syntax(),
+    )?)?;
+    Ok(LoweredConstDeclaration {
+        exported: node.export_token().is_some(),
+        name,
+        name_span,
+        value_type,
+        value,
+    })
+}
+
+fn lower_newtype_declaration(node: &NewtypeDeclaration) -> LowerResult<LoweredTypeDeclaration> {
+    let (name, name_span) = required_ident(node.ident_token(), "newtype name", node.syntax())?;
+    let underlying = lower_type(&required(
+        node.ty(),
+        "newtype underlying type",
+        node.syntax(),
+    )?)?;
+    Ok(LoweredTypeDeclaration::Newtype {
+        exported: node.export_token().is_some(),
+        name,
+        name_span,
+        underlying,
+    })
 }
 
 fn lower_type_alias_declaration(
@@ -298,6 +380,10 @@ fn lower_record_declaration(node: &RecordDeclaration) -> LowerResult<LoweredType
             .record_fields()
             .map(|field| lower_record_field(&field))
             .collect::<LowerResult<_>>()?,
+        invariant: node
+            .predicate()
+            .map(|predicate| lower_expression(&predicate))
+            .transpose()?,
     })
 }
 
@@ -370,10 +456,16 @@ fn lower_function(node: &FunctionDeclaration) -> LowerResult<LoweredFunction> {
                 .collect()
         },
     )?;
-    let parameters = node
+    let lowered_parameters = node
         .parameters()
-        .map(|parameter| lower_parameter(&parameter))
-        .collect::<LowerResult<_>>()?;
+        .map(|parameter| lower_parameter_with_default(&parameter))
+        .collect::<LowerResult<Vec<_>>>()?;
+    let mut parameters = Vec::with_capacity(lowered_parameters.len());
+    let mut parameter_defaults = Vec::with_capacity(lowered_parameters.len());
+    for (parameter, default) in lowered_parameters {
+        parameters.push(parameter);
+        parameter_defaults.push(default);
+    }
     let return_type = lower_type(&required(node.ty(), "function return type", node.syntax())?)?;
     let (declared_effects, effects_span) = lower_optional_effects(node.effect_clause())?;
     let body = lower_body(&required(node.body(), "function body", node.syntax())?)?;
@@ -384,6 +476,7 @@ fn lower_function(node: &FunctionDeclaration) -> LowerResult<LoweredFunction> {
         name_span,
         generics,
         parameters,
+        parameter_defaults,
         return_type,
         declared_effects: Some(declared_effects.unwrap_or_default()),
         effects_span,
@@ -395,6 +488,24 @@ fn lower_parameter(node: &allen_syntax::Parameter) -> LowerResult<(String, Lower
     let (name, span) = required_ident(node.ident_token(), "parameter name", node.syntax())?;
     let ty = lower_type(&required(node.ty(), "parameter type", node.syntax())?)?;
     Ok((name, ty, span))
+}
+
+fn lower_parameter_with_default(
+    node: &allen_syntax::Parameter,
+) -> LowerResult<((String, LoweredType, Span), Option<LoweredParameterDefault>)> {
+    let parameter = lower_parameter(node)?;
+    let default = node
+        .default_value()
+        .map(|value| {
+            let span = span_node(value.syntax());
+            Ok(LoweredParameterDefault {
+                value: lower_expression(&value)?,
+                source_text: value.syntax().text().to_string(),
+                span,
+            })
+        })
+        .transpose()?;
+    Ok((parameter, default))
 }
 
 fn lower_record_field(node: &RecordField) -> LowerResult<(String, LoweredType, Span)> {
@@ -419,6 +530,7 @@ fn lower_import(node: &ImportDeclaration) -> LowerResult<LoweredImport> {
     let path_token = required(node.import_source_token(), "import source", node.syntax())?;
     let path = decode_string(path_token.text(), span_token(&path_token))?;
     Ok(LoweredImport {
+        extension: node.extension_keyword_token().is_some(),
         names,
         path,
         resolved_path: None,
@@ -500,6 +612,24 @@ fn lower_generic_type(node: &GenericType) -> LowerResult<LoweredType> {
             Box::new(lower_type(&required(
                 node.type_argument(),
                 "Prompt type argument",
+                node.syntax(),
+            )?)?),
+            span,
+        ))
+    } else if node.range_token().is_some() {
+        Ok(LoweredType::Range(
+            Box::new(lower_type(&required(
+                node.type_argument(),
+                "Range type argument",
+                node.syntax(),
+            )?)?),
+            span,
+        ))
+    } else if node.sequence_token().is_some() {
+        Ok(LoweredType::Sequence(
+            Box::new(lower_type(&required(
+                node.type_argument(),
+                "Sequence type argument",
                 node.syntax(),
             )?)?),
             span,
@@ -691,6 +821,11 @@ fn lower_statement(node: &Statement) -> LowerResult<LoweredStatement> {
     if let Some(statement) = node.for_statement() {
         return lower_for(&statement);
     }
+    if let Some(function) = node.local_function() {
+        return Ok(LoweredStatement::LocalFunction(lower_local_function(
+            &function,
+        )?));
+    }
     if node.break_token().is_some() {
         return Ok(LoweredStatement::Break(span_node(node.syntax())));
     }
@@ -713,15 +848,11 @@ fn lower_while(node: &WhileStatement) -> LowerResult<LoweredStatement> {
 }
 
 fn lower_for(node: &ForStatement) -> LowerResult<LoweredStatement> {
-    let start = lower_expression(&required(node.iterable(), "for source", node.syntax())?)?;
-    let source = if let Some(end) = node.range_end() {
-        LoweredForSource::Range {
-            start,
-            end: lower_expression(&end)?,
-        }
-    } else {
-        LoweredForSource::Iterable(start)
-    };
+    let source = LoweredForSource::Iterable(lower_expression(&required(
+        node.iterable(),
+        "for source",
+        node.syntax(),
+    )?)?);
     Ok(LoweredStatement::For {
         binding: lower_loop_binding(&required(
             node.loop_binding(),
@@ -730,6 +861,41 @@ fn lower_for(node: &ForStatement) -> LowerResult<LoweredStatement> {
         )?)?,
         source,
         body: lower_body(&required(node.body(), "for body", node.syntax())?)?,
+        span: span_node(node.syntax()),
+    })
+}
+
+fn lower_local_function(node: &LocalFunction) -> LowerResult<LoweredLocalFunction> {
+    let (name, name_span) =
+        required_ident(node.ident_token(), "local function name", node.syntax())?;
+    let lowered_parameters = node
+        .parameters()
+        .map(|parameter| lower_parameter_with_default(&parameter))
+        .collect::<LowerResult<Vec<_>>>()?;
+    let mut parameters = Vec::with_capacity(lowered_parameters.len());
+    let mut parameter_defaults = Vec::with_capacity(lowered_parameters.len());
+    for (parameter, default) in lowered_parameters {
+        parameters.push(parameter);
+        parameter_defaults.push(default);
+    }
+    let (declared_effects, effects_span) = lower_optional_effects(node.effect_clause())?;
+    Ok(LoweredLocalFunction {
+        name,
+        name_span,
+        parameters,
+        parameter_defaults,
+        return_type: lower_type(&required(
+            node.ty(),
+            "local function return type",
+            node.syntax(),
+        )?)?,
+        declared_effects,
+        effects_span,
+        body: lower_body(&required(
+            node.body(),
+            "local function body",
+            node.syntax(),
+        )?)?,
         span: span_node(node.syntax()),
     })
 }
@@ -951,7 +1117,7 @@ fn checked_ident(token: &SyntaxToken, expected: &'static str) -> LowerResult<(St
         });
     }
     let name = token.text().to_owned();
-    if is_forbidden_source_word(&name) {
+    if is_forbidden_source_word(&name, SourceWordContext::Identifier) {
         return Err(compiler_error(
             "E2020",
             format!("'{name}' is forbidden; use Option<T> or unknown"),
@@ -962,6 +1128,9 @@ fn checked_ident(token: &SyntaxToken, expected: &'static str) -> LowerResult<(St
 }
 
 fn decode_string(text: &str, span: Span) -> LowerResult<String> {
+    if let Some(raw) = decode_raw_string(text) {
+        return Ok(raw.to_owned());
+    }
     let body = text
         .strip_prefix('"')
         .and_then(|value| value.strip_suffix('"'))
@@ -979,6 +1148,13 @@ fn decode_string(text: &str, span: Span) -> LowerResult<String> {
         value.push(char::from(decode_simple_escape(escape, span)?));
     }
     Ok(value)
+}
+
+fn decode_raw_string(text: &str) -> Option<&str> {
+    let rest = text.strip_prefix('r')?;
+    let hashes = rest.bytes().take_while(|byte| *byte == b'#').count();
+    let body = rest.strip_prefix(&"#".repeat(hashes))?.strip_prefix('"')?;
+    body.strip_suffix(&format!("\"{}", "#".repeat(hashes)))
 }
 
 fn decode_bytes(text: &str, span: Span) -> LowerResult<Vec<u8>> {
@@ -1208,12 +1384,239 @@ export async fn convert<T: Eq>(value: T, callback: fn(T) returns Result<Int, Str
     }
 
     #[test]
+    fn l1_literals_labeled_calls_and_short_closures_reach_lowering() {
+        assert_lowers_deterministically(
+            r####"fn main() returns String effects [] {
+  let raw = r###"${name} \\d+ "###;
+  let message = """
+    before ${raw}\n
+    after
+    """;
+  let reordered = render(value: message, source: raw);
+  let callback = fn(value) => value;
+  callback(reordered)
+}
+"####,
+        );
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn l2_forms_reach_neutral_lowering_with_source_order_and_spans() {
+        let source = r#"import extension { render as show } from "ui";
+record User { active: Bool }
+fn configured(count: Int = 3, delay: Int = count) returns Int { count + delay }
+fn main() returns Void {
+  let updated = User { ..user, active: true };
+  let values = [..prefix, item, ..suffix];
+  let settings = map { ..defaults, "mode": selected };
+  let partial = log.write(level: "warn", message: _);
+  let folded = list.fold(values, 0) fn(total, value) => total + value;
+  let chained = maybe?.user?.show();
+  let piped = input |> normalize >> render;
+  ()
+}
+"#;
+        let checked = lower_source("l2.allen", source).expect("L2 syntax lowers");
+        assert!(checked.module.imports[0].extension);
+
+        let configured = checked
+            .module
+            .functions
+            .iter()
+            .find(|function| function.name == "configured")
+            .expect("configured function");
+        assert_eq!(configured.parameter_defaults.len(), 2);
+        assert_eq!(
+            configured.parameter_defaults[0]
+                .as_ref()
+                .expect("count default")
+                .source_text,
+            " 3"
+        );
+        assert_eq!(
+            configured.parameter_defaults[1]
+                .as_ref()
+                .expect("delay default")
+                .source_text,
+            " count"
+        );
+
+        let main = checked
+            .module
+            .functions
+            .iter()
+            .find(|function| function.name == "main")
+            .expect("main function");
+        let binding = |name: &str| {
+            main.body
+                .statements
+                .iter()
+                .find_map(|statement| match statement {
+                    LoweredStatement::Let {
+                        name: binding,
+                        value,
+                        ..
+                    } if binding == name => Some(value),
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("missing `{name}` binding"))
+        };
+
+        assert!(matches!(
+            &binding("updated").kind,
+            LoweredExprKind::RecordUpdate { .. }
+        ));
+        let LoweredExprKind::ListWithSpread(items) = &binding("values").kind else {
+            panic!("expected list spread carrier");
+        };
+        assert_eq!(
+            items.iter().map(|item| item.spread).collect::<Vec<_>>(),
+            [true, false, true]
+        );
+        assert!(items.iter().all(|item| item.span.start < item.span.end));
+
+        let LoweredExprKind::MapWithSpread(items) = &binding("settings").kind else {
+            panic!("expected map spread carrier");
+        };
+        assert!(matches!(items[0], LoweredMapItem::Spread { .. }));
+        assert!(matches!(items[1], LoweredMapItem::Entry { .. }));
+
+        let LoweredExprKind::Call { arguments, .. } = &binding("partial").kind else {
+            panic!("expected partial call carrier");
+        };
+        assert!(!arguments[0].placeholder);
+        assert!(arguments[1].placeholder);
+        assert!(!arguments[1].trailing);
+
+        let LoweredExprKind::Call { arguments, .. } = &binding("folded").kind else {
+            panic!("expected trailing callback call carrier");
+        };
+        let callback = arguments.last().expect("trailing callback");
+        assert!(callback.trailing);
+        assert!(callback.preceding_call_span.is_some());
+        assert!(matches!(
+            &callback.value.kind,
+            LoweredExprKind::ShortClosure { .. }
+        ));
+
+        let LoweredExprKind::Call { callee, .. } = &binding("chained").kind else {
+            panic!("expected chained call carrier");
+        };
+        let LoweredExprKind::OptionalFieldGet { receiver, .. } = &callee.kind else {
+            panic!("expected optional call member");
+        };
+        assert!(matches!(
+            &receiver.kind,
+            LoweredExprKind::OptionalFieldGet { .. }
+        ));
+
+        let LoweredExprKind::Pipe { stage, .. } = &binding("piped").kind else {
+            panic!("expected pipe carrier");
+        };
+        assert!(matches!(&stage.kind, LoweredExprKind::Compose { .. }));
+    }
+
+    #[test]
+    fn l3_forms_reach_neutral_lowering_with_operator_and_container_spans() {
+        let source = "fn outer(values: List<Int>, subject: T) returns Sequence<Int> { fn local(limit: Int) returns Range<Int> { 0..=limit } let window = values[1..3]; let first = values[0]; match subject { 1..=3 | 5..8 => first, other => local(first) } }";
+        let checked = lower_source("l3.allen", source).expect("L3 syntax lowers");
+        let outer = checked.module.functions.first().expect("outer function");
+        assert!(matches!(outer.return_type, LoweredType::Sequence(_, _)));
+
+        let LoweredStatement::LocalFunction(local) = &outer.body.statements[0] else {
+            panic!("expected local function carrier");
+        };
+        assert_eq!(local.name, "local");
+        assert!(matches!(local.return_type, LoweredType::Range(_, _)));
+        let local_tail = local.body.tail.as_ref().expect("local function tail");
+        let LoweredExprKind::Range {
+            inclusive,
+            operator_span,
+            ..
+        } = &local_tail.kind
+        else {
+            panic!("expected inclusive range carrier");
+        };
+        assert!(*inclusive);
+        assert!(operator_span.start < operator_span.end);
+
+        let LoweredStatement::Let { value: window, .. } = &outer.body.statements[1] else {
+            panic!("expected window binding");
+        };
+        let LoweredExprKind::Slice {
+            range,
+            bracket_span,
+            ..
+        } = &window.kind
+        else {
+            panic!("expected slice carrier");
+        };
+        assert!(matches!(
+            range.kind,
+            LoweredExprKind::Range {
+                inclusive: false,
+                ..
+            }
+        ));
+        assert!(bracket_span.start < bracket_span.end);
+
+        let LoweredStatement::Let { value: first, .. } = &outer.body.statements[2] else {
+            panic!("expected first binding");
+        };
+        assert!(matches!(first.kind, LoweredExprKind::Index { .. }));
+
+        let LoweredExprKind::Match { arms, .. } =
+            &outer.body.tail.as_ref().expect("outer match tail").kind
+        else {
+            panic!("expected match carrier");
+        };
+        let LoweredPattern::Or {
+            alternatives,
+            operator_spans,
+        } = &arms[0].0
+        else {
+            panic!("expected OR-pattern carrier");
+        };
+        assert_eq!(alternatives.len(), 2);
+        assert_eq!(operator_spans.len(), 1);
+        assert!(matches!(
+            alternatives[0],
+            LoweredPattern::Range {
+                inclusive: true,
+                ..
+            }
+        ));
+        assert!(matches!(
+            alternatives[1],
+            LoweredPattern::Range {
+                inclusive: false,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn multiline_content_cannot_be_less_indented_than_its_closer() {
+        let diagnostic =
+            checked_compiler_error("fn main() returns String { \"\"\"\n one\n  \"\"\" }");
+        assert_eq!(diagnostic.code, "E3005");
+    }
+
+    #[test]
+    fn builtin_namespace_members_can_use_contextual_or_reserved_spellings() {
+        assert_lowers_deterministically(
+            "fn f(values: List<Int>) returns Bool { let mapped = list.map(values, fn(item: Int) returns Int { item }); list.any(mapped, fn(item: Int) returns Bool { item > 0 }) }",
+        );
+    }
+
+    #[test]
     fn forbidden_identifier_roles_have_deterministic_diagnostics() {
         for source in [
-            "fn test(items: List<Int>) returns Void effects [] { for any in items { } () }",
-            "fn test(value: Option<Int>) returns Int effects [] { match value { Some(any) => 0, None => 0 } }",
-            "fn test(value: Result<Int, Int>) returns Int effects [] { match value { Result.Ok(undefined) => 0, Result.Err(_) => 0 } }",
-            "record Pair { value: Int } fn test(value: Pair) returns Int effects [] { match value { Pair { value: null } => 0 } }",
+            "fn check_case(items: List<Int>) returns Void effects [] { for any in items { } () }",
+            "fn check_case(value: Option<Int>) returns Int effects [] { match value { Some(any) => 0, None => 0 } }",
+            "fn check_case(value: Result<Int, Int>) returns Int effects [] { match value { Result.Ok(undefined) => 0, Result.Err(_) => 0 } }",
+            "record Pair { value: Int } fn check_case(value: Pair) returns Int effects [] { match value { Pair { value: null } => 0 } }",
         ] {
             assert_compiler_error_is_deterministic(source);
         }

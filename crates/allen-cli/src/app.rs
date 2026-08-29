@@ -2,17 +2,26 @@
 
 use allen_bytecode::{Artifact, DecodeLimits, VerifiedArtifact, decode_and_verify, encode};
 use allen_compiler::{
-    Diagnostic, assemble_loose_compilation, compile_bundle_with_prepared_source,
-    compile_prepared_inline_manifest_source, prepare_source, render_diagnostic,
+    Diagnostic, PackageSourceBundle, SourceTest, assemble_loaded_source_test,
+    assemble_loose_compilation, assemble_source_test, compile_bundle_with_prepared_source,
+    compile_prepared_inline_manifest_source, compile_source_test, discover_source_tests,
+    prepare_loaded_source_tests, prepare_source, render_diagnostic,
 };
-use allen_package::{LoadLimits, canonical_https_origin, generate_lock};
-use allen_runtime::{HostPolicy, LaunchRequest, RuntimeProviders, launch, launch_with_context};
+use allen_package::{LoadLimits, LoadedPackage, canonical_https_origin, generate_lock};
+use allen_runtime::{
+    HostPolicy, RawLaunchRequest, RuntimeProviders, execute_prepared_with_context, launch_raw,
+    launch_raw_with_context, prepare_raw_launch,
+};
+use allen_testkit::{
+    NoToolSchemas, ReplayError, ReplayLimits, ReplayLog, ReplayingEffectProvider, ToolResultSchema,
+};
 use allen_vm::{
     CancellationSource, Checkpoint, CheckpointObserver, ExecutionLimits, ExecutionOutcome,
     TaskEvent, execute_verified_artifact_outcome_with_limits,
     execute_verified_artifact_outcome_with_observer,
 };
 use base64::Engine as _;
+use josh_protocol::{CatalogSetParams, Validate as _};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -29,6 +38,7 @@ enum Command {
     Build,
     Inspect,
     Lock,
+    Test,
 }
 
 #[derive(Default)]
@@ -38,10 +48,12 @@ struct RunOptions {
     input: Option<String>,
     workdir: Option<String>,
     allowed_net_origins: Vec<String>,
+    granted_exec: Vec<String>,
+    granted_exec_environment: Vec<String>,
 }
 
 const WORKER_PROTOCOL: &str = "allen-cli-worker/1";
-const MAX_WORKER_REQUEST_BYTES: usize = 24 * 1024 * 1024;
+const MAX_WORKER_REQUEST_BYTES: usize = 25 * 1024 * 1024;
 const MAX_WORKER_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
 const MAX_WORKER_ARTIFACT_TEXT_BYTES: usize = 23 * 1024 * 1024;
 const MAX_WORKER_INPUT_BYTES: usize = 1024 * 1024;
@@ -63,9 +75,11 @@ struct WorkerRequest {
     protocol: String,
     artifact: String,
     entry: String,
-    input: serde_json::Value,
+    input_bytes: String,
     workspace_root: Option<String>,
     allowed_http_origins: Vec<String>,
+    granted_exec: Vec<String>,
+    granted_exec_environment: Vec<String>,
     trace_tasks: bool,
     source_style_errors: bool,
 }
@@ -186,9 +200,13 @@ fn run() -> Result<(), ExitCode> {
         Some("build") => Command::Build,
         Some("inspect") => Command::Inspect,
         Some("lock") => Command::Lock,
+        Some("test") => Command::Test,
         _ => return usage(&program),
     };
     let remaining = arguments.collect::<Vec<_>>();
+    if matches!(command, Command::Test) {
+        return run_source_tests(&program, &remaining);
+    }
     let (show_effects, run_options, path, output) = match command {
         Command::Check => match remaining.as_slice() {
             [path] => (false, RunOptions::default(), path.clone(), None),
@@ -214,6 +232,7 @@ fn run() -> Result<(), ExitCode> {
             [path] => (false, RunOptions::default(), path.clone(), None),
             _ => return usage(&program),
         },
+        Command::Test => unreachable!("test command returned above"),
     };
 
     match command {
@@ -268,9 +287,11 @@ fn run() -> Result<(), ExitCode> {
                     protocol: WORKER_PROTOCOL.to_owned(),
                     artifact: artifact_text(&worker_artifact),
                     entry,
-                    input,
+                    input_bytes: base64::engine::general_purpose::STANDARD.encode(input),
                     workspace_root: run_options.workdir,
                     allowed_http_origins: run_options.allowed_net_origins,
+                    granted_exec: run_options.granted_exec,
+                    granted_exec_environment: run_options.granted_exec_environment,
                     trace_tasks: run_options.trace_tasks,
                     source_style_errors: !loaded_artifact,
                 })?;
@@ -280,6 +301,8 @@ fn run() -> Result<(), ExitCode> {
                 || run_options.input.is_some()
                 || run_options.workdir.is_some()
                 || !run_options.allowed_net_origins.is_empty()
+                || !run_options.granted_exec.is_empty()
+                || !run_options.granted_exec_environment.is_empty()
             {
                 eprintln!(
                     "{path}: error: entry input and work directories require a manifest contract"
@@ -290,9 +313,11 @@ fn run() -> Result<(), ExitCode> {
                 protocol: WORKER_PROTOCOL.to_owned(),
                 artifact: artifact_text(&worker_artifact),
                 entry: "main".to_owned(),
-                input: serde_json::Value::Null,
+                input_bytes: base64::engine::general_purpose::STANDARD.encode(b"null"),
                 workspace_root: None,
                 allowed_http_origins: Vec::new(),
+                granted_exec: Vec::new(),
+                granted_exec_environment: Vec::new(),
                 trace_tasks: run_options.trace_tasks,
                 source_style_errors: !loaded_artifact,
             })?;
@@ -315,6 +340,7 @@ fn run() -> Result<(), ExitCode> {
                 ExitCode::from(1)
             })?;
         }
+        Command::Test => unreachable!("test command returned above"),
     }
     Ok(())
 }
@@ -377,7 +403,14 @@ fn run_in_worker(request: &WorkerRequest) -> Result<(), ExitCode> {
         } => println!("stopped: {}", allen_vm::Value::String(reason.into())),
         WorkerResponse::Stopped { reason: None, .. } => println!("stopped"),
         WorkerResponse::RuntimeError { code, message, .. } => {
-            eprintln!("runtime error[{code}]: {message}");
+            if code == "program.failed" {
+                eprintln!(
+                    "runtime error[{code}]: {}",
+                    escape_untrusted_terminal_text(&message)
+                );
+            } else {
+                eprintln!("runtime error[{code}]: {message}");
+            }
             return Err(ExitCode::from(1));
         }
     }
@@ -445,14 +478,18 @@ fn validate_worker_request(request: &WorkerRequest) -> Result<(), String> {
             .as_ref()
             .is_some_and(String::is_empty)
         || request.allowed_http_origins.len() > 256
+        || request.granted_exec.len() > 256
+        || request.granted_exec_environment.len() > 256
     {
         return Err("worker request is invalid".to_owned());
     }
-    if serde_json::to_vec(&request.input)
-        .map_err(|_| "worker input is invalid")?
-        .len()
-        > MAX_WORKER_INPUT_BYTES
-    {
+    let input = base64::engine::general_purpose::STANDARD
+        .decode(&request.input_bytes)
+        .map_err(|_| "worker input is invalid")?;
+    if base64::engine::general_purpose::STANDARD.encode(&input) != request.input_bytes {
+        return Err("worker input is invalid".to_owned());
+    }
+    if input.len() > MAX_WORKER_INPUT_BYTES {
         return Err("worker input exceeds its limit".to_owned());
     }
     let mut previous = None;
@@ -465,11 +502,38 @@ fn validate_worker_request(request: &WorkerRequest) -> Result<(), String> {
         }
         previous = Some(origin);
     }
+    let mut previous = None;
+    for pattern in &request.granted_exec {
+        if allen_exec::CommandPattern::parse(pattern).is_err()
+            || previous.is_some_and(|value: &String| value >= pattern)
+        {
+            return Err("worker exec grants are invalid".to_owned());
+        }
+        previous = Some(pattern);
+    }
+    let mut previous = None;
+    for name in &request.granted_exec_environment {
+        let mut bytes = name.bytes();
+        if !bytes.next().is_some_and(|first| {
+            (first.is_ascii_alphabetic() || first == b'_')
+                && bytes.all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+                && !name.eq_ignore_ascii_case("LC_ALL")
+                && !name.eq_ignore_ascii_case("TZ")
+        }) || previous.is_some_and(|value: &String| value >= name)
+        {
+            return Err("worker exec environment grants are invalid".to_owned());
+        }
+        previous = Some(name);
+    }
     Ok(())
 }
 
 fn bounded_stop_reason(reason: String) -> Option<String> {
     (reason.len() <= MAX_WORKER_STOP_REASON_BYTES).then_some(reason)
+}
+
+fn escape_untrusted_terminal_text(text: &str) -> String {
+    text.chars().flat_map(char::escape_default).collect()
 }
 
 fn execute_worker_request(
@@ -481,6 +545,9 @@ fn execute_worker_request(
         .map_err(|_| "worker artifact is invalid")?;
     let verified = decode_and_verify(&artifact, &DecodeLimits::default())
         .map_err(|_| "worker artifact is invalid")?;
+    let input = base64::engine::general_purpose::STANDARD
+        .decode(request.input_bytes)
+        .map_err(|_| "worker input is invalid")?;
     let mut trace = TraceCollector::default();
     if uses_contract_layout(&verified) {
         let mut granted_capabilities = std::collections::BTreeSet::new();
@@ -495,15 +562,17 @@ fn execute_worker_request(
             output_bytes: 1024 * 1024,
             workspace_root: request.workspace_root.map(Into::into),
             http_origins: request.allowed_http_origins.into_iter().collect(),
+            granted_exec: request.granted_exec.into_iter().collect(),
+            granted_exec_environment: request.granted_exec_environment.into_iter().collect(),
             ..HostPolicy::default()
         };
         policy.workspace_rights = workspace_rights(&verified, &request.entry);
-        let launch_request = LaunchRequest {
+        let launch_request = RawLaunchRequest {
             entry: request.entry,
-            input: request.input,
+            input,
         };
         let outcome = if request.trace_tasks {
-            launch_with_context(
+            launch_raw_with_context(
                 &verified,
                 &launch_request,
                 &policy,
@@ -512,7 +581,7 @@ fn execute_worker_request(
                 &mut trace,
             )
         } else {
-            launch(&verified, &launch_request, &policy)
+            launch_raw(&verified, &launch_request, &policy)
         };
         return Ok(match outcome {
             Ok(outcome) => match outcome.execution {
@@ -705,6 +774,14 @@ fn inspect_artifact(path: &str) -> Result<(), ExitCode> {
             "manifest.https_origins: [{}]",
             manifest.https_origins.join(", ")
         );
+        println!(
+            "manifest.exec_commands: [{}]",
+            manifest.exec_commands.join(", ")
+        );
+        println!(
+            "manifest.exec_environment: [{}]",
+            manifest.exec_environment.join(", ")
+        );
         for entry in artifact.entries() {
             println!(
                 "contract.entry.{}: function={} input_schema={} output_schema={}",
@@ -746,13 +823,421 @@ fn usage(program: &str) -> Result<(), ExitCode> {
 fn usage_text(program: &str) -> String {
     format!(
         "usage: {program} check [--show-effects] <source.allen|package-directory>\n       \
-         {program} run [--trace-tasks] [--entry <name>] [--input <json-file|->] [--workdir <directory>] [--allow-net-origin <https-origin>]... <source.allen|package-directory|artifact.allenb>\n       \
+         {program} run [--trace-tasks] [--entry <name>] [--input <json-file|->] [--workdir <directory>] [--allow-net-origin <https-origin>]... [--grant-exec <pattern>]... [--grant-exec-env <NAME>]... <source.allen|package-directory|artifact.allenb>\n       \
          {program} build <source.allen|package-directory> -o <artifact.allenb>\n       \
          {program} inspect <artifact.allenb>\n       \
-         {program} lock <package-directory>"
+         {program} lock <package-directory>\n       \
+         {program} test [--filter <text>] [--replay <journal.json>] [--catalog <catalog.json>] <source.allen|package-directory>"
     )
 }
 
+#[derive(Default)]
+struct TestOptions {
+    filter: Option<String>,
+    replay: Option<String>,
+    catalog: Option<String>,
+    path: Option<String>,
+}
+
+fn run_source_tests(program: &str, arguments: &[String]) -> Result<(), ExitCode> {
+    let options = parse_test_arguments(program, arguments)?;
+    let path = options.path.expect("validated test path");
+    let catalog = options
+        .catalog
+        .as_deref()
+        .map(read_frozen_catalog)
+        .transpose()
+        .map_err(|message| {
+            eprintln!("{path}: error: {message}");
+            ExitCode::from(2)
+        })?;
+    let (bundle, loaded) = load_test_bundle(Path::new(&path)).map_err(|message| {
+        eprintln!("{path}: error: {message}");
+        ExitCode::from(1)
+    })?;
+    let discovered = discover_source_tests(&bundle).map_err(|diagnostics| {
+        report_test_diagnostics(&bundle, diagnostics);
+        ExitCode::from(1)
+    })?;
+    let selected = discovered
+        .into_iter()
+        .filter(|test| {
+            options
+                .filter
+                .as_ref()
+                .is_none_or(|filter| source_test_display(test).contains(filter))
+        })
+        .collect::<Vec<_>>();
+    if selected.is_empty() {
+        eprintln!("{path}: error: no source tests matched");
+        return Err(ExitCode::from(2));
+    }
+    let effectful = selected
+        .iter()
+        .filter(|test| !test.effects.is_empty())
+        .count();
+    if options.replay.is_some() && (selected.len() != 1 || effectful != 1) {
+        eprintln!("{path}: error: --replay requires exactly one selected effectful test");
+        return Err(ExitCode::from(2));
+    }
+    if effectful != 0 && options.replay.is_none() {
+        eprintln!(
+            "{path}: error: effectful source tests require an exact allen-testkit replay journal"
+        );
+        return Err(ExitCode::from(1));
+    }
+    let replay = options
+        .replay
+        .as_deref()
+        .map(read_replay_log)
+        .transpose()
+        .map_err(|message| {
+            eprintln!("{path}: error: {message}");
+            ExitCode::from(1)
+        })?;
+    let total = selected.len();
+    let mut failed = 0usize;
+    for test in selected {
+        let display = source_test_display(&test);
+        let result = run_one_source_test(
+            &bundle,
+            loaded.as_ref(),
+            catalog.as_ref(),
+            &test,
+            replay.as_ref(),
+        );
+        match result {
+            Ok(()) => println!("test {display} ... ok"),
+            Err(message) => {
+                failed += 1;
+                println!("test {display} ... FAILED");
+                eprintln!("{display}: {message}");
+            }
+        }
+    }
+    println!(
+        "test result: {}. {} passed; {} failed",
+        if failed == 0 { "ok" } else { "FAILED" },
+        total - failed,
+        failed
+    );
+    if failed == 0 {
+        Ok(())
+    } else {
+        Err(ExitCode::from(1))
+    }
+}
+
+fn parse_test_arguments(program: &str, arguments: &[String]) -> Result<TestOptions, ExitCode> {
+    let mut options = TestOptions::default();
+    let mut index = 0;
+    while index < arguments.len() {
+        match arguments[index].as_str() {
+            "--filter" | "--replay" | "--catalog" => {
+                let flag = arguments[index].as_str();
+                let Some(value) = arguments
+                    .get(index + 1)
+                    .filter(|value| !value.is_empty() && !value.starts_with('-'))
+                else {
+                    return usage(program).map(|()| unreachable!());
+                };
+                let slot = match flag {
+                    "--filter" => &mut options.filter,
+                    "--replay" => &mut options.replay,
+                    "--catalog" => &mut options.catalog,
+                    _ => unreachable!(),
+                };
+                if slot.replace(value.clone()).is_some() {
+                    return usage(program).map(|()| unreachable!());
+                }
+                index += 2;
+            }
+            value if !value.starts_with('-') && options.path.is_none() => {
+                options.path = Some(value.to_owned());
+                index += 1;
+            }
+            _ => return usage(program).map(|()| unreachable!()),
+        }
+    }
+    if options.path.is_none() {
+        return usage(program).map(|()| unreachable!());
+    }
+    Ok(options)
+}
+
+fn load_test_bundle(path: &Path) -> Result<(PackageSourceBundle, Option<LoadedPackage>), String> {
+    if path.is_dir() {
+        let loaded = crate::package::load_test_package(path)?;
+        let bundle = prepare_loaded_source_tests(&loaded)?;
+        return Ok((bundle, Some(loaded)));
+    }
+    let (root, sources) = load_source_bundle(path)?;
+    Ok((
+        PackageSourceBundle {
+            root,
+            sources,
+            import_targets: BTreeMap::new(),
+            entry_points: Vec::new(),
+            entry_modules: Vec::new(),
+        },
+        None,
+    ))
+}
+
+fn source_test_display(test: &SourceTest) -> String {
+    format!(
+        "{}::{}",
+        escape_untrusted_terminal_text(&test.module),
+        serde_json::to_string(&test.name).expect("test name JSON encoding cannot fail")
+    )
+}
+
+fn report_test_diagnostics(bundle: &PackageSourceBundle, diagnostics: Vec<Diagnostic>) {
+    for diagnostic in diagnostics {
+        let module = diagnostic.source.as_deref().unwrap_or(&bundle.root);
+        let source = bundle.sources.get(module).map_or("", String::as_str);
+        eprintln!("{}", render_diagnostic(module, source, &diagnostic));
+    }
+}
+
+fn run_one_source_test(
+    bundle: &PackageSourceBundle,
+    loaded: Option<&LoadedPackage>,
+    catalog: Option<&allen_schema::FrozenCatalog>,
+    test: &SourceTest,
+    replay: Option<&ReplayLog>,
+) -> Result<(), String> {
+    let artifact = if let Some(loaded) = loaded {
+        assemble_loaded_source_test(loaded, catalog, &test.module, &test.name)?
+            .package
+            .artifact
+    } else {
+        let compiled =
+            compile_source_test(bundle, &test.module, &test.name).map_err(|diagnostics| {
+                diagnostics
+                    .into_iter()
+                    .map(|diagnostic| {
+                        let module = diagnostic.source.as_deref().unwrap_or(&test.module);
+                        let source = bundle.sources.get(module).map_or("", String::as_str);
+                        render_diagnostic(module, source, &diagnostic)
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            })?;
+        assemble_source_test(compiled.compilation)?
+    };
+    let bytes = encode(&artifact).map_err(|error| error.to_string())?;
+    let verified =
+        decode_and_verify(&bytes, &DecodeLimits::default()).map_err(|error| error.to_string())?;
+    if let Some(log) = replay {
+        return if let Some(catalog) = catalog {
+            let schemas = allen_testkit::ArtifactToolSchemas::new(&verified, catalog)
+                .map_err(|error| replay_error(&error))?;
+            execute_source_test_replay_with_schemas(&verified, log, schemas, Some(catalog.clone()))
+        } else {
+            execute_source_test_replay(&verified, log)
+        };
+    }
+    let request = RawLaunchRequest {
+        entry: "test".to_owned(),
+        input: b"null".to_vec(),
+    };
+    let policy = HostPolicy {
+        limits: cli_execution_limits(),
+        granted_tools: catalog.map_or_else(std::collections::BTreeSet::new, |_| {
+            verified
+                .manifest()
+                .map(|manifest| {
+                    manifest
+                        .required_tools
+                        .iter()
+                        .map(|tool| tool.name.clone())
+                        .collect()
+                })
+                .unwrap_or_default()
+        }),
+        tool_catalog: catalog.cloned(),
+        ..HostPolicy::default()
+    };
+    match launch_raw(&verified, &request, &policy) {
+        Ok(outcome) => match outcome.execution {
+            ExecutionOutcome::Completed(_) => Ok(()),
+            ExecutionOutcome::Stopped { reason, .. } => Err(format!(
+                "stopped: {}",
+                escape_untrusted_terminal_text(&reason)
+            )),
+        },
+        Err(error) => {
+            let message = if error.code.as_str() == "program.failed" {
+                escape_untrusted_terminal_text(&error.message)
+            } else {
+                error.message
+            };
+            Err(format!("runtime error[{}]: {message}", error.code.as_str()))
+        }
+    }
+}
+
+fn read_replay_log(path: &str) -> Result<ReplayLog, String> {
+    let json = fs::read_to_string(path).map_err(|error| format!("cannot read replay: {error}"))?;
+    ReplayLog::from_json(&json, ReplayLimits::default())
+        .map_err(|error| format!("invalid replay journal: {error}"))
+}
+
+fn read_frozen_catalog(path: &str) -> Result<allen_schema::FrozenCatalog, String> {
+    let json = fs::read_to_string(path).map_err(|error| format!("cannot read catalog: {error}"))?;
+    let params: CatalogSetParams =
+        serde_json::from_str(&json).map_err(|_| "invalid frozen catalog document".to_owned())?;
+    params
+        .validate()
+        .map_err(|_| "invalid frozen catalog document".to_owned())?;
+    if !params.metadata.complete {
+        return Err("frozen catalog must be complete".to_owned());
+    }
+    let limits = allen_schema::SchemaLimits::default();
+    let tools = params
+        .tools
+        .iter()
+        .map(|tool| {
+            allen_schema::ToolDefinition::parse(
+                &tool.name,
+                &tool.version,
+                &serde_json::to_string(&tool.input_schema).map_err(|_| ())?,
+                &serde_json::to_string(&tool.output_schema).map_err(|_| ())?,
+                &serde_json::to_string(&tool.error_schema).map_err(|_| ())?,
+                tool.effects.clone(),
+                match tool.idempotency {
+                    josh_protocol::Idempotency::Unknown => allen_schema::Idempotency::Unknown,
+                    josh_protocol::Idempotency::Idempotent => allen_schema::Idempotency::Idempotent,
+                    josh_protocol::Idempotency::NonIdempotent => {
+                        allen_schema::Idempotency::NonIdempotent
+                    }
+                },
+                &limits,
+            )
+            .map_err(|_| ())
+        })
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|()| "invalid frozen catalog document".to_owned())?;
+    allen_schema::FrozenCatalog::freeze_with_dialect(
+        &params.schema_dialect,
+        tools,
+        &allen_schema::CatalogLimits::default(),
+    )
+    .map_err(|_| "invalid frozen catalog document".to_owned())
+}
+
+fn execute_source_test_replay(artifact: &VerifiedArtifact, log: &ReplayLog) -> Result<(), String> {
+    execute_source_test_replay_with_schemas(artifact, log, NoToolSchemas, None)
+}
+
+fn execute_source_test_replay_with_schemas<S: ToolResultSchema>(
+    artifact: &VerifiedArtifact,
+    log: &ReplayLog,
+    schemas: S,
+    tool_catalog: Option<allen_schema::FrozenCatalog>,
+) -> Result<(), String> {
+    if log.header().artifact_digest != *artifact.content_digest() {
+        return Err("replay journal artifact digest does not match selected test".to_owned());
+    }
+    let request = RawLaunchRequest {
+        entry: "test".to_owned(),
+        input: b"null".to_vec(),
+    };
+    let mut granted_capabilities = std::collections::BTreeSet::new();
+    if let Some(manifest) = artifact.manifest() {
+        granted_capabilities.extend(manifest.required_capabilities.iter().cloned());
+        granted_capabilities.extend(manifest.optional_capabilities.iter().cloned());
+    }
+    let policy = HostPolicy {
+        limits: cli_execution_limits(),
+        granted_capabilities,
+        granted_tools: tool_catalog
+            .as_ref()
+            .map_or_else(std::collections::BTreeSet::new, |_| {
+                artifact
+                    .manifest()
+                    .map(|manifest| {
+                        manifest
+                            .required_tools
+                            .iter()
+                            .map(|tool| tool.name.clone())
+                            .collect()
+                    })
+                    .unwrap_or_default()
+            }),
+        tool_catalog,
+        ..HostPolicy::default()
+    };
+    let prepared = prepare_raw_launch(artifact, &request, &policy)
+        .map_err(|error| format!("replay preflight failed: {error}"))?;
+    let binding = prepared.effect_execution_binding();
+    let mut expected = log.header().clone();
+    expected.bytecode_version = binding.bytecode_version;
+    expected.artifact_digest = binding.artifact_digest;
+    expected.contract_digest = binding.contract_digest;
+    expected.language_digest = binding.language_digest;
+    expected.runtime_digest = binding.runtime_digest;
+    expected.policy_digest = binding.policy_digest;
+    expected.catalog_digest = binding.catalog_digest;
+    expected.capability_digest = binding.capability_digest;
+    expected.error_registry_digest = binding.error_registry_digest;
+    expected
+        .effective_manifest_grants
+        .clone_from(&binding.effective_manifest_grants);
+    expected
+        .requested_exec_commands
+        .clone_from(&binding.requested_exec_commands);
+    expected
+        .requested_exec_environment
+        .clone_from(&binding.requested_exec_environment);
+    expected
+        .effective_exec_grants
+        .clone_from(&binding.effective_exec_grants);
+    expected
+        .effective_exec_environment
+        .clone_from(&binding.effective_exec_environment);
+    expected.effective_exec_environment_digest = binding.effective_exec_environment_digest;
+    expected.pinned_exec_identity_digest = binding.pinned_exec_identity_digest;
+    let mut provider = ReplayingEffectProvider::new(
+        log,
+        &expected,
+        ReplayLimits::default(),
+        schemas,
+        &artifact.verified_module().module().enum_types,
+    )
+    .map_err(|error| replay_error(&error))?;
+    let mut providers = RuntimeProviders {
+        effect_override: Some(&mut provider),
+        ..RuntimeProviders::default()
+    };
+    let mut observer = TraceCollector::default();
+    let mut cancellation = NeverCancelled;
+    match execute_prepared_with_context(prepared, &mut providers, &mut cancellation, &mut observer)
+    {
+        Ok(outcome) => match outcome.execution {
+            ExecutionOutcome::Completed(_) => Ok(()),
+            ExecutionOutcome::Stopped { reason, .. } => Err(format!(
+                "stopped: {}",
+                escape_untrusted_terminal_text(&reason)
+            )),
+        },
+        Err(error) => {
+            let message = if error.code.as_str() == "program.failed" {
+                escape_untrusted_terminal_text(&error.message)
+            } else {
+                error.message
+            };
+            Err(format!("runtime error[{}]: {message}", error.code.as_str()))
+        }
+    }
+}
+
+fn replay_error(error: &ReplayError) -> String {
+    format!("invalid or divergent replay journal: {error}")
+}
+
+#[allow(clippy::too_many_lines)]
 fn parse_run_arguments(
     program: &str,
     arguments: &[String],
@@ -768,7 +1253,10 @@ fn parse_run_arguments(
             }
             "--entry" | "--input" | "--workdir" => {
                 let flag = arguments[index].as_str();
-                let Some(value) = arguments.get(index + 1) else {
+                let Some(value) = arguments.get(index + 1).filter(|value| {
+                    !value.is_empty()
+                        && (!value.starts_with('-') || (flag == "--input" && *value == "-"))
+                }) else {
                     let _ = usage(program);
                     return Err(ExitCode::from(2));
                 };
@@ -785,7 +1273,10 @@ fn parse_run_arguments(
                 index += 2;
             }
             "--allow-net-origin" => {
-                let Some(value) = arguments.get(index + 1) else {
+                let Some(value) = arguments
+                    .get(index + 1)
+                    .filter(|value| !value.starts_with('-'))
+                else {
                     let _ = usage(program);
                     return Err(ExitCode::from(2));
                 };
@@ -800,6 +1291,42 @@ fn parse_run_arguments(
                 options.allowed_net_origins.push(origin);
                 index += 2;
             }
+            "--grant-exec" => {
+                let Some(value) = arguments
+                    .get(index + 1)
+                    .filter(|value| !value.starts_with('-'))
+                else {
+                    let _ = usage(program);
+                    return Err(ExitCode::from(2));
+                };
+                allen_exec::CommandPattern::parse(value).map_err(|_| {
+                    eprintln!("{value}: error: exec command pattern is not canonical");
+                    ExitCode::from(2)
+                })?;
+                options.granted_exec.push(value.clone());
+                index += 2;
+            }
+            "--grant-exec-env" => {
+                let Some(value) = arguments
+                    .get(index + 1)
+                    .filter(|value| !value.starts_with('-'))
+                else {
+                    let _ = usage(program);
+                    return Err(ExitCode::from(2));
+                };
+                let mut bytes = value.bytes();
+                if !bytes.next().is_some_and(|first| {
+                    (first.is_ascii_alphabetic() || first == b'_')
+                        && bytes.all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+                        && !value.eq_ignore_ascii_case("LC_ALL")
+                        && !value.eq_ignore_ascii_case("TZ")
+                }) {
+                    eprintln!("{value}: error: exec environment name is not canonical");
+                    return Err(ExitCode::from(2));
+                }
+                options.granted_exec_environment.push(value.clone());
+                index += 2;
+            }
             value if !value.starts_with('-') && path.is_none() => {
                 path = Some(value.to_owned());
                 index += 1;
@@ -811,22 +1338,26 @@ fn parse_run_arguments(
         }
     }
     options.allowed_net_origins.sort();
+    options.granted_exec.sort();
+    options.granted_exec.dedup();
+    options.granted_exec_environment.sort();
+    options.granted_exec_environment.dedup();
     path.map(|path| (options, path)).ok_or_else(|| {
         let _ = usage(program);
         ExitCode::from(2)
     })
 }
 
-fn read_json_input(path: Option<&str>, limit: usize) -> Result<serde_json::Value, ExitCode> {
+fn read_json_input(path: Option<&str>, limit: usize) -> Result<Vec<u8>, ExitCode> {
     let Some(path) = path else {
-        return Ok(serde_json::Value::Null);
+        return Ok(b"null".to_vec());
     };
-    let mut text = String::new();
+    let mut bytes = Vec::new();
     let bounded = u64::try_from(limit).unwrap_or(u64::MAX).saturating_add(1);
     if path == "-" {
         std::io::stdin()
             .take(bounded)
-            .read_to_string(&mut text)
+            .read_to_end(&mut bytes)
             .map_err(|error| {
                 eprintln!("stdin: error: cannot read JSON input: {error}");
                 ExitCode::from(1)
@@ -838,20 +1369,17 @@ fn read_json_input(path: Option<&str>, limit: usize) -> Result<serde_json::Value
                 ExitCode::from(1)
             })?
             .take(bounded)
-            .read_to_string(&mut text)
+            .read_to_end(&mut bytes)
             .map_err(|error| {
                 eprintln!("{path}: error: cannot read JSON input: {error}");
                 ExitCode::from(1)
             })?;
     }
-    if text.len() > limit {
+    if bytes.len() > limit {
         eprintln!("{path}: error: JSON input exceeds the byte limit");
         return Err(ExitCode::from(1));
     }
-    serde_json::from_str(&text).map_err(|error| {
-        eprintln!("{path}: error: invalid JSON input: {error}");
-        ExitCode::from(1)
-    })
+    Ok(bytes)
 }
 
 fn entry_effects<'a>(artifact: &'a VerifiedArtifact, name: &str) -> Option<&'a [String]> {
@@ -1332,5 +1860,241 @@ mod worker_tests {
             read_worker_message::<WorkerResponse>(&mut std::io::Cursor::new(unknown), 1024)
                 .is_err()
         );
+    }
+
+    #[test]
+    fn effectful_source_test_uses_exact_prepared_replay_binding() {
+        let bundle = PackageSourceBundle {
+            root: "main.allen".to_owned(),
+            sources: BTreeMap::from([(
+                "main.allen".to_owned(),
+                "test \"recorded\" effects [agent.message] { () }".to_owned(),
+            )]),
+            import_targets: BTreeMap::new(),
+            entry_points: Vec::new(),
+            entry_modules: Vec::new(),
+        };
+        let compiled = compile_source_test(&bundle, "main.allen", "recorded").unwrap();
+        let artifact = assemble_source_test(compiled.compilation).unwrap();
+        let bytes = encode(&artifact).unwrap();
+        let artifact = decode_and_verify(&bytes, &DecodeLimits::default()).unwrap();
+        let request = RawLaunchRequest {
+            entry: "test".to_owned(),
+            input: b"null".to_vec(),
+        };
+        let policy = HostPolicy {
+            limits: cli_execution_limits(),
+            granted_capabilities: std::collections::BTreeSet::from(["agent.message".to_owned()]),
+            ..HostPolicy::default()
+        };
+        let prepared = prepare_raw_launch(&artifact, &request, &policy).unwrap();
+        let binding = prepared.effect_execution_binding();
+        let header = allen_testkit::ReplayHeader {
+            bytecode_version: binding.bytecode_version,
+            artifact_digest: binding.artifact_digest,
+            contract_digest: binding.contract_digest,
+            language_digest: binding.language_digest,
+            runtime_digest: binding.runtime_digest,
+            policy_digest: binding.policy_digest,
+            catalog_digest: binding.catalog_digest,
+            capability_digest: binding.capability_digest,
+            error_registry_digest: binding.error_registry_digest,
+            effective_manifest_grants: binding.effective_manifest_grants,
+            requested_exec_commands: binding.requested_exec_commands,
+            requested_exec_environment: binding.requested_exec_environment,
+            effective_exec_grants: binding.effective_exec_grants,
+            effective_exec_environment: binding.effective_exec_environment,
+            effective_exec_environment_digest: binding.effective_exec_environment_digest,
+            pinned_exec_identity_digest: binding.pinned_exec_identity_digest,
+            scheduler_completion_order: Vec::new(),
+        };
+        let log = ReplayLog::new(
+            header,
+            Vec::new(),
+            allen_testkit::ReplayExecutionOutcome::Completed,
+            ReplayLimits::default(),
+        )
+        .unwrap();
+        execute_source_test_replay(&artifact, &log).unwrap();
+
+        let wrong = compile_source_test(
+            &PackageSourceBundle {
+                sources: BTreeMap::from([(
+                    "main.allen".to_owned(),
+                    "test \"recorded\" effects [agent.message] { let value = 1; () }".to_owned(),
+                )]),
+                ..bundle
+            },
+            "main.allen",
+            "recorded",
+        )
+        .unwrap();
+        let wrong = assemble_source_test(wrong.compilation).unwrap();
+        let wrong = decode_and_verify(&encode(&wrong).unwrap(), &DecodeLimits::default()).unwrap();
+        assert!(execute_source_test_replay(&wrong, &log).is_err());
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn package_tool_source_test_replays_with_exact_catalog_and_artifact_binding() {
+        use allen_schema::{CatalogLimits, Idempotency, SchemaLimits, ToolDefinition};
+        use allen_testkit::{
+            ArtifactToolSchemas, EffectKind, EffectOutcome, EffectRequest, Recorder,
+            RefuseSensitive, ReplayExecutionOutcome,
+        };
+        use allen_vm::{EnumIdentity, EnumPayload, EnumValue, Value, encode_canonical_with_limit};
+        use std::rc::Rc;
+
+        let catalog_path = std::env::temp_dir().join(format!(
+            "allen-source-test-catalog-{}.json",
+            std::process::id()
+        ));
+        fs::write(
+            &catalog_path,
+            r#"{"schema_dialect":"https://json-schema.org/draft/2020-12/schema","metadata":{"source":"allen-test","source_revision":"fixture-1","observed_at_unix_ms":1,"freshness":"current","complete":true},"tools":[{"name":"example.lookup","version":"1.2.3","description":"Fixture lookup.","input_schema":{"type":"boolean"},"output_schema":{"type":"string","maxLength":8},"error_schema":{"type":"string","maxLength":8},"effects":["external.read"],"idempotency":"idempotent"}]}"#,
+        )
+        .unwrap();
+        let catalog = read_frozen_catalog(catalog_path.to_str().unwrap()).unwrap();
+        fs::remove_file(catalog_path).unwrap();
+        let manifest = r#"[package]
+name = "tool-tests"
+version = "0.1.0"
+language = "^0.1"
+
+[[entry]]
+name = "main"
+function = "src/main.allen::main"
+input = "Void"
+output = "Void"
+
+[[tools.required]]
+name = "example.lookup"
+version = ">=1.2.0, <2.0.0"
+"#;
+        let sources = BTreeMap::from([(
+            "src/main.allen".to_owned(),
+            r#"export fn main() returns Void { () }
+test "tool replay" effects [tool.example.lookup@1] {
+  match await tools.example.lookup.call(true) {
+    Ok(value) => if (value == "found") { () } else { fail("wrong tool value") }
+    Err(_) => fail("tool failed")
+  }
+}
+"#
+            .to_owned(),
+        )]);
+        let loaded = allen_package::load_verified_root_package(
+            manifest,
+            &sources,
+            None,
+            &LoadLimits::default(),
+        )
+        .unwrap();
+        let module = "pkg://tool-tests@0.1.0/src/main.allen";
+        let assembled =
+            assemble_loaded_source_test(&loaded, Some(&catalog), module, "tool replay").unwrap();
+        let bytes = encode(&assembled.package.artifact).unwrap();
+        let artifact = decode_and_verify(&bytes, &DecodeLimits::default()).unwrap();
+        let request = RawLaunchRequest {
+            entry: "test".to_owned(),
+            input: b"null".to_vec(),
+        };
+        let policy = HostPolicy {
+            limits: cli_execution_limits(),
+            granted_tools: std::collections::BTreeSet::from(["example.lookup".to_owned()]),
+            tool_catalog: Some(catalog.clone()),
+            ..HostPolicy::default()
+        };
+        let prepared = prepare_raw_launch(&artifact, &request, &policy).unwrap();
+        let binding = prepared.effect_execution_binding();
+        let header = allen_testkit::ReplayHeader {
+            bytecode_version: binding.bytecode_version,
+            artifact_digest: binding.artifact_digest,
+            contract_digest: binding.contract_digest,
+            language_digest: binding.language_digest,
+            runtime_digest: binding.runtime_digest,
+            policy_digest: binding.policy_digest,
+            catalog_digest: binding.catalog_digest,
+            capability_digest: binding.capability_digest,
+            error_registry_digest: binding.error_registry_digest,
+            effective_manifest_grants: binding.effective_manifest_grants,
+            requested_exec_commands: binding.requested_exec_commands,
+            requested_exec_environment: binding.requested_exec_environment,
+            effective_exec_grants: binding.effective_exec_grants,
+            effective_exec_environment: binding.effective_exec_environment,
+            effective_exec_environment_digest: binding.effective_exec_environment_digest,
+            pinned_exec_identity_digest: binding.pinned_exec_identity_digest,
+            scheduler_completion_order: Vec::new(),
+        };
+        let schemas = ArtifactToolSchemas::new(&artifact, &catalog).unwrap();
+        let result_type = schemas.result_type(0).unwrap();
+        let effect_request = EffectRequest::from_value(
+            EffectKind::Tool(0),
+            &Value::Bool(true),
+            &result_type,
+            ReplayLimits::default(),
+        )
+        .unwrap();
+        let result = Value::Enum(Rc::new(EnumValue {
+            identity: EnumIdentity::Result,
+            type_name: "Result".into(),
+            variant: 0,
+            variant_name: "Ok".into(),
+            payload: EnumPayload::Tuple(Rc::from([Value::String("found".into())])),
+        }));
+        let oversized = Value::Enum(Rc::new(EnumValue {
+            identity: EnumIdentity::Result,
+            type_name: "Result".into(),
+            variant: 0,
+            variant_name: "Ok".into(),
+            payload: EnumPayload::Tuple(Rc::from([Value::String("too-long!".into())])),
+        }));
+        assert!(!schemas.validate_result(0, &oversized));
+        let outcome = EffectOutcome::Ok(
+            encode_canonical_with_limit(&result, ReplayLimits::default().payload_bytes as u64)
+                .unwrap(),
+        );
+        let mut recorder = Recorder::with_header(ReplayLimits::default(), header);
+        recorder
+            .record(effect_request, outcome, false, &RefuseSensitive)
+            .unwrap();
+        let log = recorder
+            .finish_with_execution_outcome(ReplayExecutionOutcome::Completed)
+            .unwrap();
+        execute_source_test_replay_with_schemas(&artifact, &log, schemas, Some(catalog.clone()))
+            .unwrap();
+        let bundle = prepare_loaded_source_tests(&loaded).unwrap();
+        let selected = discover_source_tests(&bundle)
+            .unwrap()
+            .into_iter()
+            .find(|test| test.name == "tool replay")
+            .unwrap();
+        run_one_source_test(
+            &bundle,
+            Some(&loaded),
+            Some(&catalog),
+            &selected,
+            Some(&log),
+        )
+        .unwrap();
+
+        let different_catalog = allen_schema::FrozenCatalog::freeze(
+            vec![
+                ToolDefinition::parse(
+                    "example.lookup",
+                    "1.2.4",
+                    r#"{"type":"boolean"}"#,
+                    r#"{"type":"string","maxLength":8}"#,
+                    r#"{"type":"string","maxLength":8}"#,
+                    vec!["external.read".to_owned()],
+                    Idempotency::Idempotent,
+                    &SchemaLimits::default(),
+                )
+                .unwrap(),
+            ],
+            &CatalogLimits::default(),
+        )
+        .unwrap();
+        assert!(ArtifactToolSchemas::new(&artifact, &different_catalog).is_err());
     }
 }

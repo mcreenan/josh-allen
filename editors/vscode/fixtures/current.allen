@@ -3,7 +3,7 @@ import { normalize as local_normalize } from "./support.allen";
 record Point {
   x: Int
   y: Int
-}
+} where { x >= 0 && y >= 0 }
 
 enum Reading {
   Empty
@@ -12,9 +12,21 @@ enum Reading {
 }
 
 export type Measurements = List<Int>
+export newtype EpochSeconds = Int
+export const SharedAnswer: Int = 40 + 2;
+
+test "shared answer" {
+  let value = SharedAnswer;
+  ()
+}
 
 export fn main() returns Int {
+  let shared = SharedAnswer;
+  let epoch = EpochSeconds(42);
+  let epoch_value = epoch.value + shared;
   let point = Point { x: 1, y: 2 };
+  let separated = 485_273;
+  let precise = 12_345.67_89e+1_0;
   let bytes = b"\x00A\n";
   let ratio: Float = -1.5e2 / 2.0;
   mut retries: Int = 0;

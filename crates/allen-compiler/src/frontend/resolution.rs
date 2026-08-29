@@ -2,15 +2,16 @@
 
 use super::checking::{
     SemanticType, contains_affine, contains_stored_sub_agent, contains_sub_agent,
-    contains_workspace, effect_id, validate_declared_type_shapes,
+    contains_workspace, effect_id, valid_newtype_underlying, validate_declared_type_shapes,
 };
 use super::{
-    BTreeMap, BTreeSet, CapabilityOperation, CheckedIntOperation, CompilerToolBinding, Diagnostic,
-    EffectOperation, EffectSetId, EnumPayloadType, EnumType, EnumVariant, FunctionId, LoweredBody,
-    LoweredElse, LoweredEnumPayload, LoweredEnumValuePayload, LoweredExpr, LoweredExprKind,
-    LoweredForSource, LoweredFunction, LoweredImport, LoweredLoopBinding, LoweredModule,
-    LoweredPattern, LoweredStatement, LoweredType, LoweredTypeDeclaration, MAX_VALUE_NESTING,
-    PackageEntryPoint, RecordField, SafeCollectionOperation, Span, StringOperation, SymbolId,
+    BTreeMap, BTreeSet, CapabilityOperation, CheckedIntOperation, CollectionOperation,
+    CompilerTemplateBinding, CompilerToolBinding, Diagnostic, EffectOperation, EffectSetId,
+    EnumPayloadType, EnumType, EnumVariant, FunctionId, ListCombinator, LoweredBody, LoweredElse,
+    LoweredEnumPayload, LoweredEnumValuePayload, LoweredExpr, LoweredExprKind, LoweredForSource,
+    LoweredFunction, LoweredImport, LoweredLoopBinding, LoweredModule, LoweredPattern,
+    LoweredStatement, LoweredType, LoweredTypeDeclaration, MAX_VALUE_NESTING, PackageEntryPoint,
+    RecordField, SafeCollectionOperation, Span, StandardOperation, StringOperation, SymbolId,
     ValueType, agent_error_type, external_directory_request_type, external_file_request_type,
     file_error_type, http_response_type, is_strict_schema_type, mangle_source_segment,
     model_error_type, network_error_type, normalize_root, permission_error_type, prompt_type,
@@ -55,6 +56,7 @@ pub(super) struct FunctionInfo {
     pub(super) parameters: Vec<SemanticType>,
     pub(super) return_type: SemanticType,
     pub(super) effects: Vec<String>,
+    pub(super) is_const: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -66,6 +68,7 @@ pub(super) struct ResolvedBundle {
     pub(super) enum_types: Vec<EnumType>,
     pub(super) transcript_part: Option<u32>,
     pub(super) tools: BTreeMap<Vec<String>, CompilerToolBinding>,
+    pub(super) templates: BTreeMap<(String, String), CompilerTemplateBinding>,
     pub(super) deferred_effect_sets: Vec<Vec<String>>,
 }
 
@@ -87,7 +90,9 @@ pub(super) fn collect_type_effect_sets(value_type: &LoweredType, sets: &mut BTre
         | LoweredType::Option(value, _)
         | LoweredType::Future(value, _)
         | LoweredType::Task(value, _)
-        | LoweredType::Prompt(value, _) => collect_type_effect_sets(value, sets),
+        | LoweredType::Prompt(value, _)
+        | LoweredType::Range(value, _)
+        | LoweredType::Sequence(value, _) => collect_type_effect_sets(value, sets),
         LoweredType::Map(key, value, _) | LoweredType::Result(key, value, _) => {
             collect_type_effect_sets(key, sets);
             collect_type_effect_sets(value, sets);
@@ -255,6 +260,25 @@ pub(super) fn record_field_value_type(
             types,
             deferred_effect_sets,
         )?)),
+        LoweredType::Range(value, _) => {
+            let value =
+                record_field_value_type(value, module, modules, types, deferred_effect_sets)?;
+            if value != ValueType::Int {
+                return Err(Diagnostic::new(
+                    "E3011",
+                    "Range requires Int bounds",
+                    lowered.span(),
+                ));
+            }
+            ValueType::Range
+        }
+        LoweredType::Sequence(value, _) => ValueType::Sequence(Box::new(record_field_value_type(
+            value,
+            module,
+            modules,
+            types,
+            deferred_effect_sets,
+        )?)),
         LoweredType::Prompt(value, _) => {
             let value =
                 record_field_value_type(value, module, modules, types, deferred_effect_sets)?;
@@ -380,6 +404,7 @@ pub(super) struct BundleCompileContext<'a> {
     pub(super) entry_modules: &'a [String],
     pub(super) entry_points: &'a [PackageEntryPoint],
     pub(super) tool_bindings: &'a [CompilerToolBinding],
+    pub(super) template_bindings: &'a [CompilerTemplateBinding],
     pub(super) prepared: BTreeMap<String, PreparedModule>,
 }
 
@@ -747,6 +772,49 @@ pub(super) fn semantic_type(
             }
             Ok(SemanticType::Value(prompt_type(value_type)))
         }
+        LoweredType::Range(value, _) => {
+            let SemanticType::Value(value_type) =
+                semantic_type(value, generics, module, modules, types)?
+            else {
+                return Err(Diagnostic::new(
+                    "E3007",
+                    "Range element type must be concrete",
+                    value.span(),
+                ));
+            };
+            if value_type != ValueType::Int {
+                return Err(Diagnostic::new(
+                    "E3011",
+                    "Range requires Int bounds",
+                    value.span(),
+                ));
+            }
+            Ok(SemanticType::Value(ValueType::Range))
+        }
+        LoweredType::Sequence(value, _) => {
+            let SemanticType::Value(value_type) =
+                semantic_type(value, generics, module, modules, types)?
+            else {
+                return Err(Diagnostic::new(
+                    "E3007",
+                    "Sequence element type must be concrete",
+                    value.span(),
+                ));
+            };
+            if contains_affine(&value_type)
+                || contains_stored_sub_agent(&value_type)
+                || contains_workspace(&value_type)
+            {
+                return Err(Diagnostic::new(
+                    "E3011",
+                    "Sequence cannot contain affine, SubAgent, or Workspace values",
+                    lowered.span(),
+                ));
+            }
+            Ok(SemanticType::Value(ValueType::Sequence(Box::new(
+                value_type,
+            ))))
+        }
         LoweredType::Function {
             parameters,
             return_type,
@@ -803,6 +871,8 @@ pub(super) fn lowered_type_spelling(value: &LoweredType) -> String {
         LoweredType::Future(value, _) => format!("Future<{}>", lowered_type_spelling(value)),
         LoweredType::Task(value, _) => format!("Task<{}>", lowered_type_spelling(value)),
         LoweredType::Prompt(value, _) => format!("Prompt<{}>", lowered_type_spelling(value)),
+        LoweredType::Range(value, _) => format!("Range<{}>", lowered_type_spelling(value)),
+        LoweredType::Sequence(value, _) => format!("Sequence<{}>", lowered_type_spelling(value)),
         LoweredType::Function {
             parameters,
             return_type,
@@ -831,6 +901,9 @@ pub(super) fn resolve_function_name(
     }
     let definition = &bundle.modules[module];
     for import in &definition.imports {
+        if import.extension {
+            continue;
+        }
         if let Some((imported, _, _)) = import.names.iter().find(|(_, local, _)| local == name) {
             let target = resolve_import_path(module, import)?;
             let symbol = bundle
@@ -865,6 +938,205 @@ pub(super) fn resolve_function_name(
     Ok(None)
 }
 
+pub(super) fn resolve_extension_functions(
+    bundle: &ResolvedBundle,
+    module: &str,
+    member: &str,
+    receiver: &ValueType,
+) -> Result<Vec<SymbolId>, Diagnostic> {
+    let mut candidates = Vec::new();
+    for import in &bundle.modules[module].imports {
+        if !import.extension {
+            continue;
+        }
+        let target_module = resolve_import_path(module, import)?;
+        for (imported, local, _) in &import.names {
+            if local != member {
+                continue;
+            }
+            let Some(symbol) = bundle
+                .names
+                .get(&(target_module.clone(), imported.clone()))
+                .copied()
+            else {
+                continue;
+            };
+            let function = &bundle.functions[symbol as usize];
+            let Some(first) = function.parameters.first() else {
+                continue;
+            };
+            let exact = match first {
+                SemanticType::Value(value_type) => value_type == receiver,
+                SemanticType::Generic(_) => true,
+                SemanticType::Function { .. } => false,
+            };
+            if exact {
+                candidates.push(symbol);
+            }
+        }
+    }
+    candidates.sort_unstable();
+    candidates.dedup();
+    Ok(candidates)
+}
+
+pub(super) fn default_helper_name(function: &str, parameter: usize) -> String {
+    format!("$default@{function}@{parameter}")
+}
+
+#[allow(clippy::too_many_lines)]
+fn expression_references_any(expression: &LoweredExpr, names: &BTreeSet<&str>) -> Option<Span> {
+    match &expression.kind {
+        LoweredExprKind::Variable(name) => names.contains(name.as_str()).then_some(expression.span),
+        LoweredExprKind::Template(parts) => parts.iter().find_map(|part| match part {
+            super::LoweredTemplatePart::Literal { .. } => None,
+            super::LoweredTemplatePart::Interpolation(value) => {
+                expression_references_any(value, names)
+            }
+        }),
+        LoweredExprKind::List(values) | LoweredExprKind::Tuple(values) => values
+            .iter()
+            .find_map(|value| expression_references_any(value, names)),
+        LoweredExprKind::ListWithSpread(items) => items
+            .iter()
+            .find_map(|item| expression_references_any(&item.value, names)),
+        LoweredExprKind::Map(entries) => entries.iter().find_map(|(key, value)| {
+            expression_references_any(key, names)
+                .or_else(|| expression_references_any(value, names))
+        }),
+        LoweredExprKind::MapWithSpread(items) => items.iter().find_map(|item| match item {
+            super::LoweredMapItem::Entry { key, value, .. } => {
+                expression_references_any(key, names)
+                    .or_else(|| expression_references_any(value, names))
+            }
+            super::LoweredMapItem::Spread { value, .. } => expression_references_any(value, names),
+        }),
+        LoweredExprKind::Record { fields, .. } => fields
+            .iter()
+            .find_map(|(_, value, _)| expression_references_any(value, names)),
+        LoweredExprKind::RecordUpdate { base, fields, .. } => {
+            expression_references_any(base, names).or_else(|| {
+                fields
+                    .iter()
+                    .find_map(|(_, value, _)| expression_references_any(value, names))
+            })
+        }
+        LoweredExprKind::Prompt {
+            system,
+            context,
+            data,
+            ..
+        } => expression_references_any(system, names)
+            .or_else(|| {
+                context
+                    .as_deref()
+                    .and_then(|value| expression_references_any(value, names))
+            })
+            .or_else(|| {
+                data.as_deref()
+                    .and_then(|value| expression_references_any(value, names))
+            }),
+        LoweredExprKind::Enum { payload, .. } => match payload {
+            LoweredEnumValuePayload::Unit => None,
+            LoweredEnumValuePayload::Tuple(values) => values
+                .iter()
+                .find_map(|value| expression_references_any(value, names)),
+            LoweredEnumValuePayload::Record(fields) => fields
+                .iter()
+                .find_map(|(_, value, _)| expression_references_any(value, names)),
+        },
+        LoweredExprKind::FieldGet { record, .. } => expression_references_any(record, names),
+        LoweredExprKind::OptionalFieldGet { receiver, .. } => {
+            expression_references_any(receiver, names)
+        }
+        LoweredExprKind::Try(value)
+        | LoweredExprKind::Spawn(value)
+        | LoweredExprKind::Await(value)
+        | LoweredExprKind::Unary { operand: value, .. } => expression_references_any(value, names),
+        LoweredExprKind::Match { source, arms } => expression_references_any(source, names)
+            .or_else(|| {
+                arms.iter()
+                    .find_map(|(_, value, _)| expression_references_any(value, names))
+            }),
+        LoweredExprKind::If {
+            condition,
+            then_body,
+            else_branch,
+        } => expression_references_any(condition, names)
+            .or_else(|| body_references_any(then_body, names))
+            .or_else(|| match else_branch {
+                Some(LoweredElse::Body(body)) => body_references_any(body, names),
+                Some(LoweredElse::If(value)) => expression_references_any(value, names),
+                None => None,
+            }),
+        LoweredExprKind::Binary { left, right, .. }
+        | LoweredExprKind::Compose { left, right, .. }
+        | LoweredExprKind::Range {
+            start: left,
+            end: right,
+            ..
+        } => expression_references_any(left, names)
+            .or_else(|| expression_references_any(right, names)),
+        LoweredExprKind::Pipe { left, stage, .. } => expression_references_any(left, names)
+            .or_else(|| expression_references_any(stage, names)),
+        LoweredExprKind::Index { collection, index }
+        | LoweredExprKind::Slice {
+            collection,
+            range: index,
+            ..
+        } => expression_references_any(collection, names)
+            .or_else(|| expression_references_any(index, names)),
+        LoweredExprKind::Call {
+            callee, arguments, ..
+        } => expression_references_any(callee, names).or_else(|| {
+            arguments
+                .iter()
+                .find_map(|argument| expression_references_any(&argument.value, names))
+        }),
+        LoweredExprKind::AwaitBlock(body) | LoweredExprKind::Closure { body, .. } => {
+            body_references_any(body, names)
+        }
+        LoweredExprKind::ShortClosure { body, .. } => expression_references_any(body, names),
+        LoweredExprKind::Unit
+        | LoweredExprKind::Int(_)
+        | LoweredExprKind::Float(_)
+        | LoweredExprKind::Bool(_)
+        | LoweredExprKind::String(_)
+        | LoweredExprKind::Bytes(_) => None,
+    }
+}
+
+fn body_references_any(body: &LoweredBody, names: &BTreeSet<&str>) -> Option<Span> {
+    body.statements
+        .iter()
+        .find_map(|statement| match statement {
+            LoweredStatement::Let { value, .. }
+            | LoweredStatement::Assignment { value, .. }
+            | LoweredStatement::ControlFlow(value) => expression_references_any(value, names),
+            LoweredStatement::Return(value, _) => value
+                .as_ref()
+                .and_then(|value| expression_references_any(value, names)),
+            LoweredStatement::While {
+                condition, body, ..
+            } => expression_references_any(condition, names)
+                .or_else(|| body_references_any(body, names)),
+            LoweredStatement::Loop { body, .. } => body_references_any(body, names),
+            LoweredStatement::For { source, body, .. } => {
+                let source = match source {
+                    LoweredForSource::Iterable(value) => expression_references_any(value, names),
+                };
+                source.or_else(|| body_references_any(body, names))
+            }
+            LoweredStatement::LocalFunction(function) => body_references_any(&function.body, names),
+            LoweredStatement::Break(_) | LoweredStatement::Continue(_) => None,
+        })
+        .or_else(|| {
+            body.tail
+                .as_ref()
+                .and_then(|value| expression_references_any(value, names))
+        })
+}
+
 #[allow(clippy::type_complexity)]
 pub(super) fn resolve_lowered_record_fields<'a>(
     bundle: &'a ResolvedBundle,
@@ -879,6 +1151,9 @@ pub(super) fn resolve_lowered_record_fields<'a>(
         return Some((module.to_owned(), fields));
     }
     for import in &bundle.modules[module].imports {
+        if import.extension {
+            continue;
+        }
         let Some((imported, _, _)) = import.names.iter().find(|(_, local, _)| local == name) else {
             continue;
         };
@@ -929,8 +1204,25 @@ pub(super) enum CollectionBuiltin {
     Length,
     ListAppend,
     ListSet,
+    Operation(CollectionOperation),
+    ListFold,
+    ListCombinator(ListCombinator),
     Safe(SafeCollectionOperation),
     CheckedInt(CheckedIntOperation),
+    Sequence(SequenceBuiltin),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum SequenceBuiltin {
+    FromList,
+    Map,
+    Filter,
+    Take,
+    Find,
+    Any,
+    All,
+    Fold,
+    ToList,
 }
 
 pub(super) fn string_builtin_callee(expression: &LoweredExpr) -> Option<StringOperation> {
@@ -956,8 +1248,25 @@ pub(super) fn string_builtin_callee(expression: &LoweredExpr) -> Option<StringOp
         "join" => StringOperation::Join,
         "trim_ascii" => StringOperation::TrimAscii,
         "from_utf8" => StringOperation::FromUtf8,
+        "replace" => StringOperation::Replace,
         _ => return None,
     })
+}
+
+pub(super) fn standard_operation_callee(expression: &LoweredExpr) -> Option<StandardOperation> {
+    let LoweredExprKind::FieldGet { record, field, .. } = &expression.kind else {
+        return None;
+    };
+    let LoweredExprKind::Variable(namespace) = &record.kind else {
+        return None;
+    };
+    match (namespace.as_str(), field.as_str()) {
+        ("float", "format") => Some(StandardOperation::FloatFormat),
+        ("time", "format_utc") => Some(StandardOperation::TimeFormatUtc),
+        ("time", "parse_utc") => Some(StandardOperation::TimeParseUtc),
+        ("time", "bucket") => Some(StandardOperation::TimeBucket),
+        _ => None,
+    }
 }
 
 pub(super) fn capability_builtin_callee(expression: &LoweredExpr) -> Option<CapabilityOperation> {
@@ -980,6 +1289,9 @@ pub(super) fn capability_builtin_callee(expression: &LoweredExpr) -> Option<Capa
 pub(super) fn collection_builtin_callee(expression: &LoweredExpr) -> Option<CollectionBuiltin> {
     match &expression.kind {
         LoweredExprKind::Variable(name) if name == "length" => Some(CollectionBuiltin::Length),
+        LoweredExprKind::Variable(name) if name == "zip" => {
+            Some(CollectionBuiltin::Operation(CollectionOperation::Zip))
+        }
         LoweredExprKind::FieldGet { record, field, .. } => {
             let LoweredExprKind::Variable(namespace) = &record.kind else {
                 return None;
@@ -987,6 +1299,29 @@ pub(super) fn collection_builtin_callee(expression: &LoweredExpr) -> Option<Coll
             match (namespace.as_str(), field.as_str()) {
                 ("list", "append") => Some(CollectionBuiltin::ListAppend),
                 ("list", "set") => Some(CollectionBuiltin::ListSet),
+                ("list", "min") => Some(CollectionBuiltin::Operation(CollectionOperation::ListMin)),
+                ("list", "max") => Some(CollectionBuiltin::Operation(CollectionOperation::ListMax)),
+                ("list", "sum") => Some(CollectionBuiltin::Operation(
+                    CollectionOperation::ListSumInt,
+                )),
+                ("list", "fold") => Some(CollectionBuiltin::ListFold),
+                ("list", "map") => Some(CollectionBuiltin::ListCombinator(ListCombinator::Map)),
+                ("list", "filter") => {
+                    Some(CollectionBuiltin::ListCombinator(ListCombinator::Filter))
+                }
+                ("list", "flat_map") => {
+                    Some(CollectionBuiltin::ListCombinator(ListCombinator::FlatMap))
+                }
+                ("list", "filter_map") => {
+                    Some(CollectionBuiltin::ListCombinator(ListCombinator::FilterMap))
+                }
+                ("list", "find") => Some(CollectionBuiltin::ListCombinator(ListCombinator::Find)),
+                ("list", "any") => Some(CollectionBuiltin::ListCombinator(ListCombinator::Any)),
+                ("list", "all") => Some(CollectionBuiltin::ListCombinator(ListCombinator::All)),
+                ("list", "partition") => {
+                    Some(CollectionBuiltin::ListCombinator(ListCombinator::Partition))
+                }
+                ("list", "scan") => Some(CollectionBuiltin::ListCombinator(ListCombinator::Scan)),
                 ("list", "get") => Some(CollectionBuiltin::Safe(SafeCollectionOperation::ListGet)),
                 ("list", "try_set") => {
                     Some(CollectionBuiltin::Safe(SafeCollectionOperation::ListTrySet))
@@ -995,6 +1330,24 @@ pub(super) fn collection_builtin_callee(expression: &LoweredExpr) -> Option<Coll
                     Some(CollectionBuiltin::Safe(SafeCollectionOperation::BytesGet))
                 }
                 ("map", "get") => Some(CollectionBuiltin::Safe(SafeCollectionOperation::MapGet)),
+                ("map", "insert") => {
+                    Some(CollectionBuiltin::Safe(SafeCollectionOperation::MapInsert))
+                }
+                ("map", "remove") => {
+                    Some(CollectionBuiltin::Safe(SafeCollectionOperation::MapRemove))
+                }
+                ("map", "keys") => Some(CollectionBuiltin::Safe(SafeCollectionOperation::MapKeys)),
+                ("seq", "from_list") => {
+                    Some(CollectionBuiltin::Sequence(SequenceBuiltin::FromList))
+                }
+                ("seq", "map") => Some(CollectionBuiltin::Sequence(SequenceBuiltin::Map)),
+                ("seq", "filter") => Some(CollectionBuiltin::Sequence(SequenceBuiltin::Filter)),
+                ("seq", "take") => Some(CollectionBuiltin::Sequence(SequenceBuiltin::Take)),
+                ("seq", "find") => Some(CollectionBuiltin::Sequence(SequenceBuiltin::Find)),
+                ("seq", "any") => Some(CollectionBuiltin::Sequence(SequenceBuiltin::Any)),
+                ("seq", "all") => Some(CollectionBuiltin::Sequence(SequenceBuiltin::All)),
+                ("seq", "fold") => Some(CollectionBuiltin::Sequence(SequenceBuiltin::Fold)),
+                ("seq", "to_list") => Some(CollectionBuiltin::Sequence(SequenceBuiltin::ToList)),
                 ("int", "checked_add") => {
                     Some(CollectionBuiltin::CheckedInt(CheckedIntOperation::Add))
                 }
@@ -1036,6 +1389,7 @@ pub(super) fn standard_builtin_callee(expression: &LoweredExpr) -> Option<Standa
         ("fs", "list") => Some(StandardBuiltin::Operation(EffectOperation::List)),
         ("fs", "search") => Some(StandardBuiltin::Operation(EffectOperation::Search)),
         ("http", "get") => Some(StandardBuiltin::Operation(EffectOperation::HttpGet)),
+        ("exec", "run") => Some(StandardBuiltin::Operation(EffectOperation::ExecRun)),
         ("permission", "request_file") => Some(StandardBuiltin::Operation(
             EffectOperation::PermissionRequestFile,
         )),
@@ -1090,6 +1444,39 @@ pub(super) fn tool_callee(expression: &LoweredExpr) -> Option<Vec<String>> {
     Some(path[1..path.len() - 1].to_vec())
 }
 
+pub(super) fn template_callee(expression: &LoweredExpr) -> Option<&str> {
+    let LoweredExprKind::FieldGet {
+        record,
+        field: render,
+        ..
+    } = &expression.kind
+    else {
+        return None;
+    };
+    let LoweredExprKind::FieldGet {
+        record: namespace,
+        field: name,
+        ..
+    } = &record.kind
+    else {
+        return None;
+    };
+    matches!(&namespace.kind, LoweredExprKind::Variable(value) if value == "templates")
+        .then_some(())
+        .filter(|()| render == "render")
+        .map(|()| name.as_str())
+}
+
+pub(super) fn template_binding<'a>(
+    bundle: &'a ResolvedBundle,
+    module: &str,
+    name: &str,
+) -> Option<&'a CompilerTemplateBinding> {
+    let package = module.strip_prefix("pkg://")?.split_once('/')?.0;
+    bundle.templates.get(&(package.to_owned(), name.to_owned()))
+}
+
+#[allow(clippy::too_many_lines)]
 pub(super) fn effect_operation_signature(
     operation: EffectOperation,
     transcript_part: Option<u32>,
@@ -1147,6 +1534,18 @@ pub(super) fn effect_operation_signature(
             ),
             "net.http_get",
             "http.get",
+        ),
+        EffectOperation::ExecRun => (
+            vec![
+                ValueType::List(Box::new(ValueType::String)),
+                ValueType::Option(Box::new(ValueType::Bytes)),
+            ],
+            ValueType::Result(
+                Box::new(allen_bytecode::exec_response_type()),
+                Box::new(allen_bytecode::exec_error_type()),
+            ),
+            "exec.run",
+            "exec.run",
         ),
         EffectOperation::PermissionRequestFile => (
             vec![external_file_request_type()],
@@ -1224,6 +1623,7 @@ pub(super) fn required_body_effects(
         Function {
             effects: Vec<String>,
             result: Box<EffectShape>,
+            local: bool,
         },
         List(Box<EffectShape>),
         Map(Box<EffectShape>, Box<EffectShape>),
@@ -1252,6 +1652,7 @@ pub(super) fn required_body_effects(
                 } => EffectShape::Function {
                     effects: effects.clone(),
                     result: Box::new(resolve(return_type, bundle, module, active)),
+                    local: false,
                 },
                 LoweredType::List(value, _) => {
                     EffectShape::List(Box::new(resolve(value, bundle, module, active)))
@@ -1316,7 +1717,9 @@ pub(super) fn required_body_effects(
                 | LoweredType::Result(_, _, _)
                 | LoweredType::Future(_, _)
                 | LoweredType::Task(_, _)
-                | LoweredType::Prompt(_, _) => EffectShape::Other,
+                | LoweredType::Prompt(_, _)
+                | LoweredType::Range(_, _)
+                | LoweredType::Sequence(_, _) => EffectShape::Other,
             }
         }
 
@@ -1343,6 +1746,18 @@ pub(super) fn required_body_effects(
         })
     }
 
+    fn local_function_shape(
+        function: &super::LoweredLocalFunction,
+        bundle: &ResolvedBundle,
+        module: &str,
+    ) -> EffectShape {
+        EffectShape::Function {
+            effects: function.declared_effects.clone().unwrap_or_default(),
+            result: Box::new(type_shape(&function.return_type, bundle, module)),
+            local: true,
+        }
+    }
+
     pub(super) fn expression_shape(
         expression: &LoweredExpr,
         bundle: &ResolvedBundle,
@@ -1362,6 +1777,7 @@ pub(super) fn required_body_effects(
                             bundle,
                             &bundle.functions[symbol as usize].module,
                         )),
+                        local: false,
                     }
                 } else {
                     EffectShape::Other
@@ -1387,6 +1803,7 @@ pub(super) fn required_body_effects(
                 EffectShape::Function {
                     effects,
                     result: Box::new(type_shape(return_type, bundle, module)),
+                    local: false,
                 }
             }
             LoweredExprKind::List(values) => EffectShape::List(Box::new(merge_shapes(
@@ -1452,7 +1869,9 @@ pub(super) fn required_body_effects(
                     _ => EffectShape::Other,
                 }
             }
-            LoweredExprKind::Call { callee, .. } if matches!(&callee.kind, LoweredExprKind::Variable(name) if name == "stop") => {
+            LoweredExprKind::Call {
+                callee, arguments, ..
+            } if matches!(&callee.kind, LoweredExprKind::Variable(name) if name == "stop" || (name == "fail" && arguments.len() == 1)) => {
                 EffectShape::Never
             }
             LoweredExprKind::Call { callee, .. } => {
@@ -1494,6 +1913,59 @@ pub(super) fn required_body_effects(
             LoweredExprKind::AwaitBlock(body) => {
                 body_shape(body, bundle, module, callbacks, current)?
             }
+            LoweredExprKind::ListWithSpread(items) => EffectShape::List(Box::new(merge_shapes(
+                items
+                    .iter()
+                    .map(|item| expression_shape(&item.value, bundle, module, callbacks, current))
+                    .collect::<Result<Vec<_>, _>>()?,
+            ))),
+            LoweredExprKind::MapWithSpread(items) => {
+                let mut keys = Vec::new();
+                let mut values = Vec::new();
+                for item in items {
+                    match item {
+                        super::LoweredMapItem::Entry { key, value, .. } => {
+                            keys.push(expression_shape(key, bundle, module, callbacks, current)?);
+                            values
+                                .push(expression_shape(value, bundle, module, callbacks, current)?);
+                        }
+                        super::LoweredMapItem::Spread { value, .. } => {
+                            if let EffectShape::Map(key, value) =
+                                expression_shape(value, bundle, module, callbacks, current)?
+                            {
+                                keys.push(*key);
+                                values.push(*value);
+                            }
+                        }
+                    }
+                }
+                EffectShape::Map(Box::new(merge_shapes(keys)), Box::new(merge_shapes(values)))
+            }
+            LoweredExprKind::RecordUpdate { base, fields, .. } => {
+                match expression_shape(base, bundle, module, callbacks, current)? {
+                    EffectShape::Record(mut shape) => {
+                        for (name, value, _) in fields {
+                            shape.insert(
+                                name.clone(),
+                                expression_shape(value, bundle, module, callbacks, current)?,
+                            );
+                        }
+                        EffectShape::Record(shape)
+                    }
+                    _ => EffectShape::Other,
+                }
+            }
+            LoweredExprKind::OptionalFieldGet {
+                receiver, field, ..
+            } => match expression_shape(receiver, bundle, module, callbacks, current)? {
+                EffectShape::Record(fields) => {
+                    fields.get(field).cloned().unwrap_or(EffectShape::Other)
+                }
+                _ => EffectShape::Other,
+            },
+            // These operators have no additional callback shape until their
+            // call lowering is selected, but their nested operands are still
+            // visited by check_expression below.
             LoweredExprKind::Unit
             | LoweredExprKind::Int(_)
             | LoweredExprKind::Float(_)
@@ -1506,8 +1978,13 @@ pub(super) fn required_body_effects(
             | LoweredExprKind::Try(_)
             | LoweredExprKind::Unary { .. }
             | LoweredExprKind::Binary { .. }
+            | LoweredExprKind::ShortClosure { .. }
             | LoweredExprKind::Spawn(_)
-            | LoweredExprKind::Await(_) => EffectShape::Other,
+            | LoweredExprKind::Await(_)
+            | LoweredExprKind::Compose { .. }
+            | LoweredExprKind::Pipe { .. }
+            | LoweredExprKind::Range { .. }
+            | LoweredExprKind::Slice { .. } => EffectShape::Other,
         })
     }
 
@@ -1520,19 +1997,27 @@ pub(super) fn required_body_effects(
     ) -> Result<EffectShape, Diagnostic> {
         let mut scoped = callbacks.clone();
         for statement in &body.statements {
-            if let LoweredStatement::Let {
-                name,
-                annotation,
-                value,
-                ..
-            } = statement
-            {
-                let shape = if let Some(annotation) = annotation {
-                    type_shape(annotation, bundle, module)
-                } else {
-                    expression_shape(value, bundle, module, &scoped, current)?
-                };
-                scoped.insert(name.clone(), shape);
+            match statement {
+                LoweredStatement::Let {
+                    name,
+                    annotation,
+                    value,
+                    ..
+                } => {
+                    let shape = if let Some(annotation) = annotation {
+                        type_shape(annotation, bundle, module)
+                    } else {
+                        expression_shape(value, bundle, module, &scoped, current)?
+                    };
+                    scoped.insert(name.clone(), shape);
+                }
+                LoweredStatement::LocalFunction(function) => {
+                    scoped.insert(
+                        function.name.clone(),
+                        local_function_shape(function, bundle, module),
+                    );
+                }
+                _ => {}
             }
         }
         if let Some(tail) = &body.tail {
@@ -1590,8 +2075,10 @@ pub(super) fn required_body_effects(
             return;
         };
         for (field, _, binding) in fields {
-            if let (Some(binding), Some(shape)) = (binding, source_fields.get(field)) {
-                scope.insert(binding.clone(), shape.clone());
+            if let (LoweredPattern::Binding { name, .. }, Some(shape)) =
+                (binding.as_ref(), source_fields.get(field))
+            {
+                scope.insert(name.clone(), shape.clone());
             }
         }
     }
@@ -1627,9 +2114,33 @@ pub(super) fn required_body_effects(
                     check_expression(value, bundle, module, callbacks, current, effects)?;
                 }
             }
+            LoweredExprKind::ListWithSpread(items) => {
+                for item in items {
+                    check_expression(&item.value, bundle, module, callbacks, current, effects)?;
+                }
+            }
             LoweredExprKind::Map(entries) => {
                 for (key, value) in entries {
                     check_expression(key, bundle, module, callbacks, current, effects)?;
+                    check_expression(value, bundle, module, callbacks, current, effects)?;
+                }
+            }
+            LoweredExprKind::MapWithSpread(items) => {
+                for item in items {
+                    match item {
+                        super::LoweredMapItem::Entry { key, value, .. } => {
+                            check_expression(key, bundle, module, callbacks, current, effects)?;
+                            check_expression(value, bundle, module, callbacks, current, effects)?;
+                        }
+                        super::LoweredMapItem::Spread { value, .. } => {
+                            check_expression(value, bundle, module, callbacks, current, effects)?;
+                        }
+                    }
+                }
+            }
+            LoweredExprKind::RecordUpdate { base, fields, .. } => {
+                check_expression(base, bundle, module, callbacks, current, effects)?;
+                for (_, value, _) in fields {
                     check_expression(value, bundle, module, callbacks, current, effects)?;
                 }
             }
@@ -1664,18 +2175,39 @@ pub(super) fn required_body_effects(
                     check_expression(data, bundle, module, callbacks, current, effects)?;
                 }
             }
-            LoweredExprKind::Binary { left, right, .. } => {
+            LoweredExprKind::Binary { left, right, .. }
+            | LoweredExprKind::Range {
+                start: left,
+                end: right,
+                ..
+            } => {
                 check_expression(left, bundle, module, callbacks, current, effects)?;
                 check_expression(right, bundle, module, callbacks, current, effects)?;
+            }
+            LoweredExprKind::Compose { left, right, .. } => {
+                check_expression(left, bundle, module, callbacks, current, effects)?;
+                check_expression(right, bundle, module, callbacks, current, effects)?;
+            }
+            LoweredExprKind::Pipe { left, stage, .. } => {
+                check_expression(left, bundle, module, callbacks, current, effects)?;
+                check_expression(stage, bundle, module, callbacks, current, effects)?;
             }
             LoweredExprKind::Index {
                 collection: left,
                 index: right,
+            }
+            | LoweredExprKind::Slice {
+                collection: left,
+                range: right,
+                ..
             } => {
                 check_expression(left, bundle, module, callbacks, current, effects)?;
                 check_expression(right, bundle, module, callbacks, current, effects)?;
             }
             LoweredExprKind::FieldGet { record, .. }
+            | LoweredExprKind::OptionalFieldGet {
+                receiver: record, ..
+            }
             | LoweredExprKind::Try(record)
             | LoweredExprKind::Unary {
                 operand: record, ..
@@ -1723,6 +2255,14 @@ pub(super) fn required_body_effects(
             } => {
                 if is_task_snapshot_callee(callee) {
                     effects.insert("debug.inspect".to_owned());
+                } else if let Some(name) = template_callee(callee) {
+                    if template_binding(bundle, module, name).is_none() {
+                        return Err(Diagnostic::new(
+                            "E3012",
+                            format!("template '{name}' is not declared in this package"),
+                            callee.span,
+                        ));
+                    }
                 } else if let Some(path) = tool_callee(callee) {
                     let binding = bundle.tools.get(&path).ok_or_else(|| {
                         Diagnostic::new(
@@ -1746,7 +2286,7 @@ pub(super) fn required_body_effects(
                     effects.extend(callback_effects);
                 }
                 for argument in arguments {
-                    check_expression(argument, bundle, module, callbacks, current, effects)?;
+                    check_expression(&argument.value, bundle, module, callbacks, current, effects)?;
                 }
             }
             LoweredExprKind::Closure {
@@ -1767,17 +2307,27 @@ pub(super) fn required_body_effects(
                     effects.extend(required);
                 }
             }
+            LoweredExprKind::Variable(name) => {
+                if let Some(EffectShape::Function {
+                    effects: local_effects,
+                    local: true,
+                    ..
+                }) = callbacks.get(name)
+                {
+                    effects.extend(local_effects.iter().cloned());
+                }
+            }
             LoweredExprKind::Unit
             | LoweredExprKind::Int(_)
             | LoweredExprKind::Float(_)
             | LoweredExprKind::Bool(_)
             | LoweredExprKind::String(_)
             | LoweredExprKind::Bytes(_)
-            | LoweredExprKind::Variable(_)
             | LoweredExprKind::Enum {
                 payload: LoweredEnumValuePayload::Unit,
                 ..
-            } => {}
+            }
+            | LoweredExprKind::ShortClosure { .. } => {}
         }
         Ok(())
     }
@@ -1821,15 +2371,17 @@ pub(super) fn required_body_effects(
                                 value, bundle, module, &scoped, current,
                             )?)
                         }
-                        LoweredForSource::Range { start, end } => {
-                            check_expression(start, bundle, module, &scoped, current, effects)?;
-                            check_expression(end, bundle, module, &scoped, current, effects)?;
-                            EffectShape::Other
-                        }
                     };
                     let mut nested = scoped.clone();
                     bind_loop_shape(binding, yielded, &mut nested);
                     check_body(body, bundle, module, &nested, current, effects)?;
+                    continue;
+                }
+                LoweredStatement::LocalFunction(function) => {
+                    scoped.insert(
+                        function.name.clone(),
+                        local_function_shape(function, bundle, module),
+                    );
                     continue;
                 }
                 LoweredStatement::Break(_) | LoweredStatement::Continue(_) => continue,
@@ -1876,6 +2428,7 @@ pub(super) fn required_body_effects(
     Ok(effects.into_iter().collect())
 }
 
+#[allow(clippy::too_many_lines)]
 pub(super) fn expression_uses_agent_transcript(expression: &LoweredExpr) -> bool {
     match &expression.kind {
         LoweredExprKind::Template(parts) => {
@@ -1887,14 +2440,31 @@ pub(super) fn expression_uses_agent_transcript(expression: &LoweredExpr) -> bool
             standard_builtin_callee(callee)
                 == Some(StandardBuiltin::Operation(EffectOperation::AgentTranscript))
                 || expression_uses_agent_transcript(callee)
-                || arguments.iter().any(expression_uses_agent_transcript)
+                || arguments
+                    .iter()
+                    .any(|argument| expression_uses_agent_transcript(&argument.value))
         }
         LoweredExprKind::List(values) | LoweredExprKind::Tuple(values) => {
             values.iter().any(expression_uses_agent_transcript)
         }
+        LoweredExprKind::ListWithSpread(items) => items
+            .iter()
+            .any(|item| expression_uses_agent_transcript(&item.value)),
         LoweredExprKind::Map(entries) => entries.iter().any(|(key, value)| {
             expression_uses_agent_transcript(key) || expression_uses_agent_transcript(value)
         }),
+        LoweredExprKind::MapWithSpread(items) => items.iter().any(|item| match item {
+            super::LoweredMapItem::Entry { key, value, .. } => {
+                expression_uses_agent_transcript(key) || expression_uses_agent_transcript(value)
+            }
+            super::LoweredMapItem::Spread { value, .. } => expression_uses_agent_transcript(value),
+        }),
+        LoweredExprKind::RecordUpdate { base, fields, .. } => {
+            expression_uses_agent_transcript(base)
+                || fields
+                    .iter()
+                    .any(|(_, value, _)| expression_uses_agent_transcript(value))
+        }
         LoweredExprKind::Record { fields, .. }
         | LoweredExprKind::Enum {
             payload: LoweredEnumValuePayload::Record(fields),
@@ -1920,13 +2490,28 @@ pub(super) fn expression_uses_agent_transcript(expression: &LoweredExpr) -> bool
                     .as_deref()
                     .is_some_and(expression_uses_agent_transcript)
         }
-        LoweredExprKind::Binary { left, right, .. } => {
-            expression_uses_agent_transcript(left) || expression_uses_agent_transcript(right)
+        LoweredExprKind::Binary { left, right, .. }
+        | LoweredExprKind::Compose { left, right, .. }
+        | LoweredExprKind::Range {
+            start: left,
+            end: right,
+            ..
+        } => expression_uses_agent_transcript(left) || expression_uses_agent_transcript(right),
+        LoweredExprKind::Pipe { left, stage, .. } => {
+            expression_uses_agent_transcript(left) || expression_uses_agent_transcript(stage)
         }
-        LoweredExprKind::Index { collection, index } => {
+        LoweredExprKind::Index { collection, index }
+        | LoweredExprKind::Slice {
+            collection,
+            range: index,
+            ..
+        } => {
             expression_uses_agent_transcript(collection) || expression_uses_agent_transcript(index)
         }
         LoweredExprKind::FieldGet { record, .. }
+        | LoweredExprKind::OptionalFieldGet {
+            receiver: record, ..
+        }
         | LoweredExprKind::Try(record)
         | LoweredExprKind::Unary {
             operand: record, ..
@@ -1957,7 +2542,8 @@ pub(super) fn expression_uses_agent_transcript(expression: &LoweredExpr) -> bool
                     None => false,
                 }
         }
-        LoweredExprKind::Unit
+        LoweredExprKind::ShortClosure { .. }
+        | LoweredExprKind::Unit
         | LoweredExprKind::Int(_)
         | LoweredExprKind::Float(_)
         | LoweredExprKind::Bool(_)
@@ -1986,12 +2572,10 @@ pub(super) fn body_uses_agent_transcript(body: &LoweredBody) -> bool {
         LoweredStatement::For { source, body, .. } => {
             let source_uses = match source {
                 LoweredForSource::Iterable(value) => expression_uses_agent_transcript(value),
-                LoweredForSource::Range { start, end } => {
-                    expression_uses_agent_transcript(start) || expression_uses_agent_transcript(end)
-                }
             };
             source_uses || body_uses_agent_transcript(body)
         }
+        LoweredStatement::LocalFunction(function) => body_uses_agent_transcript(&function.body),
         LoweredStatement::Break(_) | LoweredStatement::Continue(_) => false,
     }) || body
         .tail
@@ -1999,6 +2583,7 @@ pub(super) fn body_uses_agent_transcript(body: &LoweredBody) -> bool {
         .is_some_and(expression_uses_agent_transcript)
 }
 
+#[allow(clippy::too_many_lines)]
 pub(super) fn direct_capability_inspection_span(expression: &LoweredExpr) -> Option<Span> {
     match &expression.kind {
         LoweredExprKind::Template(parts) => {
@@ -2009,14 +2594,35 @@ pub(super) fn direct_capability_inspection_span(expression: &LoweredExpr) -> Opt
         } => capability_builtin_callee(callee)
             .map(|_| expression.span)
             .or_else(|| direct_capability_inspection_span(callee))
-            .or_else(|| arguments.iter().find_map(direct_capability_inspection_span)),
+            .or_else(|| {
+                arguments
+                    .iter()
+                    .find_map(|argument| direct_capability_inspection_span(&argument.value))
+            }),
         LoweredExprKind::List(values) | LoweredExprKind::Tuple(values) => {
             values.iter().find_map(direct_capability_inspection_span)
         }
+        LoweredExprKind::ListWithSpread(items) => items
+            .iter()
+            .find_map(|item| direct_capability_inspection_span(&item.value)),
         LoweredExprKind::Map(entries) => entries.iter().find_map(|(key, value)| {
             direct_capability_inspection_span(key)
                 .or_else(|| direct_capability_inspection_span(value))
         }),
+        LoweredExprKind::MapWithSpread(items) => items.iter().find_map(|item| match item {
+            super::LoweredMapItem::Entry { key, value, .. } => {
+                direct_capability_inspection_span(key)
+                    .or_else(|| direct_capability_inspection_span(value))
+            }
+            super::LoweredMapItem::Spread { value, .. } => direct_capability_inspection_span(value),
+        }),
+        LoweredExprKind::RecordUpdate { base, fields, .. } => {
+            direct_capability_inspection_span(base).or_else(|| {
+                fields
+                    .iter()
+                    .find_map(|(_, value, _)| direct_capability_inspection_span(value))
+            })
+        }
         LoweredExprKind::Record { fields, .. }
         | LoweredExprKind::Enum {
             payload: LoweredEnumValuePayload::Record(fields),
@@ -2040,13 +2646,27 @@ pub(super) fn direct_capability_inspection_span(expression: &LoweredExpr) -> Opt
                     .and_then(direct_capability_inspection_span)
             })
             .or_else(|| data.as_deref().and_then(direct_capability_inspection_span)),
-        LoweredExprKind::Binary { left, right, .. } => direct_capability_inspection_span(left)
+        LoweredExprKind::Binary { left, right, .. }
+        | LoweredExprKind::Compose { left, right, .. }
+        | LoweredExprKind::Range {
+            start: left,
+            end: right,
+            ..
+        } => direct_capability_inspection_span(left)
             .or_else(|| direct_capability_inspection_span(right)),
-        LoweredExprKind::Index { collection, index } => {
-            direct_capability_inspection_span(collection)
-                .or_else(|| direct_capability_inspection_span(index))
-        }
+        LoweredExprKind::Pipe { left, stage, .. } => direct_capability_inspection_span(left)
+            .or_else(|| direct_capability_inspection_span(stage)),
+        LoweredExprKind::Index { collection, index }
+        | LoweredExprKind::Slice {
+            collection,
+            range: index,
+            ..
+        } => direct_capability_inspection_span(collection)
+            .or_else(|| direct_capability_inspection_span(index)),
         LoweredExprKind::FieldGet { record, .. }
+        | LoweredExprKind::OptionalFieldGet {
+            receiver: record, ..
+        }
         | LoweredExprKind::Try(record)
         | LoweredExprKind::Unary {
             operand: record, ..
@@ -2071,6 +2691,7 @@ pub(super) fn direct_capability_inspection_span(expression: &LoweredExpr) -> Opt
                 None => None,
             }),
         LoweredExprKind::Closure { .. }
+        | LoweredExprKind::ShortClosure { .. }
         | LoweredExprKind::Unit
         | LoweredExprKind::Int(_)
         | LoweredExprKind::Float(_)
@@ -2103,12 +2724,11 @@ pub(super) fn direct_capability_inspection_body_span(body: &LoweredBody) -> Opti
             LoweredStatement::For { source, body, .. } => {
                 let source_span = match source {
                     LoweredForSource::Iterable(value) => direct_capability_inspection_span(value),
-                    LoweredForSource::Range { start, end } => {
-                        direct_capability_inspection_span(start)
-                            .or_else(|| direct_capability_inspection_span(end))
-                    }
                 };
                 source_span.or_else(|| direct_capability_inspection_body_span(body))
+            }
+            LoweredStatement::LocalFunction(function) => {
+                direct_capability_inspection_body_span(&function.body)
             }
             LoweredStatement::Break(_) | LoweredStatement::Continue(_) => None,
         })
@@ -2123,6 +2743,7 @@ pub(super) fn direct_capability_inspection_body_span(body: &LoweredBody) -> Opti
 pub(super) fn resolve_bundle(
     modules: BTreeMap<String, LoweredModule>,
     tool_bindings: &[CompilerToolBinding],
+    template_bindings: &[CompilerTemplateBinding],
 ) -> Result<ResolvedBundle, Diagnostic> {
     let uses_agent_transcript = modules.values().any(|module| {
         module
@@ -2134,13 +2755,20 @@ pub(super) fn resolve_bundle(
     for (module, definition) in &modules {
         let mut seen = BTreeSet::new();
         for declaration in &definition.types {
-            if matches!(declaration, LoweredTypeDeclaration::Alias { .. })
-                && builtin_semantic_type(declaration.name()).is_some()
+            if matches!(
+                declaration,
+                LoweredTypeDeclaration::Alias { .. } | LoweredTypeDeclaration::Newtype { .. }
+            ) && builtin_semantic_type(declaration.name()).is_some()
             {
+                let kind = if matches!(declaration, LoweredTypeDeclaration::Alias { .. }) {
+                    "type alias"
+                } else {
+                    "newtype"
+                };
                 return Err(Diagnostic::new(
                     "E3005",
                     format!(
-                        "type alias '{}' conflicts with built-in type '{}'",
+                        "{kind} '{}' conflicts with built-in type '{}'",
                         declaration.name(),
                         declaration.name()
                     ),
@@ -2175,6 +2803,9 @@ pub(super) fn resolve_bundle(
             }
             LoweredTypeDeclaration::Alias { target, .. } => {
                 collect_type_effect_sets(target, &mut deferred_effect_sets);
+            }
+            LoweredTypeDeclaration::Newtype { underlying, .. } => {
+                collect_type_effect_sets(underlying, &mut deferred_effect_sets);
             }
             LoweredTypeDeclaration::Enum { .. } => {}
         }
@@ -2258,6 +2889,13 @@ pub(super) fn resolve_bundle(
         })
         .collect::<BTreeMap<_, _>>();
     let mut pending_aliases = alias_declarations.keys().cloned().collect::<BTreeSet<_>>();
+    let mut pending_newtypes = type_declarations
+        .iter()
+        .filter_map(|(module, name, declaration)| {
+            matches!(declaration, LoweredTypeDeclaration::Newtype { .. })
+                .then_some(((module.clone(), name.clone()), declaration))
+        })
+        .collect::<BTreeMap<_, _>>();
     let mut pending_records = type_declarations
         .iter()
         .filter_map(|(module, name, declaration)| {
@@ -2266,10 +2904,17 @@ pub(super) fn resolve_bundle(
         })
         .collect::<BTreeMap<_, _>>();
     let mut alias_shapes = Vec::new();
+    let mut newtype_shapes = Vec::new();
     let mut record_shapes = Vec::new();
-    while !pending_aliases.is_empty() || !pending_records.is_empty() {
+    while !pending_aliases.is_empty() || !pending_newtypes.is_empty() || !pending_records.is_empty()
+    {
         let mut progress = false;
         let mut first_unresolved = None;
+        let pending_nominals = pending_aliases
+            .iter()
+            .cloned()
+            .chain(pending_newtypes.keys().cloned())
+            .collect::<BTreeSet<_>>();
 
         for key in &alias_order {
             if !pending_aliases.contains(key) {
@@ -2279,7 +2924,7 @@ pub(super) fn resolve_bundle(
             let LoweredTypeDeclaration::Alias { target, .. } = declaration else {
                 unreachable!("pending alias declaration is an alias")
             };
-            if has_pending_alias_dependency(&modules, &key.0, target, &pending_aliases)? {
+            if has_pending_alias_dependency(&modules, &key.0, target, &pending_nominals)? {
                 continue;
             }
             match semantic_type(target, &BTreeSet::new(), &key.0, &modules, &types)
@@ -2305,6 +2950,58 @@ pub(super) fn resolve_bundle(
             }
         }
 
+        let newtype_keys = pending_newtypes.keys().cloned().collect::<Vec<_>>();
+        for key in newtype_keys {
+            let declaration = pending_newtypes[&key];
+            let LoweredTypeDeclaration::Newtype { underlying, .. } = declaration else {
+                unreachable!("pending newtype declaration is a newtype")
+            };
+            if has_pending_alias_dependency(&modules, &key.0, underlying, &pending_nominals)? {
+                continue;
+            }
+            match semantic_type(underlying, &BTreeSet::new(), &key.0, &modules, &types)
+                .map_err(|diagnostic| diagnostic.with_source(&key.0))
+            {
+                Ok(SemanticType::Value(value_type)) => {
+                    if !valid_newtype_underlying(&value_type) {
+                        return Err(Diagnostic::new(
+                            "E3011",
+                            "newtype underlying type must be complete, inhabited, non-affine, and non-callable",
+                            underlying.span(),
+                        )
+                        .with_source(&key.0));
+                    }
+                    let value_type = ValueType::Newtype {
+                        name: format!("{}::{}", key.0, key.1),
+                        underlying: Box::new(value_type),
+                    };
+                    newtype_shapes.push((
+                        value_type.clone(),
+                        key.0.clone(),
+                        declaration.name_span(),
+                    ));
+                    types.insert(key.clone(), value_type);
+                    pending_newtypes.remove(&key);
+                    progress = true;
+                }
+                Ok(SemanticType::Function { .. } | SemanticType::Generic(_)) => {
+                    return Err(Diagnostic::new(
+                        "E3011",
+                        "newtype underlying type must be a complete value type",
+                        underlying.span(),
+                    )
+                    .with_source(&key.0));
+                }
+                Err(diagnostic)
+                    if diagnostic.code == "E3005"
+                        && diagnostic.message.starts_with("unknown type '") =>
+                {
+                    first_unresolved.get_or_insert(diagnostic);
+                }
+                Err(diagnostic) => return Err(diagnostic),
+            }
+        }
+
         let record_keys = pending_records.keys().cloned().collect::<Vec<_>>();
         for key in record_keys {
             let declaration = pending_records[&key];
@@ -2314,7 +3011,12 @@ pub(super) fn resolve_bundle(
             if fields.iter().try_fold(false, |pending, (_, field, _)| {
                 Ok::<_, Diagnostic>(
                     pending
-                        || has_pending_alias_dependency(&modules, &key.0, field, &pending_aliases)?,
+                        || has_pending_alias_dependency(
+                            &modules,
+                            &key.0,
+                            field,
+                            &pending_nominals,
+                        )?,
                 )
             })? {
                 continue;
@@ -2341,6 +3043,14 @@ pub(super) fn resolve_bundle(
         }
 
         if !progress {
+            if let Some((key, declaration)) = pending_newtypes.first_key_value() {
+                return Err(Diagnostic::new(
+                    "E2012",
+                    format!("recursive or unresolved newtype '{}'", key.1),
+                    declaration.name_span(),
+                )
+                .with_source(&key.0));
+            }
             if let Some(diagnostic) = first_unresolved {
                 return Err(diagnostic);
             }
@@ -2425,7 +3135,13 @@ pub(super) fn resolve_bundle(
         }
         enum_types[enum_id as usize].variants = metadata;
     }
-    validate_declared_type_shapes(&enum_types, &enum_spans, &record_shapes, &alias_shapes)?;
+    validate_declared_type_shapes(
+        &enum_types,
+        &enum_spans,
+        &record_shapes,
+        &alias_shapes,
+        &newtype_shapes,
+    )?;
     let mut next_tool_enum = u32::try_from(enum_types.len()).map_err(|_| {
         Diagnostic::new(
             "E3005",
@@ -2480,24 +3196,138 @@ pub(super) fn resolve_bundle(
     }
     let mut keys = Vec::new();
     for (module, definition) in &modules {
-        let mut seen = BTreeSet::new();
+        let mut seen = definition
+            .types
+            .iter()
+            .filter(|declaration| {
+                matches!(
+                    declaration,
+                    LoweredTypeDeclaration::Record { .. } | LoweredTypeDeclaration::Newtype { .. }
+                )
+            })
+            .map(|declaration| declaration.name().to_owned())
+            .collect::<BTreeSet<_>>();
         for function in &definition.functions {
             if !seen.insert(function.name.clone()) {
                 return Err(Diagnostic::new(
                     "E3005",
-                    format!("duplicate function '{}'", function.name),
+                    format!("duplicate value '{}'", function.name),
                     function.name_span,
                 )
                 .with_source(module));
             }
-            keys.push((module.clone(), function.name.clone(), function.clone()));
+            if function.parameter_defaults.len() != function.parameters.len() {
+                return Err(Diagnostic::new(
+                    "E3010",
+                    format!(
+                        "function '{}' has inconsistent parameter default metadata",
+                        function.name
+                    ),
+                    function.name_span,
+                )
+                .with_source(module));
+            }
+            let mut saw_default = false;
+            for (parameter_index, default) in function.parameter_defaults.iter().enumerate() {
+                let Some(default) = default else {
+                    if saw_default {
+                        let (parameter, _, parameter_span) = &function.parameters[parameter_index];
+                        return Err(Diagnostic::new(
+                            "E3010",
+                            format!(
+                                "required parameter '{parameter}' cannot follow a default parameter"
+                            ),
+                            *parameter_span,
+                        )
+                        .with_source(module));
+                    }
+                    continue;
+                };
+                saw_default = true;
+                let forbidden = function.parameters[parameter_index..]
+                    .iter()
+                    .map(|(name, _, _)| name.as_str())
+                    .collect::<BTreeSet<_>>();
+                if let Some(reference_span) = expression_references_any(&default.value, &forbidden)
+                {
+                    return Err(Diagnostic::new(
+                        "E3010",
+                        "a parameter default can reference only constants and earlier parameters",
+                        reference_span,
+                    )
+                    .with_label(default.span, "default declared here")
+                    .with_source(module));
+                }
+                let (_, parameter_type, _) = &function.parameters[parameter_index];
+                let helper_name = default_helper_name(&function.name, parameter_index);
+                keys.push((
+                    module.clone(),
+                    helper_name.clone(),
+                    LoweredFunction {
+                        exported: false,
+                        is_async: false,
+                        name: helper_name,
+                        name_span: default.span,
+                        generics: function.generics.clone(),
+                        parameters: function.parameters[..parameter_index].to_vec(),
+                        parameter_defaults: vec![None; parameter_index],
+                        return_type: parameter_type.clone(),
+                        declared_effects: Some(Vec::new()),
+                        effects_span: Some(default.span),
+                        body: LoweredBody {
+                            statements: Vec::new(),
+                            tail: Some(default.value.clone()),
+                            span: default.span,
+                        },
+                    },
+                    false,
+                ));
+            }
+            keys.push((
+                module.clone(),
+                function.name.clone(),
+                function.clone(),
+                false,
+            ));
+        }
+        for constant in &definition.constants {
+            if !seen.insert(constant.name.clone()) {
+                return Err(Diagnostic::new(
+                    "E3005",
+                    format!("duplicate value '{}'", constant.name),
+                    constant.name_span,
+                )
+                .with_source(module));
+            }
+            keys.push((
+                module.clone(),
+                constant.name.clone(),
+                LoweredFunction {
+                    exported: constant.exported,
+                    is_async: false,
+                    name: constant.name.clone(),
+                    name_span: constant.name_span,
+                    generics: Vec::new(),
+                    parameters: Vec::new(),
+                    parameter_defaults: Vec::new(),
+                    return_type: constant.value_type.clone(),
+                    declared_effects: Some(Vec::new()),
+                    effects_span: None,
+                    body: LoweredBody {
+                        statements: Vec::new(),
+                        tail: Some(constant.value.clone()),
+                        span: constant.value.span,
+                    },
+                },
+                true,
+            ));
         }
     }
     keys.sort_by(|left, right| (&left.0, &left.1).cmp(&(&right.0, &right.1)));
     let mut names = BTreeMap::new();
     let mut functions = Vec::new();
     let mut next_bytecode = 0_u32;
-    for (index, (module, name, lowered)) in keys.into_iter().enumerate() {
+    for (index, (module, name, lowered, is_const)) in keys.into_iter().enumerate() {
         let symbol = u32::try_from(index).map_err(|_| {
             Diagnostic::new("E3005", "too many function declarations", lowered.name_span)
                 .with_source(&module)
@@ -2537,6 +3367,7 @@ pub(super) fn resolve_bundle(
             parameters,
             return_type,
             effects,
+            is_const,
         });
     }
     let mut tools = BTreeMap::new();
@@ -2591,6 +3422,26 @@ pub(super) fn resolve_bundle(
             ));
         }
     }
+    let mut templates = BTreeMap::new();
+    let mut template_indexes = BTreeSet::new();
+    for binding in template_bindings {
+        if binding.package.is_empty()
+            || !is_template_name(&binding.name)
+            || !template_indexes.insert(binding.template)
+            || templates
+                .insert(
+                    (binding.package.clone(), binding.name.clone()),
+                    binding.clone(),
+                )
+                .is_some()
+        {
+            return Err(Diagnostic::new(
+                "E3012",
+                "template source binding is invalid or duplicated",
+                Span { start: 0, end: 0 },
+            ));
+        }
+    }
     let mut bundle = ResolvedBundle {
         modules,
         functions,
@@ -2599,16 +3450,41 @@ pub(super) fn resolve_bundle(
         enum_types,
         transcript_part,
         tools,
+        templates,
         deferred_effect_sets,
     };
 
     for (module, definition) in &bundle.modules {
+        let local_values = definition
+            .functions
+            .iter()
+            .map(|function| function.name.clone())
+            .chain(
+                definition
+                    .constants
+                    .iter()
+                    .map(|constant| constant.name.clone()),
+            )
+            .chain(
+                definition
+                    .types
+                    .iter()
+                    .filter(|declaration| {
+                        matches!(
+                            declaration,
+                            LoweredTypeDeclaration::Record { .. }
+                                | LoweredTypeDeclaration::Newtype { .. }
+                        )
+                    })
+                    .map(|declaration| declaration.name().to_owned()),
+            )
+            .collect::<BTreeSet<_>>();
         let mut bindings = BTreeSet::new();
         for import in &definition.imports {
             let target = resolve_import_path(module, import)
                 .map_err(|diagnostic| diagnostic.with_source(module))?;
             for (imported, local, span) in &import.names {
-                if !bindings.insert(local.clone()) {
+                if !import.extension && !bindings.insert(local.clone()) {
                     return Err(Diagnostic::new(
                         "E3003",
                         format!("duplicate import binding '{local}'"),
@@ -2622,16 +3498,34 @@ pub(super) fn resolve_bundle(
                     .copied();
                 let exported_function = function
                     .is_some_and(|symbol| bundle.functions[symbol as usize].lowered.exported);
-                let imported_type = bundle.modules[&target]
+                let imported_declaration = bundle.modules[&target]
                     .types
                     .iter()
-                    .any(|declaration| declaration.name() == imported && declaration.exported());
-                if !exported_function && !imported_type {
+                    .find(|declaration| declaration.name() == imported && declaration.exported());
+                let imported_type = imported_declaration.is_some();
+                if !exported_function && (!imported_type || import.extension) {
                     let message = function.map_or_else(
                         || format!("unknown import '{imported}'"),
                         |_| format!("function '{imported}' is private to module '{target}'"),
                     );
                     return Err(Diagnostic::new("E3003", message, *span).with_source(module));
+                }
+                let imported_value = !import.extension
+                    && (exported_function
+                        || imported_declaration.is_some_and(|declaration| {
+                            matches!(
+                                declaration,
+                                LoweredTypeDeclaration::Record { .. }
+                                    | LoweredTypeDeclaration::Newtype { .. }
+                            )
+                        }));
+                if imported_value && local_values.contains(local) {
+                    return Err(Diagnostic::new(
+                        "E3003",
+                        format!("import binding '{local}' conflicts with a local value"),
+                        *span,
+                    )
+                    .with_source(module));
                 }
             }
         }
@@ -2711,6 +3605,14 @@ pub(super) fn resolve_bundle(
     Ok(bundle)
 }
 
+fn is_template_name(value: &str) -> bool {
+    let mut bytes = value.bytes();
+    bytes.next().is_some_and(|first| {
+        (first.is_ascii_alphabetic() || first == b'_')
+            && bytes.all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+    })
+}
+
 pub(super) fn rebase_tool_type(
     value_type: &mut ValueType,
     base: u32,
@@ -2736,7 +3638,11 @@ pub(super) fn rebase_tool_type(
         ValueType::List(value)
         | ValueType::Option(value)
         | ValueType::Future(value)
-        | ValueType::Task(value) => {
+        | ValueType::Task(value)
+        | ValueType::Sequence(value)
+        | ValueType::Newtype {
+            underlying: value, ..
+        } => {
             rebase_tool_type(value, base, local_enum_count)?;
         }
         ValueType::Map(left, right) | ValueType::Result(left, right) => {
@@ -2764,6 +3670,7 @@ pub(super) fn rebase_tool_type(
             rebase_tool_type(return_type, base, local_enum_count)?;
         }
         ValueType::Int
+        | ValueType::Range
         | ValueType::Bool
         | ValueType::Float
         | ValueType::String
@@ -2796,7 +3703,9 @@ pub(super) fn collect_effect_sets(bundle: &ResolvedBundle) -> Vec<Vec<String>> {
             | LoweredType::Option(value, _)
             | LoweredType::Future(value, _)
             | LoweredType::Task(value, _)
-            | LoweredType::Prompt(value, _) => {
+            | LoweredType::Prompt(value, _)
+            | LoweredType::Range(value, _)
+            | LoweredType::Sequence(value, _) => {
                 type_effects(value, sets);
             }
             LoweredType::Map(key, value, _) => {
@@ -2920,7 +3829,9 @@ pub(super) fn collect_effect_sets(bundle: &ResolvedBundle) -> Vec<Vec<String>> {
                 | LoweredType::Result(_, _, _)
                 | LoweredType::Future(_, _)
                 | LoweredType::Task(_, _)
-                | LoweredType::Prompt(_, _) => CollectedEffectShape::Other,
+                | LoweredType::Prompt(_, _)
+                | LoweredType::Range(_, _)
+                | LoweredType::Sequence(_, _) => CollectedEffectShape::Other,
             }
         }
 
@@ -2984,6 +3895,17 @@ pub(super) fn collect_effect_sets(bundle: &ResolvedBundle) -> Vec<Vec<String>> {
         })
     }
 
+    fn local_function_shape(
+        function: &super::LoweredLocalFunction,
+        bundle: &ResolvedBundle,
+        module: &str,
+    ) -> CollectedEffectShape {
+        CollectedEffectShape::Function {
+            effects: function.declared_effects.clone().unwrap_or_default(),
+            result: Box::new(type_shape(&function.return_type, bundle, module)),
+        }
+    }
+
     pub(super) fn bind_loop_shape(
         binding: &LoweredLoopBinding,
         yielded: CollectedEffectShape,
@@ -3017,8 +3939,10 @@ pub(super) fn collect_effect_sets(bundle: &ResolvedBundle) -> Vec<Vec<String>> {
             return;
         };
         for (field, _, binding) in fields {
-            if let (Some(binding), Some(shape)) = (binding, source_fields.get(field)) {
-                scope.insert(binding.clone(), shape.clone());
+            if let (LoweredPattern::Binding { name, .. }, Some(shape)) =
+                (binding.as_ref(), source_fields.get(field))
+            {
+                scope.insert(name.clone(), shape.clone());
             }
         }
     }
@@ -3054,6 +3978,7 @@ pub(super) fn collect_effect_sets(bundle: &ResolvedBundle) -> Vec<Vec<String>> {
                 .iter()
                 .map(|(name, shape)| (name.clone(), shape_type(shape, body.span), body.span))
                 .collect(),
+            parameter_defaults: Vec::new(),
             return_type: LoweredType::Named("Void".to_owned(), body.span),
             declared_effects: None,
             effects_span: None,
@@ -3062,6 +3987,7 @@ pub(super) fn collect_effect_sets(bundle: &ResolvedBundle) -> Vec<Vec<String>> {
         required_body_effects(
             bundle,
             &FunctionInfo {
+                is_const: false,
                 module: module.to_owned(),
                 symbol: 0,
                 bytecode: None,
@@ -3202,7 +4128,9 @@ pub(super) fn collect_effect_sets(bundle: &ResolvedBundle) -> Vec<Vec<String>> {
                     _ => CollectedEffectShape::Other,
                 }
             }
-            LoweredExprKind::Call { callee, .. } if matches!(&callee.kind, LoweredExprKind::Variable(name) if name == "stop") => {
+            LoweredExprKind::Call {
+                callee, arguments, ..
+            } if matches!(&callee.kind, LoweredExprKind::Variable(name) if name == "stop" || (name == "fail" && arguments.len() == 1)) => {
                 CollectedEffectShape::Never
             }
             LoweredExprKind::Call { callee, .. } => {
@@ -3243,6 +4171,64 @@ pub(super) fn collect_effect_sets(bundle: &ResolvedBundle) -> Vec<Vec<String>> {
                 merge_shapes(branch_shapes)
             }
             LoweredExprKind::AwaitBlock(body) => body_shape(body, bundle, module, shapes, current)?,
+            LoweredExprKind::ListWithSpread(items) => {
+                CollectedEffectShape::List(Box::new(merge_shapes(
+                    items
+                        .iter()
+                        .map(|item| expression_shape(&item.value, bundle, module, shapes, current))
+                        .collect::<Result<Vec<_>, _>>()?,
+                )))
+            }
+            LoweredExprKind::MapWithSpread(items) => {
+                let mut keys = Vec::new();
+                let mut values = Vec::new();
+                for item in items {
+                    match item {
+                        super::LoweredMapItem::Entry { key, value, .. } => {
+                            keys.push(expression_shape(key, bundle, module, shapes, current)?);
+                            values.push(expression_shape(value, bundle, module, shapes, current)?);
+                        }
+                        super::LoweredMapItem::Spread { value, .. } => {
+                            if let CollectedEffectShape::Map(key, value) =
+                                expression_shape(value, bundle, module, shapes, current)?
+                            {
+                                keys.push(*key);
+                                values.push(*value);
+                            }
+                        }
+                    }
+                }
+                CollectedEffectShape::Map(
+                    Box::new(merge_shapes(keys)),
+                    Box::new(merge_shapes(values)),
+                )
+            }
+            LoweredExprKind::RecordUpdate { base, fields, .. } => {
+                match expression_shape(base, bundle, module, shapes, current)? {
+                    CollectedEffectShape::Record(mut shape) => {
+                        for (name, value, _) in fields {
+                            shape.insert(
+                                name.clone(),
+                                expression_shape(value, bundle, module, shapes, current)?,
+                            );
+                        }
+                        CollectedEffectShape::Record(shape)
+                    }
+                    _ => CollectedEffectShape::Other,
+                }
+            }
+            LoweredExprKind::OptionalFieldGet {
+                receiver, field, ..
+            } => match expression_shape(receiver, bundle, module, shapes, current)? {
+                CollectedEffectShape::Record(fields) => fields
+                    .get(field)
+                    .cloned()
+                    .unwrap_or(CollectedEffectShape::Other),
+                _ => CollectedEffectShape::Other,
+            },
+            // These operators have no additional callback shape until their
+            // call lowering is selected, but their nested operands are still
+            // visited by check_expression below.
             LoweredExprKind::Unit
             | LoweredExprKind::Int(_)
             | LoweredExprKind::Float(_)
@@ -3255,8 +4241,13 @@ pub(super) fn collect_effect_sets(bundle: &ResolvedBundle) -> Vec<Vec<String>> {
             | LoweredExprKind::Try(_)
             | LoweredExprKind::Unary { .. }
             | LoweredExprKind::Binary { .. }
+            | LoweredExprKind::ShortClosure { .. }
             | LoweredExprKind::Spawn(_)
-            | LoweredExprKind::Await(_) => CollectedEffectShape::Other,
+            | LoweredExprKind::Await(_)
+            | LoweredExprKind::Compose { .. }
+            | LoweredExprKind::Pipe { .. }
+            | LoweredExprKind::Range { .. }
+            | LoweredExprKind::Slice { .. } => CollectedEffectShape::Other,
         })
     }
 
@@ -3269,19 +4260,27 @@ pub(super) fn collect_effect_sets(bundle: &ResolvedBundle) -> Vec<Vec<String>> {
     ) -> Result<CollectedEffectShape, Diagnostic> {
         let mut scoped = shapes.clone();
         for statement in &body.statements {
-            if let LoweredStatement::Let {
-                name,
-                annotation,
-                value,
-                ..
-            } = statement
-            {
-                let shape = if let Some(annotation) = annotation {
-                    type_shape(annotation, bundle, module)
-                } else {
-                    expression_shape(value, bundle, module, &scoped, current)?
-                };
-                scoped.insert(name.clone(), shape);
+            match statement {
+                LoweredStatement::Let {
+                    name,
+                    annotation,
+                    value,
+                    ..
+                } => {
+                    let shape = if let Some(annotation) = annotation {
+                        type_shape(annotation, bundle, module)
+                    } else {
+                        expression_shape(value, bundle, module, &scoped, current)?
+                    };
+                    scoped.insert(name.clone(), shape);
+                }
+                LoweredStatement::LocalFunction(function) => {
+                    scoped.insert(
+                        function.name.clone(),
+                        local_function_shape(function, bundle, module),
+                    );
+                }
+                _ => {}
             }
         }
         if let Some(tail) = &body.tail {
@@ -3333,9 +4332,33 @@ pub(super) fn collect_effect_sets(bundle: &ResolvedBundle) -> Vec<Vec<String>> {
                     closure_effects(value, bundle, module, shapes, current, sets);
                 }
             }
+            LoweredExprKind::ListWithSpread(items) => {
+                for item in items {
+                    closure_effects(&item.value, bundle, module, shapes, current, sets);
+                }
+            }
             LoweredExprKind::Map(entries) => {
                 for (key, value) in entries {
                     closure_effects(key, bundle, module, shapes, current, sets);
+                    closure_effects(value, bundle, module, shapes, current, sets);
+                }
+            }
+            LoweredExprKind::MapWithSpread(items) => {
+                for item in items {
+                    match item {
+                        super::LoweredMapItem::Entry { key, value, .. } => {
+                            closure_effects(key, bundle, module, shapes, current, sets);
+                            closure_effects(value, bundle, module, shapes, current, sets);
+                        }
+                        super::LoweredMapItem::Spread { value, .. } => {
+                            closure_effects(value, bundle, module, shapes, current, sets);
+                        }
+                    }
+                }
+            }
+            LoweredExprKind::RecordUpdate { base, fields, .. } => {
+                closure_effects(base, bundle, module, shapes, current, sets);
+                for (_, value, _) in fields {
                     closure_effects(value, bundle, module, shapes, current, sets);
                 }
             }
@@ -3362,15 +4385,33 @@ pub(super) fn collect_effect_sets(bundle: &ResolvedBundle) -> Vec<Vec<String>> {
                     closure_effects(data, bundle, module, shapes, current, sets);
                 }
             }
-            LoweredExprKind::Binary { left, right, .. } => {
+            LoweredExprKind::Binary { left, right, .. }
+            | LoweredExprKind::Compose { left, right, .. }
+            | LoweredExprKind::Range {
+                start: left,
+                end: right,
+                ..
+            } => {
                 closure_effects(left, bundle, module, shapes, current, sets);
                 closure_effects(right, bundle, module, shapes, current, sets);
             }
-            LoweredExprKind::Index { collection, index } => {
+            LoweredExprKind::Pipe { left, stage, .. } => {
+                closure_effects(left, bundle, module, shapes, current, sets);
+                closure_effects(stage, bundle, module, shapes, current, sets);
+            }
+            LoweredExprKind::Index { collection, index }
+            | LoweredExprKind::Slice {
+                collection,
+                range: index,
+                ..
+            } => {
                 closure_effects(collection, bundle, module, shapes, current, sets);
                 closure_effects(index, bundle, module, shapes, current, sets);
             }
             LoweredExprKind::FieldGet { record, .. }
+            | LoweredExprKind::OptionalFieldGet {
+                receiver: record, ..
+            }
             | LoweredExprKind::Try(record)
             | LoweredExprKind::Unary {
                 operand: record, ..
@@ -3416,7 +4457,7 @@ pub(super) fn collect_effect_sets(bundle: &ResolvedBundle) -> Vec<Vec<String>> {
             } => {
                 closure_effects(callee, bundle, module, shapes, current, sets);
                 for argument in arguments {
-                    closure_effects(argument, bundle, module, shapes, current, sets);
+                    closure_effects(&argument.value, bundle, module, shapes, current, sets);
                 }
             }
             LoweredExprKind::Closure {
@@ -3432,12 +4473,14 @@ pub(super) fn collect_effect_sets(bundle: &ResolvedBundle) -> Vec<Vec<String>> {
                     name_span: expression.span,
                     generics: Vec::new(),
                     parameters: parameters.clone(),
+                    parameter_defaults: vec![None; parameters.len()],
                     return_type: return_type.clone(),
                     declared_effects: declared_effects.clone(),
                     effects_span: None,
                     body: body.as_ref().clone(),
                 };
                 let closure = FunctionInfo {
+                    is_const: false,
                     module: module.to_owned(),
                     symbol: 0,
                     bytecode: None,
@@ -3455,7 +4498,8 @@ pub(super) fn collect_effect_sets(bundle: &ResolvedBundle) -> Vec<Vec<String>> {
                 }
                 closure_body_effects(body, bundle, module, &nested, current, sets);
             }
-            LoweredExprKind::Unit
+            LoweredExprKind::ShortClosure { .. }
+            | LoweredExprKind::Unit
             | LoweredExprKind::Int(_)
             | LoweredExprKind::Float(_)
             | LoweredExprKind::Bool(_)
@@ -3545,25 +4589,6 @@ pub(super) fn collect_effect_sets(bundle: &ResolvedBundle) -> Vec<Vec<String>> {
                                     .map(iterable_shape),
                             )
                         }
-                        LoweredForSource::Range { start, end } => {
-                            closure_effects(start, bundle, module, &scoped, current, sets);
-                            closure_effects(end, bundle, module, &scoped, current, sets);
-                            let effects =
-                                expression_effects(start, bundle, module, &scoped, current)
-                                    .and_then(|start_effects| {
-                                        expression_effects(end, bundle, module, &scoped, current)
-                                            .map(|end_effects| {
-                                                start_effects
-                                                    .into_iter()
-                                                    .chain(end_effects)
-                                                    .collect::<BTreeSet<_>>()
-                                                    .into_iter()
-                                                    .collect()
-                                            })
-                                    })
-                                    .ok();
-                            (effects, Some(CollectedEffectShape::Other))
-                        }
                     };
                     let mut nested = scoped.clone();
                     if let Some(yielded) = yielded {
@@ -3583,6 +4608,45 @@ pub(super) fn collect_effect_sets(bundle: &ResolvedBundle) -> Vec<Vec<String>> {
                         );
                     }
                     closure_body_effects(body, bundle, module, &nested, current, sets);
+                }
+                LoweredStatement::LocalFunction(function) => {
+                    let declared = function.declared_effects.clone().unwrap_or_default();
+                    sets.insert(declared.clone());
+                    for effect in declared {
+                        sets.insert(vec![effect]);
+                    }
+                    for (_, value_type, _) in &function.parameters {
+                        type_effects(value_type, sets);
+                    }
+                    type_effects(&function.return_type, sets);
+                    let mut local_shapes = BTreeMap::new();
+                    for (parameter_index, (name, value_type, _)) in
+                        function.parameters.iter().enumerate()
+                    {
+                        if let Some(default) = &function.parameter_defaults[parameter_index] {
+                            closure_effects(
+                                &default.value,
+                                bundle,
+                                module,
+                                &local_shapes,
+                                current,
+                                sets,
+                            );
+                        }
+                        local_shapes.insert(name.clone(), type_shape(value_type, bundle, module));
+                    }
+                    closure_body_effects(
+                        &function.body,
+                        bundle,
+                        module,
+                        &local_shapes,
+                        current,
+                        sets,
+                    );
+                    scoped.insert(
+                        function.name.clone(),
+                        local_function_shape(function, bundle, module),
+                    );
                 }
                 LoweredStatement::Break(_) | LoweredStatement::Continue(_) => {}
             }
@@ -3623,6 +4687,9 @@ pub(super) fn collect_effect_sets(bundle: &ResolvedBundle) -> Vec<Vec<String>> {
                 }
                 LoweredTypeDeclaration::Alias { target, .. } => {
                     type_effects(target, &mut sets);
+                }
+                LoweredTypeDeclaration::Newtype { underlying, .. } => {
+                    type_effects(underlying, &mut sets);
                 }
             }
         }
@@ -3678,7 +4745,11 @@ pub(super) fn resolve_deferred_effect_sets(
             ValueType::List(value)
             | ValueType::Option(value)
             | ValueType::Future(value)
-            | ValueType::Task(value) => {
+            | ValueType::Task(value)
+            | ValueType::Sequence(value)
+            | ValueType::Newtype {
+                underlying: value, ..
+            } => {
                 resolve_value(value, deferred_effect_sets, effect_sets);
             }
             ValueType::Map(key, value) | ValueType::Result(key, value) => {
@@ -3709,6 +4780,7 @@ pub(super) fn resolve_deferred_effect_sets(
                 }
             }
             ValueType::Int
+            | ValueType::Range
             | ValueType::Bool
             | ValueType::Float
             | ValueType::String

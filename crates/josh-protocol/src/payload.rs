@@ -277,6 +277,8 @@ pub struct EntryContract {
     pub name: String,
     pub input_schema: String,
     pub output_schema: String,
+    pub input_contract_digest: String,
+    pub output_contract_digest: String,
 }
 
 impl Validate for EntryContract {
@@ -285,7 +287,9 @@ impl Validate for EntryContract {
             return Err(invalid("entry name is empty"));
         }
         validate_digest(&self.input_schema)?;
-        validate_digest(&self.output_schema)
+        validate_digest(&self.output_schema)?;
+        validate_digest(&self.input_contract_digest)?;
+        validate_digest(&self.output_contract_digest)
     }
 }
 
@@ -338,6 +342,8 @@ pub struct ProgramLoadResult {
     pub tool_contract_digest: String,
     pub diagnostics: Vec<CompilerDiagnostic>,
     pub entries: Vec<EntryContract>,
+    pub exec_commands: Vec<String>,
+    pub exec_environment: Vec<String>,
 }
 
 impl Validate for ProgramLoadResult {
@@ -359,6 +365,14 @@ impl Validate for ProgramLoadResult {
         for entry in &self.entries {
             entry.validate()?;
         }
+        validate_sorted_unique(&self.exec_commands, "exec_commands")?;
+        for pattern in &self.exec_commands {
+            validate_exec_pattern(pattern)?;
+        }
+        validate_sorted_unique(&self.exec_environment, "exec_environment")?;
+        for name in &self.exec_environment {
+            validate_exec_environment_name(name)?;
+        }
         Ok(())
     }
 }
@@ -375,6 +389,8 @@ pub struct ExecutionStartParams {
     pub granted_capabilities: Vec<String>,
     pub granted_tools: Vec<String>,
     pub allowed_http_origins: Vec<String>,
+    pub granted_exec: Vec<String>,
+    pub granted_exec_environment: Vec<String>,
     pub limits: BTreeMap<String, u64>,
 }
 
@@ -410,6 +426,14 @@ impl Validate for ExecutionStartParams {
         for origin in &self.allowed_http_origins {
             validate_https_origin(origin)?;
         }
+        validate_sorted_unique(&self.granted_exec, "granted_exec")?;
+        for pattern in &self.granted_exec {
+            validate_exec_pattern(pattern)?;
+        }
+        validate_sorted_unique(&self.granted_exec_environment, "granted_exec_environment")?;
+        for name in &self.granted_exec_environment {
+            validate_exec_environment_name(name)?;
+        }
         for (name, value) in &self.limits {
             if !EXECUTION_LIMITS.contains(&name.as_str()) || *value == 0 {
                 return Err(invalid("execution limit is unknown or zero"));
@@ -417,6 +441,48 @@ impl Validate for ExecutionStartParams {
         }
         Ok(())
     }
+}
+
+fn validate_exec_pattern(pattern: &str) -> Result<(), ProtocolError> {
+    if pattern.is_empty()
+        || pattern.starts_with(' ')
+        || pattern.ends_with(' ')
+        || pattern.contains("  ")
+    {
+        return Err(invalid("exec command pattern is not canonical"));
+    }
+    let tokens = pattern.split(' ').collect::<Vec<_>>();
+    let Some(executable) = tokens.first() else {
+        return Err(invalid("exec command pattern is not canonical"));
+    };
+    if executable.contains('/')
+        || *executable == "*"
+        || tokens.iter().enumerate().any(|(index, token)| {
+            let final_wildcard = *token == "*" && index + 1 == tokens.len();
+            token.is_empty()
+                || token.contains('*') && !final_wildcard
+                || !final_wildcard
+                    && token.bytes().any(|byte| {
+                        !byte.is_ascii_graphic() || matches!(byte, b'\'' | b'"' | b'\\')
+                    })
+        })
+    {
+        return Err(invalid("exec command pattern is not canonical"));
+    }
+    Ok(())
+}
+
+fn validate_exec_environment_name(name: &str) -> Result<(), ProtocolError> {
+    let mut bytes = name.bytes();
+    if !bytes.next().is_some_and(|first| {
+        (first.is_ascii_alphabetic() || first == b'_')
+            && bytes.all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+            && !name.eq_ignore_ascii_case("LC_ALL")
+            && !name.eq_ignore_ascii_case("TZ")
+    }) {
+        return Err(invalid("exec environment name is not canonical"));
+    }
+    Ok(())
 }
 
 const EXECUTION_LIMITS: &[&str] = &[

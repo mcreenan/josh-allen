@@ -42,6 +42,68 @@ fn copy_directory(source: &std::path::Path, target: &std::path::Path) {
     }
 }
 
+#[test]
+fn template_package_check_build_inspect_and_run_are_in_parity() {
+    let temporary = temporary_directory();
+    let package = temporary.join("template-package");
+    copy_directory(&named_example("template-package"), &package);
+    let artifact = temporary.join("template.allenb");
+
+    let checked = Command::new(env!("CARGO_BIN_EXE_allen"))
+        .arg("check")
+        .arg(&package)
+        .output()
+        .unwrap();
+    assert!(
+        checked.status.success(),
+        "{}",
+        String::from_utf8_lossy(&checked.stderr)
+    );
+
+    let built = Command::new(env!("CARGO_BIN_EXE_allen"))
+        .arg("build")
+        .arg(&package)
+        .arg("-o")
+        .arg(&artifact)
+        .output()
+        .unwrap();
+    assert!(
+        built.status.success(),
+        "{}",
+        String::from_utf8_lossy(&built.stderr)
+    );
+
+    let inspected = Command::new(env!("CARGO_BIN_EXE_allen"))
+        .arg("inspect")
+        .arg(&artifact)
+        .output()
+        .unwrap();
+    assert!(inspected.status.success());
+    let report = String::from_utf8(inspected.stdout).unwrap();
+    assert!(report.starts_with("bytecode_version: 19\n"));
+    assert!(report.contains("section.templates: 1\n"));
+
+    let source_run = Command::new(env!("CARGO_BIN_EXE_allen"))
+        .arg("run")
+        .arg(&package)
+        .output()
+        .unwrap();
+    let artifact_run = Command::new(env!("CARGO_BIN_EXE_allen"))
+        .arg("run")
+        .arg(&artifact)
+        .output()
+        .unwrap();
+    assert!(source_run.status.success());
+    assert!(artifact_run.status.success());
+    assert_eq!(source_run.stdout, artifact_run.stdout);
+    assert_eq!(
+        String::from_utf8(source_run.stdout).unwrap(),
+        "\"Hello, Ada. Count: 7. Enabled: true. Hello again, Ada.\\n\"\n"
+    );
+
+    std::fs::remove_dir_all(temporary).unwrap();
+}
+
 fn hard_coded_public_cli_error_codes() -> Vec<(&'static str, &'static str)> {
     let mut source = include_str!("../src/app.rs");
     let mut codes = Vec::new();
@@ -149,6 +211,177 @@ fn help_prints_usage_and_succeeds() {
 }
 
 #[test]
+fn source_tests_filter_isolate_and_report_failures() {
+    let source = fixture("source-tests/basic.allen");
+    let passing = Command::new(env!("CARGO_BIN_EXE_allen"))
+        .args(["test", "--filter", "passes"])
+        .arg(&source)
+        .output()
+        .unwrap();
+    assert!(passing.status.success());
+    assert_eq!(
+        String::from_utf8(passing.stdout).unwrap(),
+        "test basic.allen::\"passes\" ... ok\ntest result: ok. 1 passed; 0 failed\n"
+    );
+    assert!(passing.stderr.is_empty());
+
+    let all = Command::new(env!("CARGO_BIN_EXE_allen"))
+        .args(["test"])
+        .arg(&source)
+        .output()
+        .unwrap();
+    assert_eq!(all.status.code(), Some(1));
+    let stdout = String::from_utf8(all.stdout).unwrap();
+    assert!(stdout.contains("test basic.allen::\"passes\" ... ok\n"));
+    assert!(stdout.contains("test basic.allen::\"fails\" ... FAILED\n"));
+    assert!(stdout.contains("test basic.allen::\"stops\" ... FAILED\n"));
+    assert!(stdout.ends_with("test result: FAILED. 1 passed; 2 failed\n"));
+    assert!(
+        String::from_utf8(all.stderr)
+            .unwrap()
+            .contains("runtime error[program.failed]")
+    );
+
+    let missing = Command::new(env!("CARGO_BIN_EXE_allen"))
+        .args(["test", "--filter", "absent"])
+        .arg(&source)
+        .output()
+        .unwrap();
+    assert_eq!(missing.status.code(), Some(2));
+    assert!(
+        String::from_utf8(missing.stderr)
+            .unwrap()
+            .contains("no source tests matched")
+    );
+}
+
+#[test]
+fn source_test_fail_and_stop_reasons_escape_terminal_control_text() {
+    let directory = temporary_directory();
+    let source = directory.join("hostile.allen");
+    std::fs::write(
+        &source,
+        r#"fn hostile() returns String {
+  match string.from_utf8(b"\x1b[31mforged\nline\r\t\x00") {
+    Some(value) => value,
+    None => "unreachable"
+  }
+}
+
+test "fails" { fail(hostile()) }
+test "stops" { stop(hostile()) }
+"#,
+    )
+    .unwrap();
+
+    for (filter, expected) in [
+        (
+            "fails",
+            "hostile.allen::\"fails\": runtime error[program.failed]: \\u{1b}[31mforged\\nline\\r\\t\\u{0}\n",
+        ),
+        (
+            "stops",
+            "hostile.allen::\"stops\": stopped: \\u{1b}[31mforged\\nline\\r\\t\\u{0}\n",
+        ),
+    ] {
+        let output = Command::new(env!("CARGO_BIN_EXE_allen"))
+            .args(["test", "--filter", filter])
+            .arg(&source)
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(1));
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        assert_eq!(stderr, expected);
+        assert!(!stderr.contains('\u{1b}'));
+        assert!(!output.stdout.contains(&0x1b));
+    }
+
+    std::fs::remove_dir_all(directory).expect("temporary test directory must be removed");
+}
+
+#[test]
+fn source_test_value_flags_reject_another_option_as_their_value() {
+    let source = fixture("source-tests/basic.allen");
+    for arguments in [
+        vec!["test", "--replay", "--filter", "passes"],
+        vec!["test", "--filter", "--replay", source.to_str().unwrap()],
+        vec!["test", "--catalog", "--filter", "passes"],
+    ] {
+        let output = Command::new(env!("CARGO_BIN_EXE_allen"))
+            .args(arguments)
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(2));
+        assert!(output.stdout.is_empty());
+        assert!(
+            String::from_utf8(output.stderr)
+                .unwrap()
+                .starts_with("usage:")
+        );
+    }
+}
+
+#[test]
+fn source_tests_discover_unreferenced_verified_package_modules() {
+    let temporary = temporary_directory();
+    let package = temporary.join("source-test-package");
+    std::fs::create_dir_all(package.join("src")).unwrap();
+    std::fs::create_dir_all(package.join("packages/helpers/src")).unwrap();
+    std::fs::write(
+        package.join("allen.toml"),
+        "[package]\nname = \"source-test-example\"\nversion = \"0.1.0\"\nlanguage = \"^0.1\"\n\n[[entry]]\nname = \"main\"\nfunction = \"src/main.allen::main\"\ninput = \"Void\"\noutput = \"Void\"\n\n[dependencies.helpers]\npath = \"packages/helpers\"\nversion = \"=1.0.0\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("src/main.allen"),
+        "export fn main() returns Void { () }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("src/unreferenced-tests.allen"),
+        "import { answer } from \"helpers/src/helper.allen\"; test \"package helper\" { if (answer() == 42) { () } else { fail(\"wrong dependency\") } }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("packages/helpers/allen.toml"),
+        "[package]\nname = \"helpers\"\nversion = \"1.0.0\"\nlanguage = \"^0.1\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("packages/helpers/src/helper.allen"),
+        "export fn answer() returns Int { 42 }\n",
+    )
+    .unwrap();
+    let locked = Command::new(env!("CARGO_BIN_EXE_allen"))
+        .args(["lock"])
+        .arg(&package)
+        .output()
+        .unwrap();
+    assert!(
+        locked.status.success(),
+        "{}",
+        String::from_utf8_lossy(&locked.stderr)
+    );
+
+    let tested = Command::new(env!("CARGO_BIN_EXE_allen"))
+        .args(["test", "--filter", "package helper"])
+        .arg(&package)
+        .output()
+        .unwrap();
+    assert!(
+        tested.status.success(),
+        "{}",
+        String::from_utf8_lossy(&tested.stderr)
+    );
+    assert!(
+        String::from_utf8(tested.stdout)
+            .unwrap()
+            .contains("unreferenced-tests.allen::\"package helper\" ... ok")
+    );
+    std::fs::remove_dir_all(temporary).unwrap();
+}
+
+#[test]
 fn run_prints_the_program_result() {
     let output = Command::new(env!("CARGO_BIN_EXE_allen"))
         .arg("run")
@@ -232,6 +465,56 @@ fn run_reports_the_stable_overflow_code() {
 }
 
 #[test]
+fn run_reports_program_failure_with_a_nonzero_exit() {
+    let directory = temporary_directory();
+    for (name, reason, message) in [
+        ("empty", "", "program failed"),
+        ("reason", "bad input", "bad input"),
+    ] {
+        let source = directory.join(format!("{name}.allen"));
+        std::fs::write(
+            &source,
+            format!(
+                "export fn main() returns Int {{ if (true) {{ fail(\"{reason}\") }} else {{ 0 }} }}\n"
+            ),
+        )
+        .unwrap();
+        let output = Command::new(env!("CARGO_BIN_EXE_allen"))
+            .arg("run")
+            .arg(source)
+            .output()
+            .expect("CLI must start");
+
+        assert!(!output.status.success());
+        assert!(output.stdout.is_empty());
+        assert_eq!(
+            String::from_utf8(output.stderr).unwrap(),
+            format!("runtime error[program.failed]: {message}\n")
+        );
+    }
+
+    let source = directory.join("control-text.allen");
+    std::fs::write(
+        &source,
+        "export fn main() returns Int { if (true) { fail(\"bad\\nforged:\\r\\t\\0\\b\\f\") } else { 0 } }\n",
+    )
+    .unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_allen"))
+        .arg("run")
+        .arg(source)
+        .output()
+        .expect("CLI must start");
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    assert_eq!(
+        String::from_utf8(output.stderr).unwrap(),
+        "runtime error[program.failed]: bad\\nforged:\\r\\t\\u{0}\\u{8}\\u{c}\n"
+    );
+
+    std::fs::remove_dir_all(directory).expect("temporary test directory must be removed");
+}
+
+#[test]
 fn run_executes_core_operators_indexes_and_conversions() {
     let output = Command::new(env!("CARGO_BIN_EXE_allen"))
         .arg("run")
@@ -298,7 +581,7 @@ fn dynamic_collections_check_build_and_run_identically() {
     assert!(built.stderr.is_empty());
     assert_eq!(
         &std::fs::read(&artifact).unwrap()[10..12],
-        &13_u16.to_le_bytes()
+        &19_u16.to_le_bytes()
     );
 
     let artifact_run = Command::new(env!("CARGO_BIN_EXE_allen"))
@@ -519,7 +802,7 @@ fn current_artifact_build_is_canonical() {
     );
     assert_eq!(
         &std::fs::read(&first).unwrap()[10..12],
-        &13_u16.to_le_bytes()
+        &19_u16.to_le_bytes()
     );
     let bytes = std::fs::read(&first).unwrap();
     let decoded =
@@ -560,8 +843,8 @@ fn current_artifact_build_is_canonical() {
     assert!(inspected_again.status.success());
     assert_eq!(inspected.stdout, inspected_again.stdout);
     let report = String::from_utf8(inspected.stdout).unwrap();
-    assert!(report.starts_with("bytecode_version: 13\n"));
-    assert!(report.contains("language_version: 0.1.0\n"));
+    assert!(report.starts_with("bytecode_version: 19\n"));
+    assert!(report.contains("language_version: 0.1.1\n"));
     assert!(report.contains("target_profile: portable\n"));
     assert!(report.contains("section.manifest_contracts: 1\n"));
     assert!(report.contains("manifest.package: inline@0.1.0\n"));
@@ -604,7 +887,7 @@ fn current_source_and_artifact_match() {
     assert!(built.stderr.is_empty());
     assert_eq!(
         &std::fs::read(&artifact).unwrap()[10..12],
-        &13_u16.to_le_bytes()
+        &19_u16.to_le_bytes()
     );
 
     let artifact_run = Command::new(env!("CARGO_BIN_EXE_allen"))
@@ -624,7 +907,7 @@ fn current_source_and_artifact_match() {
     assert!(inspected.status.success());
     assert!(inspected.stderr.is_empty());
     let report = String::from_utf8(inspected.stdout).unwrap();
-    assert!(report.starts_with("bytecode_version: 13\n"));
+    assert!(report.starts_with("bytecode_version: 19\n"));
 
     std::fs::remove_dir_all(directory).expect("temporary test directory must be removed");
 }
@@ -1154,7 +1437,7 @@ fn package_lock_source_artifact_and_inspect_are_deterministic() {
     );
     assert_eq!(
         &std::fs::read(&first).unwrap()[10..12],
-        &13_u16.to_le_bytes()
+        &19_u16.to_le_bytes()
     );
 
     let artifact_run = Command::new(env!("CARGO_BIN_EXE_allen"))
@@ -1175,7 +1458,7 @@ fn package_lock_source_artifact_and_inspect_are_deterministic() {
         .unwrap();
     assert!(inspected.status.success());
     let report = String::from_utf8(inspected.stdout).unwrap();
-    assert!(report.starts_with("bytecode_version: 13\n"));
+    assert!(report.starts_with("bytecode_version: 19\n"));
     assert!(report.contains("section.tools: 0\n"));
     assert!(report.contains("manifest.package: filesystem-example@0.1.0\n"));
     assert!(report.contains("contract.entry.main: function=0 input_schema=0 output_schema=1\n"));
@@ -1226,7 +1509,7 @@ export async fn main() returns Result<HttpResponse, NetworkError>
         .unwrap();
     assert!(inspected.status.success());
     let report = String::from_utf8(inspected.stdout).unwrap();
-    assert!(report.starts_with("bytecode_version: 13\n"));
+    assert!(report.starts_with("bytecode_version: 19\n"));
     assert!(report.contains("manifest.https_origins: [https://192.0.2.1]\n"));
 
     let mut outputs = Vec::new();
@@ -1576,7 +1859,7 @@ fn frontend_cross_feature_fixture_checks_builds_and_runs_with_current_source_art
     frontend_build(&source, &second);
     let first_bytes = std::fs::read(&first).expect("first artifact must exist");
     assert_eq!(first_bytes, std::fs::read(&second).unwrap());
-    assert_eq!(&first_bytes[10..12], &13_u16.to_le_bytes());
+    assert_eq!(&first_bytes[10..12], &19_u16.to_le_bytes());
 
     let artifact_run = frontend_run(&first);
     assert!(
@@ -1622,7 +1905,7 @@ fn frontend_cross_mode_sources_have_the_same_value_and_deterministic_artifacts()
         frontend_build(source, &second);
         let first_bytes = std::fs::read(&first).unwrap();
         assert_eq!(first_bytes, std::fs::read(&second).unwrap());
-        assert_eq!(&first_bytes[10..12], &13_u16.to_le_bytes());
+        assert_eq!(&first_bytes[10..12], &19_u16.to_le_bytes());
 
         let artifact_run = frontend_run(&first);
         assert!(
@@ -2024,7 +2307,7 @@ fn control_flow_has_source_artifact_parity_in_every_source_mode() {
         frontend_build(source, &second);
         let first_bytes = std::fs::read(&first).expect("first artifact must exist");
         assert_eq!(first_bytes, std::fs::read(&second).unwrap());
-        assert_eq!(&first_bytes[10..12], &13_u16.to_le_bytes());
+        assert_eq!(&first_bytes[10..12], &19_u16.to_le_bytes());
 
         let artifact_run = frontend_run(&first);
         assert!(
@@ -2081,6 +2364,19 @@ fn control_flow_skipped_branch_does_not_trap_or_stop() {
     assert!(output.stderr.is_empty());
 
     std::fs::remove_dir_all(directory).expect("temporary test directory must be removed");
+}
+
+#[test]
+fn control_flow_coalescing_is_lazy_and_fail_is_a_distinct_source_outcome() {
+    let source = control_flow_fixture("fail-coalescing.allen");
+    frontend_check(&source);
+    let output = frontend_run(&source);
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty());
+    assert_eq!(
+        String::from_utf8(output.stderr).unwrap(),
+        "runtime error[program.failed]: missing option\n"
+    );
 }
 
 #[test]
@@ -2162,7 +2458,7 @@ fn loops_have_source_artifact_parity_in_every_source_mode() {
         frontend_build(source, &second);
         let first_bytes = std::fs::read(&first).expect("first artifact must exist");
         assert_eq!(first_bytes, std::fs::read(&second).unwrap());
-        assert_eq!(&first_bytes[10..12], &13_u16.to_le_bytes());
+        assert_eq!(&first_bytes[10..12], &19_u16.to_le_bytes());
 
         let inspected = Command::new(env!("CARGO_BIN_EXE_allen"))
             .arg("inspect")
@@ -2174,7 +2470,7 @@ fn loops_have_source_artifact_parity_in_every_source_mode() {
         assert!(
             String::from_utf8(inspected.stdout)
                 .unwrap()
-                .starts_with("bytecode_version: 13\n")
+                .starts_with("bytecode_version: 19\n")
         );
 
         let artifact_run = frontend_run(&first);
@@ -2338,7 +2634,7 @@ fn operators_operators_have_source_artifact_parity_in_every_source_mode() {
         frontend_build(source, &second);
         let first_bytes = std::fs::read(&first).expect("first artifact must exist");
         assert_eq!(first_bytes, std::fs::read(&second).unwrap());
-        assert_eq!(&first_bytes[10..12], &13_u16.to_le_bytes());
+        assert_eq!(&first_bytes[10..12], &19_u16.to_le_bytes());
 
         let inspected = Command::new(env!("CARGO_BIN_EXE_allen"))
             .arg("inspect")
@@ -2350,7 +2646,7 @@ fn operators_operators_have_source_artifact_parity_in_every_source_mode() {
         assert!(
             String::from_utf8(inspected.stdout)
                 .unwrap()
-                .starts_with("bytecode_version: 13\n")
+                .starts_with("bytecode_version: 19\n")
         );
 
         let artifact_run = frontend_run(&first);
@@ -2456,7 +2752,7 @@ fn strings_templates_and_capability_inspection_have_source_artifact_parity() {
         frontend_build(source, &second);
         let first_bytes = std::fs::read(&first).expect("first artifact must exist");
         assert_eq!(first_bytes, std::fs::read(&second).unwrap());
-        assert_eq!(&first_bytes[10..12], &13_u16.to_le_bytes());
+        assert_eq!(&first_bytes[10..12], &19_u16.to_le_bytes());
 
         let inspected = Command::new(env!("CARGO_BIN_EXE_allen"))
             .arg("inspect")
@@ -2468,7 +2764,7 @@ fn strings_templates_and_capability_inspection_have_source_artifact_parity() {
         assert!(
             String::from_utf8(inspected.stdout)
                 .unwrap()
-                .starts_with("bytecode_version: 13\n")
+                .starts_with("bytecode_version: 19\n")
         );
 
         let artifact_run = frontend_run(&first);
@@ -2556,6 +2852,229 @@ optional = ["fs.read"]
     );
     assert_eq!(granted.stdout, b"[\"fs.read\"]\n");
     assert!(granted.stderr.is_empty());
+
+    std::fs::remove_dir_all(directory).expect("temporary test directory must be removed");
+}
+
+#[test]
+fn newtype_entry_json_is_bare_and_round_trips_the_runtime_wrapper() {
+    let directory = temporary_directory();
+    let source = directory.join("newtype.allen");
+    std::fs::write(
+        &source,
+        r#"manifest {
+  language: "0.1"
+  entry: main
+  capabilities: []
+}
+
+newtype EpochSeconds = Int
+
+export fn main(input: EpochSeconds) returns EpochSeconds {
+  EpochSeconds(input.value + 1)
+}
+"#,
+    )
+    .unwrap();
+
+    let input = directory.join("input.json");
+    std::fs::write(&input, "41\n").unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_allen"))
+        .args(["run", "--input"])
+        .arg(&input)
+        .arg(&source)
+        .output()
+        .expect("CLI must start");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(output.stdout, b"42\n");
+    assert!(output.stderr.is_empty());
+
+    std::fs::remove_dir_all(directory).expect("temporary test directory must be removed");
+}
+
+#[test]
+fn run_reads_json_input_from_stdin_without_weakening_other_flag_values() {
+    let directory = temporary_directory();
+    let source = directory.join("stdin-input.allen");
+    std::fs::write(
+        &source,
+        r#"manifest {
+  language: "0.1"
+  entry: main
+  capabilities: []
+}
+record Input { value: Int }
+export fn main(input: Input) returns Int { input.value + 1 }
+"#,
+    )
+    .unwrap();
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_allen"))
+        .args(["run", "--input", "-"])
+        .arg(&source)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("CLI must start");
+    child
+        .stdin
+        .take()
+        .expect("CLI stdin must be piped")
+        .write_all(br#"{"value": 41}"#)
+        .unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(output.stdout, b"42\n");
+    assert!(output.stderr.is_empty());
+
+    for flag in ["--entry", "--workdir"] {
+        let output = Command::new(env!("CARGO_BIN_EXE_allen"))
+            .args(["run", flag, "-"])
+            .arg(&source)
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(2), "{flag}");
+        assert!(output.stdout.is_empty(), "{flag}");
+        assert!(
+            String::from_utf8(output.stderr)
+                .unwrap()
+                .starts_with("usage:"),
+            "{flag}"
+        );
+    }
+
+    let option_as_input = Command::new(env!("CARGO_BIN_EXE_allen"))
+        .args(["run", "--input", "--entry", "main"])
+        .arg(&source)
+        .output()
+        .unwrap();
+    assert_eq!(option_as_input.status.code(), Some(2));
+    assert!(option_as_input.stdout.is_empty());
+    assert!(
+        String::from_utf8(option_as_input.stderr)
+            .unwrap()
+            .starts_with("usage:")
+    );
+
+    let missing_input = Command::new(env!("CARGO_BIN_EXE_allen"))
+        .arg("run")
+        .arg(&source)
+        .arg("--input")
+        .output()
+        .unwrap();
+    assert_eq!(missing_input.status.code(), Some(2));
+    assert!(missing_input.stdout.is_empty());
+    assert!(
+        String::from_utf8(missing_input.stderr)
+            .unwrap()
+            .starts_with("usage:")
+    );
+
+    std::fs::remove_dir_all(directory).expect("temporary test directory must be removed");
+}
+
+#[test]
+fn run_projects_entry_input_from_the_original_json_bytes() {
+    let directory = temporary_directory();
+    let source = directory.join("strict-input.allen");
+    std::fs::write(
+        &source,
+        r#"manifest {
+  language: "0.1"
+  entry: main
+  capabilities: []
+}
+record Input { value: Int }
+export fn main(input: Input) returns Int { input.value }
+"#,
+    )
+    .unwrap();
+
+    for (name, bytes, message) in [
+        (
+            "duplicate",
+            br#"{"value":1,"value":2}"#.as_slice(),
+            "JSON object contains a duplicate key",
+        ),
+        ("invalid-utf8", &[0xff], "input is not valid UTF-8"),
+        (
+            "bom",
+            b"\xef\xbb\xbf{\"value\":1}",
+            "JSON must not begin with a byte-order mark",
+        ),
+        (
+            "trailing",
+            br#"{"value":1} null"#,
+            "input is not one complete JSON value",
+        ),
+        (
+            "missing",
+            br"{}",
+            "JSON value does not match the target type",
+        ),
+        (
+            "unknown",
+            br#"{"value":1,"extra":2}"#,
+            "JSON value does not match the target type",
+        ),
+        (
+            "coercion",
+            br#"{"value":"1"}"#,
+            "JSON value does not match the target type",
+        ),
+    ] {
+        let input = directory.join(format!("{name}.json"));
+        std::fs::write(&input, bytes).unwrap();
+        let output = Command::new(env!("CARGO_BIN_EXE_allen"))
+            .args(["run", "--input"])
+            .arg(&input)
+            .arg(&source)
+            .output()
+            .expect("CLI must start");
+        assert!(!output.status.success(), "case {name}");
+        assert!(output.stdout.is_empty(), "case {name}");
+        assert_eq!(
+            String::from_utf8(output.stderr).unwrap(),
+            format!("runtime error[runtime.invalid_input]: {message}\n"),
+            "case {name}"
+        );
+    }
+
+    let map_source = directory.join("map-input.allen");
+    std::fs::write(
+        &map_source,
+        r#"manifest {
+  language: "0.1"
+  entry: main
+  capabilities: []
+}
+export fn main(input: Map<String, Int>) returns Map<String, Int> { input }
+"#,
+    )
+    .unwrap();
+    let input = directory.join("map-input.json");
+    std::fs::write(&input, br#"[["b",1],["a",2]]"#).unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_allen"))
+        .args(["run", "--input"])
+        .arg(&input)
+        .arg(&map_source)
+        .output()
+        .expect("CLI must start");
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    assert_eq!(
+        String::from_utf8(output.stderr).unwrap(),
+        "runtime error[runtime.invalid_input]: JSON value does not match the target type\n"
+    );
 
     std::fs::remove_dir_all(directory).expect("temporary test directory must be removed");
 }

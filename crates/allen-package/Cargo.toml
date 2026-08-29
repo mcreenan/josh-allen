@@ -6,6 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
+allen-exec = { path = "../allen-exec" }
 allen-schema = { path = "../allen-schema" }
 cap-fs-ext = "4.0.2"
 cap-std = "4.0.2"
