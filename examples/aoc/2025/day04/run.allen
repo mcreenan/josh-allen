@@ -1,0 +1,94 @@
+manifest {
+  language: "0.1"
+  entry: main
+  capabilities: [fs.read(workdir)]
+}
+
+type Grid = List<List<String>>
+
+record Answers {
+  part1: Int
+  part2: Int
+}
+
+fn parse_grid(input: String) returns Grid {
+  let lines = string.split(string.trim_ascii(input), "\n") ?? fail("invalid input");
+  mut grid: Grid = [];
+  for line in lines {
+    mut row: List<String> = [];
+    for cell in line {
+      row = list.append(row, cell);
+    }
+    grid = list.append(grid, row);
+  }
+  grid
+}
+
+fn paper_at(grid: Grid, row: Int, column: Int) returns Bool {
+  if (row < 0 || row >= length(grid)) {
+    return false;
+  }
+  let line = grid[row];
+  if (column < 0 || column >= length(line)) {
+    return false;
+  }
+  line[column] == "@"
+}
+
+fn neighbors(grid: Grid, row: Int, column: Int) returns Int {
+  mut count = 0;
+  for row_delta in -1..2 {
+    for column_delta in -1..2 {
+      if ((row_delta != 0 || column_delta != 0) && paper_at(grid, row + row_delta, column + column_delta)) {
+        count += 1;
+      }
+    }
+  }
+  count
+}
+
+fn accessible(grid: Grid) returns Int {
+  mut count = 0;
+  for row in 0..length(grid) {
+    for column in 0..length(grid[row]) {
+      if (paper_at(grid, row, column) && neighbors(grid, row, column) < 4) {
+        count += 1;
+      }
+    }
+  }
+  count
+}
+
+fn remove_accessible(initial: Grid) returns Int {
+  mut grid = initial;
+  mut removed_total = 0;
+  loop {
+    mut next = grid;
+    mut removed = 0;
+    for row in 0..length(grid) {
+      for column in 0..length(grid[row]) {
+        if (paper_at(grid, row, column) && neighbors(grid, row, column) < 4) {
+          let changed_row = list.set(next[row], column, ".");
+          next = list.set(next, row, changed_row);
+          removed += 1;
+        }
+      }
+    }
+    if (removed == 0) {
+      break;
+    }
+    removed_total += removed;
+    grid = next;
+  }
+  removed_total
+}
+
+fn solve(input: String) returns Answers {
+  let grid = parse_grid(input);
+  Answers { part1: accessible(grid), part2: remove_accessible(grid) }
+}
+
+export async fn main(path: String) returns Result<Answers, FileError> effects [fs.read] {
+  let input = (await fs.read_text(fs.workspace(), path))?;
+  Ok(solve(input))
+}

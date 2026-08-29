@@ -1,0 +1,72 @@
+manifest {
+  language: "0.1"
+  entry: main
+  capabilities: [fs.read(workdir)]
+}
+
+record Answers {
+  part1: Int
+  part2: Int
+}
+
+fn parse_graph(input: String) returns Map<String, List<String>> {
+  let lines = string.split(string.trim_ascii(input), "\n") ?? fail("invalid input");
+  mut graph: Map<String, List<String>> = map {};
+  for line in lines {
+    let fields = string.split(line, ": ") ?? fail("invalid graph line");
+    if (length(fields) != 2) {
+      fail("graph line must contain a colon")
+    }
+    let destinations = string.split(fields[1], " ") ?? fail("invalid destinations");
+    graph = map.insert(graph, fields[0], destinations).values;
+  }
+  graph
+}
+
+fn count_paths(graph: Map<String, List<String>>, start: String, goal: String) returns Int {
+  mut known: Map<String, Int> = map {};
+  known = map.insert(known, goal, 1).values;
+  if (goal != "out") {
+    known = map.insert(known, "out", 0).values;
+  }
+
+  while (map.get(known, start) == None) {
+    mut next = known;
+    mut progress = false;
+    for (node, destinations) in graph {
+      if (map.get(known, node) == None) {
+        mut ready = true;
+        mut total = 0;
+        for destination in destinations {
+          let paths = map.get(known, destination);
+          if (paths == None) {
+            ready = false;
+          }
+          total += paths ?? 0;
+        }
+        if (ready) {
+          next = map.insert(next, node, total).values;
+          progress = true;
+        }
+      }
+    }
+    if (!progress) {
+      fail("graph is cyclic or the target is unreachable")
+    }
+    known = next;
+  }
+  map.get(known, start) ?? fail("missing path count")
+}
+
+fn solve(input: String) returns Answers {
+  let graph = parse_graph(input);
+  let part1 = count_paths(graph, "you", "out");
+  let through_dac_first = count_paths(graph, "svr", "dac") * count_paths(graph, "dac", "fft") * count_paths(graph, "fft", "out");
+  let through_fft_first = count_paths(graph, "svr", "fft") * count_paths(graph, "fft", "dac") * count_paths(graph, "dac", "out");
+  Answers { part1, part2: through_dac_first + through_fft_first }
+}
+
+export async fn main(path: String) returns Result<Answers, FileError> effects [fs.read] {
+  let input = (await fs.read_text(fs.workspace(), path))?;
+  Ok(solve(input))
+}

@@ -1,0 +1,58 @@
+manifest {
+  language: "0.1"
+  entry: main
+  capabilities: [fs.read(workdir)]
+}
+
+record Answers {
+  part1: Int
+  part2: Int
+}
+
+fn parse_int(text: String) returns Int {
+  match to_int(text) {
+    Ok(value) => value
+    Err(error) => fail(error.message)
+  }
+}
+
+fn solve(input: String) returns Answers {
+  let lines = string.split(string.trim_ascii(input), "\n") ?? fail("invalid input");
+  mut position = 50;
+  mut part1 = 0;
+  mut part2 = 0;
+
+  for line in lines {
+    let direction = string.get(line, 0) ?? fail("missing direction");
+    let distance_text = string.slice(line, 1, length(line)) ?? fail("missing distance");
+    let distance = parse_int(distance_text);
+
+    if (direction == "L") {
+      if (position == 0) {
+        part2 += distance / 100;
+      } else if (distance >= position) {
+        part2 += 1 + (distance - position) / 100;
+      }
+      position = (position - (distance % 100) + 100) % 100;
+    } else if (direction == "R") {
+      let first_hit = if (position == 0) { 100 } else { 100 - position };
+      if (distance >= first_hit) {
+        part2 += 1 + (distance - first_hit) / 100;
+      }
+      position = (position + (distance % 100)) % 100;
+    } else {
+      fail("direction must be L or R")
+    }
+
+    if (position == 0) {
+      part1 += 1;
+    }
+  }
+
+  Answers { part1, part2 }
+}
+
+export async fn main(path: String) returns Result<Answers, FileError> effects [fs.read] {
+  let input = (await fs.read_text(fs.workspace(), path))?;
+  Ok(solve(input))
+}

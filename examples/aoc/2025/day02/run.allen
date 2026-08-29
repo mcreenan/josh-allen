@@ -1,0 +1,74 @@
+manifest {
+  language: "0.1"
+  entry: main
+  capabilities: [fs.read(workdir)]
+}
+
+record Answers {
+  part1: Int
+  part2: Int
+}
+
+fn parse_int(text: String) returns Int {
+  match to_int(text) {
+    Ok(value) => value
+    Err(error) => fail(error.message)
+  }
+}
+
+fn repeated(text: String, repeats: Int) returns Bool {
+  let size = length(text);
+  if (repeats < 2 || size % repeats != 0) {
+    return false;
+  }
+  let width = size / repeats;
+  let pattern = string.slice(text, 0, width) ?? fail("invalid pattern");
+  for index in 1..repeats {
+    let start = index * width;
+    let part = string.slice(text, start, start + width) ?? fail("invalid pattern");
+    if (part != pattern) {
+      return false;
+    }
+  }
+  true
+}
+
+fn invalid_part2(text: String) returns Bool {
+  for repeats in 2..(length(text) + 1) {
+    if (repeated(text, repeats)) {
+      return true;
+    }
+  }
+  false
+}
+
+fn solve(input: String) returns Answers {
+  let ranges = string.split(string.trim_ascii(input), ",") ?? fail("invalid input");
+  mut part1 = 0;
+  mut part2 = 0;
+
+  for range_text in ranges {
+    let bounds = string.split(range_text, "-") ?? fail("invalid range");
+    if (length(bounds) != 2) {
+      fail("range must have two bounds")
+    }
+    let start = parse_int(bounds[0]);
+    let end = parse_int(bounds[1]);
+    for id in start..(end + 1) {
+      let text = to_string(id);
+      if (repeated(text, 2)) {
+        part1 += id;
+      }
+      if (invalid_part2(text)) {
+        part2 += id;
+      }
+    }
+  }
+
+  Answers { part1, part2 }
+}
+
+export async fn main(path: String) returns Result<Answers, FileError> effects [fs.read] {
+  let input = (await fs.read_text(fs.workspace(), path))?;
+  Ok(solve(input))
+}

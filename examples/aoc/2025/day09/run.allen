@@ -1,0 +1,151 @@
+manifest {
+  language: "0.1"
+  entry: main
+  capabilities: [fs.read(workdir)]
+}
+
+record Point {
+  x: Int
+  y: Int
+}
+
+record Rectangle {
+  max_x: Int
+  max_y: Int
+  min_x: Int
+  min_y: Int
+}
+
+record Answers {
+  part1: Int
+  part2: Int
+}
+
+fn parse_int(text: String) returns Int {
+  match to_int(text) {
+    Ok(value) => value
+    Err(error) => fail(error.message)
+  }
+}
+
+fn minimum(left: Int, right: Int) returns Int {
+  if (left < right) { left } else { right }
+}
+
+fn maximum(left: Int, right: Int) returns Int {
+  if (left > right) { left } else { right }
+}
+
+fn absolute(value: Int) returns Int {
+  if (value < 0) { -value } else { value }
+}
+
+fn rectangle(left: Point, right: Point) returns Rectangle {
+  Rectangle {
+    min_x: minimum(left.x, right.x),
+    max_x: maximum(left.x, right.x),
+    min_y: minimum(left.y, right.y),
+    max_y: maximum(left.y, right.y),
+  }
+}
+
+fn area(left: Point, right: Point) returns Int {
+  (absolute(left.x - right.x) + 1) * (absolute(left.y - right.y) + 1)
+}
+
+fn on_segment(point: Point, left: Point, right: Point) returns Bool {
+  if (left.x == right.x) {
+    point.x == left.x && point.y >= minimum(left.y, right.y) && point.y <= maximum(left.y, right.y)
+  } else {
+    point.y == left.y && point.x >= minimum(left.x, right.x) && point.x <= maximum(left.x, right.x)
+  }
+}
+
+fn inside_polygon(point: Point, points: List<Point>) returns Bool {
+  mut crossings = 0;
+  for index in 0..length(points) {
+    let next = (index + 1) % length(points);
+    let left = points[index];
+    let right = points[next];
+    if (on_segment(point, left, right)) {
+      return true;
+    }
+    if (left.x == right.x && left.x > point.x) {
+      let low = minimum(left.y, right.y);
+      let high = maximum(left.y, right.y);
+      if (point.y >= low && point.y < high) {
+        crossings += 1;
+      }
+    }
+  }
+  crossings % 2 == 1
+}
+
+fn vertex_strictly_inside(box: Rectangle, point: Point) returns Bool {
+  point.x > box.min_x && point.x < box.max_x && point.y > box.min_y && point.y < box.max_y
+}
+
+fn edge_crosses_interior(box: Rectangle, left: Point, right: Point) returns Bool {
+  if (left.x == right.x) {
+    let low = minimum(left.y, right.y);
+    let high = maximum(left.y, right.y);
+    left.x > box.min_x && left.x < box.max_x && high > box.min_y && low < box.max_y
+  } else {
+    let low = minimum(left.x, right.x);
+    let high = maximum(left.x, right.x);
+    left.y > box.min_y && left.y < box.max_y && high > box.min_x && low < box.max_x
+  }
+}
+
+fn valid_rectangle(box: Rectangle, points: List<Point>) returns Bool {
+  let corners = [
+    Point { x: box.min_x, y: box.min_y },
+    Point { x: box.min_x, y: box.max_y },
+    Point { x: box.max_x, y: box.min_y },
+    Point { x: box.max_x, y: box.max_y },
+  ];
+  for corner in corners {
+    if (!inside_polygon(corner, points)) {
+      return false;
+    }
+  }
+  for index in 0..length(points) {
+    let next = (index + 1) % length(points);
+    if (vertex_strictly_inside(box, points[index]) || edge_crosses_interior(box, points[index], points[next])) {
+      return false;
+    }
+  }
+  true
+}
+
+fn solve(input: String) returns Answers {
+  let lines = string.split(string.trim_ascii(input), "\n") ?? fail("invalid input");
+  mut points: List<Point> = [];
+  for line in lines {
+    let fields = string.split(line, ",") ?? fail("invalid point");
+    if (length(fields) != 2) {
+      fail("point must have two coordinates")
+    }
+    points = list.append(points, Point { x: parse_int(fields[0]), y: parse_int(fields[1]) });
+  }
+
+  mut part1 = 0;
+  mut part2 = 0;
+  for left in 0..length(points) {
+    for right in (left + 1)..length(points) {
+      let candidate_area = area(points[left], points[right]);
+      if (candidate_area > part1) {
+        part1 = candidate_area;
+      }
+      if (candidate_area > part2 && valid_rectangle(rectangle(points[left], points[right]), points)) {
+        part2 = candidate_area;
+      }
+    }
+  }
+  Answers { part1, part2 }
+}
+
+export async fn main(path: String) returns Result<Answers, FileError> effects [fs.read] {
+  let input = (await fs.read_text(fs.workspace(), path))?;
+  Ok(solve(input))
+}

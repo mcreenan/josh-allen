@@ -1,0 +1,172 @@
+manifest {
+  language: "0.1"
+  entry: main
+  capabilities: [fs.read(workdir)]
+}
+
+record Point {
+  x: Int
+  y: Int
+  z: Int
+}
+
+record Edge {
+  left: Int
+  right: Int
+}
+
+record Components {
+  count: Int
+  parents: List<Int>
+  sizes: List<Int>
+}
+
+record Answers {
+  part1: Int
+  part2: Int
+}
+
+fn parse_int(text: String) returns Int {
+  match to_int(text) {
+    Ok(value) => value
+    Err(error) => fail(error.message)
+  }
+}
+
+fn parse_points(input: String) returns List<Point> {
+  let lines = string.split(string.trim_ascii(input), "\n") ?? fail("invalid input");
+  mut points: List<Point> = [];
+  for line in lines {
+    if (!string.starts_with(line, "pairs=")) {
+      let fields = string.split(line, ",") ?? fail("invalid point");
+      if (length(fields) != 3) {
+        fail("point must have three coordinates")
+      }
+      points = list.append(points, Point {
+        x: parse_int(fields[0]),
+        y: parse_int(fields[1]),
+        z: parse_int(fields[2]),
+      });
+    }
+  }
+  points
+}
+
+fn connection_limit(input: String) returns Int {
+  let lines = string.split(string.trim_ascii(input), "\n") ?? fail("invalid input");
+  if (length(lines) > 0 && string.starts_with(lines[0], "pairs=")) {
+    let value = string.slice(lines[0], 6, length(lines[0])) ?? fail("invalid pair limit");
+    parse_int(value)
+  } else {
+    1000
+  }
+}
+
+fn empty_edges() returns Map<Int, Edge> {
+  map {}
+}
+
+fn make_edges(points: List<Point>) returns Map<Int, Map<Int, Edge>> {
+  mut edges: Map<Int, Map<Int, Edge>> = map {};
+  let count = length(points);
+  for left in 0..count {
+    for right in (left + 1)..count {
+      let dx = points[left].x - points[right].x;
+      let dy = points[left].y - points[right].y;
+      let dz = points[left].z - points[right].z;
+      let distance = dx * dx + dy * dy + dz * dz;
+      let tie = left * count + right;
+      let same_distance = map.get(edges, distance) ?? empty_edges();
+      let updated = map.insert(same_distance, tie, Edge { left, right }).values;
+      edges = map.insert(edges, distance, updated).values;
+    }
+  }
+  edges
+}
+
+fn initial_components(count: Int) returns Components {
+  mut parents: List<Int> = [];
+  mut sizes: List<Int> = [];
+  for index in 0..count {
+    parents = list.append(parents, index);
+    sizes = list.append(sizes, 1);
+  }
+  Components { count, parents, sizes }
+}
+
+fn root(parents: List<Int>, node: Int) returns Int {
+  mut current = node;
+  while (parents[current] != current) {
+    current = parents[current];
+  }
+  current
+}
+
+fn connect(components: Components, edge: Edge) returns Components {
+  let left_root = root(components.parents, edge.left);
+  let right_root = root(components.parents, edge.right);
+  if (left_root == right_root) {
+    return components;
+  }
+  let left_size = components.sizes[left_root];
+  let right_size = components.sizes[right_root];
+  let keep = if (left_size >= right_size) { left_root } else { right_root };
+  let drop = if (left_size >= right_size) { right_root } else { left_root };
+  let parents = list.set(components.parents, drop, keep);
+  let sizes = list.set(components.sizes, keep, left_size + right_size);
+  Components { count: components.count - 1, parents, sizes }
+}
+
+fn largest_three_product(components: Components) returns Int {
+  mut first = 1;
+  mut second = 1;
+  mut third = 1;
+  for index in 0..length(components.parents) {
+    if (components.parents[index] == index) {
+      let size = components.sizes[index];
+      if (size >= first) {
+        third = second;
+        second = first;
+        first = size;
+      } else if (size >= second) {
+        third = second;
+        second = size;
+      } else if (size > third) {
+        third = size;
+      }
+    }
+  }
+  first * second * third
+}
+
+fn solve(input: String) returns Answers {
+  let points = parse_points(input);
+  let edges = make_edges(points);
+  let pair_limit = connection_limit(input);
+  mut first_components = initial_components(length(points));
+  mut second_components = initial_components(length(points));
+  mut edge_number = 0;
+  mut final_product = 0;
+
+  for (_, same_distance) in edges {
+    for (_, edge) in same_distance {
+      if (edge_number < pair_limit) {
+        first_components = connect(first_components, edge);
+      }
+      if (second_components.count > 1) {
+        let before = second_components.count;
+        second_components = connect(second_components, edge);
+        if (before != second_components.count && second_components.count == 1) {
+          final_product = points[edge.left].x * points[edge.right].x;
+        }
+      }
+      edge_number += 1;
+    }
+  }
+  Answers { part1: largest_three_product(first_components), part2: final_product }
+}
+
+export async fn main(path: String) returns Result<Answers, FileError> effects [fs.read] {
+  let input = (await fs.read_text(fs.workspace(), path))?;
+  Ok(solve(input))
+}

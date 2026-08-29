@@ -1,0 +1,370 @@
+manifest {
+  language: "0.1"
+  entry: main
+  capabilities: [fs.read(workdir)]
+}
+
+record Point {
+  x: Int
+  y: Int
+}
+
+record Shape {
+  cells: List<Point>
+  height: Int
+  id: Int
+  width: Int
+}
+
+record OrientedShape {
+  cells: List<Point>
+  height: Int
+  width: Int
+}
+
+record Placement {
+  cells: List<Int>
+  key: Int
+  mask: Int
+}
+
+record Region {
+  counts: List<Int>
+  height: Int
+  width: Int
+}
+
+record Answers {
+  part1: Int
+  part2: String
+}
+
+fn parse_int(text: String) returns Int {
+  match to_int(text) {
+    Ok(value) => value
+    Err(error) => fail(error.message)
+  }
+}
+
+fn minimum(left: Int, right: Int) returns Int {
+  if (left < right) { left } else { right }
+}
+
+fn maximum(left: Int, right: Int) returns Int {
+  if (left > right) { left } else { right }
+}
+
+fn power_of_two(exponent: Int) returns Int {
+  mut value = 1;
+  for _ in 0..exponent {
+    value *= 2;
+  }
+  value
+}
+
+fn parse_shape(section: String, id: Int) returns Shape {
+  let lines = string.split(section, "\n") ?? fail("invalid shape");
+  if (length(lines) < 2) {
+    fail("shape is empty")
+  }
+  mut cells: List<Point> = [];
+  mut width = 0;
+  for y in 1..length(lines) {
+    let row = lines[y];
+    width = maximum(width, length(row));
+    for x in 0..length(row) {
+      if ((string.get(row, x) ?? fail("missing shape cell")) == "#") {
+        cells = list.append(cells, Point { x, y: y - 1 });
+      }
+    }
+  }
+  if (length(cells) == 0) {
+    fail("shape has no occupied cells")
+  }
+  Shape { cells, height: length(lines) - 1, id, width }
+}
+
+fn parse_numbers(text: String) returns List<Int> {
+  let raw = string.split(text, " ") ?? fail("invalid number list");
+  mut values: List<Int> = [];
+  for field in raw {
+    if (length(field) > 0) {
+      values = list.append(values, parse_int(field));
+    }
+  }
+  values
+}
+
+fn parse_region(line: String) returns Region {
+  let fields = string.split(line, ": ") ?? fail("invalid region");
+  if (length(fields) != 2) {
+    fail("region must contain dimensions and counts")
+  }
+  let dimensions = string.split(fields[0], "x") ?? fail("invalid dimensions");
+  if (length(dimensions) != 2) {
+    fail("region dimensions must be width x height")
+  }
+  Region {
+    width: parse_int(dimensions[0]),
+    height: parse_int(dimensions[1]),
+    counts: parse_numbers(fields[1]),
+  }
+}
+
+fn orient(shape: Shape, code: Int) returns OrientedShape {
+  mut transformed: List<Point> = [];
+  mut min_x = 0;
+  mut min_y = 0;
+  mut max_x = 0;
+  mut max_y = 0;
+  for cell in shape.cells {
+    let flipped_x = if (code >= 4) { -cell.x } else { cell.x };
+    let rotation = code % 4;
+    let x = if (rotation == 0) {
+      flipped_x
+    } else if (rotation == 1) {
+      -cell.y
+    } else if (rotation == 2) {
+      -flipped_x
+    } else {
+      cell.y
+    };
+    let y = if (rotation == 0) {
+      cell.y
+    } else if (rotation == 1) {
+      flipped_x
+    } else if (rotation == 2) {
+      -cell.y
+    } else {
+      -flipped_x
+    };
+    min_x = minimum(min_x, x);
+    min_y = minimum(min_y, y);
+    max_x = maximum(max_x, x);
+    max_y = maximum(max_y, y);
+    transformed = list.append(transformed, Point { x, y });
+  }
+
+  mut normalized: List<Point> = [];
+  for cell in transformed {
+    normalized = list.append(normalized, Point { x: cell.x - min_x, y: cell.y - min_y });
+  }
+  OrientedShape { cells: normalized, width: max_x - min_x + 1, height: max_y - min_y + 1 }
+}
+
+fn orientation_key(shape: OrientedShape) returns Int {
+  mut mask = 0;
+  for cell in shape.cells {
+    mask += power_of_two(cell.y * shape.width + cell.x);
+  }
+  mask * 100 + shape.width * 10 + shape.height
+}
+
+fn orientations(shape: Shape) returns Map<Int, OrientedShape> {
+  mut unique: Map<Int, OrientedShape> = map {};
+  for code in 0..8 {
+    let candidate = orient(shape, code);
+    unique = map.insert(unique, orientation_key(candidate), candidate).values;
+  }
+  unique
+}
+
+fn empty_int_map() returns Map<Int, Int> {
+  map {}
+}
+
+fn can_place(shape: OrientedShape, x: Int, y: Int, region_width: Int, occupied: List<Bool>) returns Bool {
+  for cell in shape.cells {
+    let index = (y + cell.y) * region_width + x + cell.x;
+    if (occupied[index]) {
+      return false;
+    }
+  }
+  true
+}
+
+fn place(shape: OrientedShape, x: Int, y: Int, region_width: Int, occupied: List<Bool>) returns List<Bool> {
+  mut result = occupied;
+  for cell in shape.cells {
+    let index = (y + cell.y) * region_width + x + cell.x;
+    result = list.set(result, index, true);
+  }
+  result
+}
+
+fn shape_placements(shape: Shape, region_width: Int, region_height: Int) returns List<Placement> {
+  mut placements: List<Placement> = [];
+  for (shape_key, oriented) in orientations(shape) {
+    if (oriented.width <= region_width && oriented.height <= region_height) {
+      for y in 0..(region_height - oriented.height + 1) {
+        for x in 0..(region_width - oriented.width + 1) {
+          mut cells: List<Int> = [];
+          mut mask = 0;
+          for cell in oriented.cells {
+            let index = (y + cell.y) * region_width + x + cell.x;
+            cells = list.append(cells, index);
+            mask += power_of_two(index);
+          }
+          let key = shape_key * region_width * region_height + y * region_width + x;
+          placements = list.append(placements, Placement { cells, key, mask });
+        }
+      }
+    }
+  }
+  placements
+}
+
+fn placement_is_open(placement: Placement, occupied: Int) returns Bool {
+  for index in placement.cells {
+    let place_value = power_of_two(index);
+    if ((occupied / place_value) % 2 == 1) {
+      return false;
+    }
+  }
+  true
+}
+
+fn pack_placements(
+  piece_ids: List<Int>,
+  catalogs: List<List<Placement>>,
+  piece_index: Int,
+  occupied: Int,
+  previous_shape: Int,
+  previous_placement: Int,
+) returns Bool {
+  if (piece_index == length(piece_ids)) {
+    return true;
+  }
+  let shape_id = piece_ids[piece_index];
+  let minimum_placement = if (shape_id == previous_shape) { previous_placement } else { 0 };
+  for placement in catalogs[shape_id] {
+    if (placement.key >= minimum_placement && placement_is_open(placement, occupied)) {
+      if (pack_placements(
+        piece_ids,
+        catalogs,
+        piece_index + 1,
+        occupied + placement.mask,
+        shape_id,
+        placement.key,
+      )) {
+        return true;
+      }
+    }
+  }
+  false
+}
+
+fn pack(
+  pieces: List<Shape>,
+  piece_index: Int,
+  region_width: Int,
+  region_height: Int,
+  occupied: List<Bool>,
+  previous_shape: Int,
+  previous_placement: Int,
+) returns Bool {
+  if (piece_index == length(pieces)) {
+    return true;
+  }
+  let piece = pieces[piece_index];
+  let minimum_placement = if (piece.id == previous_shape) { previous_placement } else { 0 };
+  for code in 0..8 {
+    let shape = orient(piece, code);
+    if (shape.width <= region_width && shape.height <= region_height) {
+      for y in 0..(region_height - shape.height + 1) {
+        for x in 0..(region_width - shape.width + 1) {
+          let placement = code * region_width * region_height + y * region_width + x;
+          if (placement >= minimum_placement && can_place(shape, x, y, region_width, occupied)) {
+            let next = place(shape, x, y, region_width, occupied);
+            if (pack(pieces, piece_index + 1, region_width, region_height, next, piece.id, placement)) {
+              return true;
+            }
+          }
+        }
+      }
+    }
+  }
+  false
+}
+
+fn fits(region: Region, shapes: List<Shape>) returns Bool {
+  if (length(region.counts) != length(shapes)) {
+    fail("region count does not match the shape catalog")
+  }
+  mut requested_area = 0;
+  mut piece_count = 0;
+  mut box_width = 1;
+  mut box_height = 1;
+  mut pieces: List<Shape> = [];
+  for index in 0..length(shapes) {
+    let count = region.counts[index];
+    requested_area += count * length(shapes[index].cells);
+    piece_count += count;
+    if (count > 0) {
+      box_width = maximum(box_width, shapes[index].width);
+      box_height = maximum(box_height, shapes[index].height);
+      for _ in 0..count {
+        pieces = list.append(pieces, shapes[index]);
+      }
+    }
+  }
+  if (requested_area > region.width * region.height) {
+    return false;
+  }
+  if ((region.width / box_width) * (region.height / box_height) >= piece_count) {
+    return true;
+  }
+
+  if (region.width * region.height <= 62) {
+    mut catalogs: List<List<Placement>> = [];
+    mut order: Map<Int, Map<Int, Int>> = map {};
+    for shape in shapes {
+      let catalog = shape_placements(shape, region.width, region.height);
+      catalogs = list.append(catalogs, catalog);
+      if (region.counts[shape.id] > 0) {
+        let same_size = map.get(order, length(catalog)) ?? empty_int_map();
+        let updated = map.insert(same_size, shape.id, region.counts[shape.id]).values;
+        order = map.insert(order, length(catalog), updated).values;
+      }
+    }
+    mut ordered_piece_ids: List<Int> = [];
+    for (_, same_size) in order {
+      for (shape_id, count) in same_size {
+        for _ in 0..count {
+          ordered_piece_ids = list.append(ordered_piece_ids, shape_id);
+        }
+      }
+    }
+    return pack_placements(ordered_piece_ids, catalogs, 0, 0, -1, 0);
+  }
+
+  mut occupied: List<Bool> = [];
+  for _ in 0..(region.width * region.height) {
+    occupied = list.append(occupied, false);
+  }
+  pack(pieces, 0, region.width, region.height, occupied, -1, 0)
+}
+
+fn solve(input: String) returns Answers {
+  let sections = string.split(string.trim_ascii(input), "\n\n") ?? fail("invalid input");
+  if (length(sections) < 2) {
+    fail("expected shapes and regions")
+  }
+  mut shapes: List<Shape> = [];
+  for index in 0..(length(sections) - 1) {
+    shapes = list.append(shapes, parse_shape(sections[index], index));
+  }
+  let region_lines = string.split(sections[length(sections) - 1], "\n") ?? fail("invalid regions");
+  mut part1 = 0;
+  for line in region_lines {
+    if (fits(parse_region(line), shapes)) {
+      part1 += 1;
+    }
+  }
+  Answers { part1, part2: "free star: complete days 1 through 11" }
+}
+
+export async fn main(path: String) returns Result<Answers, FileError> effects [fs.read] {
+  let input = (await fs.read_text(fs.workspace(), path))?;
+  Ok(solve(input))
+}

@@ -1,0 +1,57 @@
+manifest {
+  language: "0.1"
+  entry: main
+  capabilities: [fs.read(workdir)]
+}
+
+record Answers {
+  part1: Int
+  part2: Int
+}
+
+fn parse_int(text: String) returns Int {
+  match to_int(text) {
+    Ok(value) => value
+    Err(error) => fail(error.message)
+  }
+}
+
+fn greatest_subsequence(bank: String, count: Int) returns Int {
+  if (length(bank) < count) {
+    fail("bank has too few batteries")
+  }
+
+  mut selected = "";
+  mut start = 0;
+  for picked in 0..count {
+    let last = length(bank) - (count - picked);
+    mut best_index = start;
+    mut best_digit = string.get(bank, start) ?? fail("missing digit");
+    for index in start..(last + 1) {
+      let digit = string.get(bank, index) ?? fail("missing digit");
+      if (digit > best_digit) {
+        best_digit = digit;
+        best_index = index;
+      }
+    }
+    selected = string.concat(selected, best_digit);
+    start = best_index + 1;
+  }
+  parse_int(selected)
+}
+
+fn solve(input: String) returns Answers {
+  let banks = string.split(string.trim_ascii(input), "\n") ?? fail("invalid input");
+  mut part1 = 0;
+  mut part2 = 0;
+  for bank in banks {
+    part1 += greatest_subsequence(bank, 2);
+    part2 += greatest_subsequence(bank, 12);
+  }
+  Answers { part1, part2 }
+}
+
+export async fn main(path: String) returns Result<Answers, FileError> effects [fs.read] {
+  let input = (await fs.read_text(fs.workspace(), path))?;
+  Ok(solve(input))
+}

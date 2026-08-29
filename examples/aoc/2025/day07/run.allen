@@ -1,0 +1,52 @@
+manifest {
+  language: "0.1"
+  entry: main
+  capabilities: [fs.read(workdir)]
+}
+
+record Answers {
+  part1: Int
+  part2: Int
+}
+
+fn add_count(counts: Map<Int, Int>, column: Int, amount: Int) returns Map<Int, Int> {
+  let previous = map.get(counts, column) ?? 0;
+  map.insert(counts, column, previous + amount).values
+}
+
+fn solve(input: String) returns Answers {
+  let rows = string.split(string.trim_ascii(input), "\n") ?? fail("invalid input");
+  if (length(rows) == 0) {
+    fail("empty grid")
+  }
+  let start = string.find(rows[0], "S") ?? fail("missing start");
+  mut beams: Map<Int, Int> = map {};
+  beams = add_count(beams, start, 1);
+  mut part1 = 0;
+
+  for row in rows {
+    mut next: Map<Int, Int> = map {};
+    for (column, timelines) in beams {
+      let cell = string.get(row, column) ?? fail("beam left the grid");
+      if (cell == "^") {
+        part1 += 1;
+        next = add_count(next, column - 1, timelines);
+        next = add_count(next, column + 1, timelines);
+      } else {
+        next = add_count(next, column, timelines);
+      }
+    }
+    beams = next;
+  }
+
+  mut part2 = 0;
+  for (_, timelines) in beams {
+    part2 += timelines;
+  }
+  Answers { part1, part2 }
+}
+
+export async fn main(path: String) returns Result<Answers, FileError> effects [fs.read] {
+  let input = (await fs.read_text(fs.workspace(), path))?;
+  Ok(solve(input))
+}

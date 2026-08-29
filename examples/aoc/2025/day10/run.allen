@@ -1,0 +1,180 @@
+manifest {
+  language: "0.1"
+  entry: main
+  capabilities: [fs.read(workdir)]
+}
+
+record Button {
+  indices: List<Int>
+}
+
+record Machine {
+  buttons: List<Button>
+  lights: String
+  targets: List<Int>
+}
+
+record Answers {
+  part1: Int
+  part2: Int
+}
+
+fn parse_int(text: String) returns Int {
+  match to_int(text) {
+    Ok(value) => value
+    Err(error) => fail(error.message)
+  }
+}
+
+fn parse_numbers(text: String) returns List<Int> {
+  mut values: List<Int> = [];
+  let fields = string.split(text, ",") ?? fail("invalid number list");
+  for field in fields {
+    values = list.append(values, parse_int(field));
+  }
+  values
+}
+
+fn parse_machine(line: String) returns Machine {
+  let raw_tokens = string.split(line, " ") ?? fail("invalid machine");
+  mut tokens: List<String> = [];
+  for token in raw_tokens {
+    if (length(token) > 0) {
+      tokens = list.append(tokens, token);
+    }
+  }
+  if (length(tokens) < 3) {
+    fail("machine is incomplete")
+  }
+  let lights = string.slice(tokens[0], 1, length(tokens[0]) - 1) ?? fail("invalid lights");
+  mut buttons: List<Button> = [];
+  for index in 1..(length(tokens) - 1) {
+    let token = tokens[index];
+    let body = string.slice(token, 1, length(token) - 1) ?? fail("invalid button");
+    buttons = list.append(buttons, Button { indices: parse_numbers(body) });
+  }
+  let last = tokens[length(tokens) - 1];
+  let target_body = string.slice(last, 1, length(last) - 1) ?? fail("invalid targets");
+  Machine { buttons, lights, targets: parse_numbers(target_body) }
+}
+
+fn power_of_two(exponent: Int) returns Int {
+  mut value = 1;
+  for _ in 0..exponent {
+    value *= 2;
+  }
+  value
+}
+
+fn light_target(lights: String) returns Int {
+  mut target = 0;
+  for index in 0..length(lights) {
+    if ((string.get(lights, index) ?? fail("missing light")) == "#") {
+      target += power_of_two(index);
+    }
+  }
+  target
+}
+
+fn press_lights(state: Int, button: Button) returns Int {
+  mut result = state;
+  for index in button.indices {
+    let place = power_of_two(index);
+    if ((result / place) % 2 == 0) {
+      result += place;
+    } else {
+      result -= place;
+    }
+  }
+  result
+}
+
+fn search_lights(buttons: List<Button>, target: Int, index: Int, state: Int, used: Int, best: Int) returns Int {
+  if (used >= best) {
+    return best;
+  }
+  if (index == length(buttons)) {
+    if (state == target) { used } else { best }
+  } else {
+    let skipped = search_lights(buttons, target, index + 1, state, used, best);
+    search_lights(buttons, target, index + 1, press_lights(state, buttons[index]), used + 1, skipped)
+  }
+}
+
+fn all_zero(values: List<Int>) returns Bool {
+  for value in values {
+    if (value != 0) {
+      return false;
+    }
+  }
+  true
+}
+
+fn maximum_presses(button: Button, remaining: List<Int>) returns Int {
+  mut result = remaining[button.indices[0]];
+  for index in button.indices {
+    if (remaining[index] < result) {
+      result = remaining[index];
+    }
+  }
+  result
+}
+
+fn subtract_presses(remaining: List<Int>, button: Button, count: Int) returns List<Int> {
+  mut result = remaining;
+  for index in button.indices {
+    result = list.set(result, index, result[index] - count);
+  }
+  result
+}
+
+fn search_joltage(buttons: List<Button>, remaining: List<Int>, index: Int, used: Int, best: Int) returns Int {
+  if (used >= best) {
+    return best;
+  }
+  if (index == length(buttons)) {
+    if (all_zero(remaining)) { used } else { best }
+  } else {
+    let skipped = search_joltage(buttons, remaining, index + 1, used, best);
+    if (maximum_presses(buttons[index], remaining) > 0) {
+      search_joltage(
+        buttons,
+        subtract_presses(remaining, buttons[index], 1),
+        index,
+        used + 1,
+        skipped,
+      )
+    } else {
+      skipped
+    }
+  }
+}
+
+fn solve(input: String) returns Answers {
+  let lines = string.split(string.trim_ascii(input), "\n") ?? fail("invalid input");
+  mut part1 = 0;
+  mut part2 = 0;
+  for line in lines {
+    let machine = parse_machine(line);
+    let light_best = search_lights(machine.buttons, light_target(machine.lights), 0, 0, 0, length(machine.buttons) + 1);
+    if (light_best > length(machine.buttons)) {
+      fail("light target is unreachable")
+    }
+    mut upper_bound = 1;
+    for target in machine.targets {
+      upper_bound += target;
+    }
+    let joltage_best = search_joltage(machine.buttons, machine.targets, 0, 0, upper_bound);
+    if (joltage_best == upper_bound) {
+      fail("joltage target is unreachable")
+    }
+    part1 += light_best;
+    part2 += joltage_best;
+  }
+  Answers { part1, part2 }
+}
+
+export async fn main(path: String) returns Result<Answers, FileError> effects [fs.read] {
+  let input = (await fs.read_text(fs.workspace(), path))?;
+  Ok(solve(input))
+}

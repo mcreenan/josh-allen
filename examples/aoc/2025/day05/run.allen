@@ -1,0 +1,93 @@
+manifest {
+  language: "0.1"
+  entry: main
+  capabilities: [fs.read(workdir)]
+}
+
+record Range {
+  end: Int
+  start: Int
+}
+
+record Answers {
+  part1: Int
+  part2: Int
+}
+
+fn parse_int(text: String) returns Int {
+  match to_int(text) {
+    Ok(value) => value
+    Err(error) => fail(error.message)
+  }
+}
+
+fn parse_range(text: String) returns Range {
+  let bounds = string.split(text, "-") ?? fail("invalid range");
+  if (length(bounds) != 2) {
+    fail("range must have two bounds")
+  }
+  Range { start: parse_int(bounds[0]), end: parse_int(bounds[1]) }
+}
+
+fn empty_range_map() returns Map<Int, Range> {
+  map {}
+}
+
+fn solve(input: String) returns Answers {
+  let sections = string.split(string.trim_ascii(input), "\n\n") ?? fail("invalid input");
+  if (length(sections) != 2) {
+    fail("expected ranges and ingredient ids")
+  }
+  let range_lines = string.split(sections[0], "\n") ?? fail("invalid ranges");
+  let id_lines = string.split(sections[1], "\n") ?? fail("invalid ids");
+  mut ranges: Map<Int, Map<Int, Range>> = map {};
+  for line in range_lines {
+    let range = parse_range(line);
+    let same_start = map.get(ranges, range.start) ?? empty_range_map();
+    let updated = map.insert(same_start, range.end, range).values;
+    ranges = map.insert(ranges, range.start, updated).values;
+  }
+
+  mut merged: List<Range> = [];
+  for (_, same_start) in ranges {
+    for (_, current) in same_start {
+      if (length(merged) == 0) {
+        merged = list.append(merged, current);
+      } else {
+        let last_index = length(merged) - 1;
+        let last = merged[last_index];
+        if (current.start <= last.end + 1) {
+          let new_end = if (current.end > last.end) { current.end } else { last.end };
+          merged = list.set(merged, last_index, Range { start: last.start, end: new_end });
+        } else {
+          merged = list.append(merged, current);
+        }
+      }
+    }
+  }
+
+  mut part1 = 0;
+  for line in id_lines {
+    let id = parse_int(line);
+    mut fresh = false;
+    for range in merged {
+      if (id >= range.start && id <= range.end) {
+        fresh = true;
+      }
+    }
+    if (fresh) {
+      part1 += 1;
+    }
+  }
+
+  mut part2 = 0;
+  for range in merged {
+    part2 += range.end - range.start + 1;
+  }
+  Answers { part1, part2 }
+}
+
+export async fn main(path: String) returns Result<Answers, FileError> effects [fs.read] {
+  let input = (await fs.read_text(fs.workspace(), path))?;
+  Ok(solve(input))
+}

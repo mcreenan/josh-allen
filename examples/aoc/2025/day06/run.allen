@@ -1,0 +1,109 @@
+manifest {
+  language: "0.1"
+  entry: main
+  capabilities: [fs.read(workdir)]
+}
+
+record Answers {
+  part1: Int
+  part2: Int
+}
+
+fn parse_int(text: String) returns Int {
+  match to_int(text) {
+    Ok(value) => value
+    Err(error) => fail(error.message)
+  }
+}
+
+fn pad_right(text: String, width: Int) returns String {
+  mut result = text;
+  while (length(result) < width) {
+    result = string.concat(result, " ");
+  }
+  result
+}
+
+fn apply(operator: String, values: List<Int>) returns Int {
+  if (operator == "+") {
+    mut result = 0;
+    for value in values {
+      result += value;
+    }
+    return result;
+  }
+  if (operator == "*") {
+    mut result = 1;
+    for value in values {
+      result *= value;
+    }
+    return result;
+  }
+  fail("unknown operator")
+}
+
+fn solve(input: String) returns Answers {
+  let raw_lines = string.split(input, "\n") ?? fail("invalid input");
+  mut lines: List<String> = [];
+  for line in raw_lines {
+    if (length(line) > 0) {
+      lines = list.append(lines, line);
+    }
+  }
+  if (length(lines) < 2) {
+    fail("worksheet is incomplete")
+  }
+  let operator_line = lines[length(lines) - 1];
+  let width = length(operator_line);
+  mut padded: List<String> = [];
+  for line in lines {
+    padded = list.append(padded, pad_right(line, width));
+  }
+
+  mut starts: List<Int> = [];
+  mut operators: List<String> = [];
+  for column in 0..width {
+    let cell = string.get(operator_line, column) ?? fail("missing operator cell");
+    if (cell == "+" || cell == "*") {
+      starts = list.append(starts, column);
+      operators = list.append(operators, cell);
+    }
+  }
+
+  mut part1 = 0;
+  mut part2 = 0;
+  for problem in 0..length(starts) {
+    let start = starts[problem];
+    let end = if (problem + 1 < length(starts)) { starts[problem + 1] } else { width };
+    mut row_values: List<Int> = [];
+    for row in 0..(length(padded) - 1) {
+      let field = string.slice(padded[row], start, end) ?? fail("invalid worksheet span");
+      let number = string.trim_ascii(field);
+      if (length(number) > 0) {
+        row_values = list.append(row_values, parse_int(number));
+      }
+    }
+    part1 += apply(operators[problem], row_values);
+
+    mut column_values: List<Int> = [];
+    for column in start..end {
+      mut digits = "";
+      for row in 0..(length(padded) - 1) {
+        let cell = string.get(padded[row], column) ?? fail("missing worksheet cell");
+        if (cell != " ") {
+          digits = string.concat(digits, cell);
+        }
+      }
+      if (length(digits) > 0) {
+        column_values = list.append(column_values, parse_int(digits));
+      }
+    }
+    part2 += apply(operators[problem], column_values);
+  }
+  Answers { part1, part2 }
+}
+
+export async fn main(path: String) returns Result<Answers, FileError> effects [fs.read] {
+  let input = (await fs.read_text(fs.workspace(), path))?;
+  Ok(solve(input))
+}
