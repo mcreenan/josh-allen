@@ -1,0 +1,25 @@
+{
+  "name": "tree-sitter-allen",
+  "version": "0.1.0",
+  "description": "Tree-sitter grammar for ALLEN",
+  "license": "MIT",
+  "main": "bindings/node",
+  "keywords": [
+    "incremental",
+    "parsing",
+    "tree-sitter",
+    "allen"
+  ],
+  "tree-sitter": [
+    {
+      "scope": "source.allen",
+      "file-types": [
+        "allen"
+      ]
+    }
+  ],
+  "scripts": {
+    "generate": "tree-sitter generate",
+    "test": "tree-sitter test"
+  }
+}

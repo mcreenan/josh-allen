@@ -1,0 +1,38 @@
+{
+  "grammars": [
+    {
+      "name": "allen",
+      "camelcase": "Allen",
+      "scope": "source.allen",
+      "path": ".",
+      "file-types": [
+        "allen"
+      ],
+      "highlights": [
+        "../languages/allen/highlights.scm"
+      ]
+    }
+  ],
+  "metadata": {
+    "version": "0.1.0",
+    "license": "MIT",
+    "description": "Tree-sitter grammar for ALLEN",
+    "authors": [
+      {
+        "name": "Matt Creenan"
+      }
+    ],
+    "links": {
+      "repository": "https://github.com/mcreenan/josh-allen"
+    }
+  },
+  "bindings": {
+    "c": true,
+    "go": false,
+    "node": false,
+    "python": false,
+    "rust": false,
+    "swift": false,
+    "zig": false
+  }
+}

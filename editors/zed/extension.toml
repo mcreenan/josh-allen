@@ -1,0 +1,13 @@
+id = "allen"
+name = "ALLEN"
+version = "0.1.0"
+schema_version = 1
+description = "Syntax highlighting and editor support for ALLEN source files."
+repository = "https://github.com/mcreenan/josh-allen"
+authors = ["Matt Creenan"]
+languages = ["languages/allen"]
+
+[grammars.allen]
+repository = "https://github.com/mcreenan/josh-allen"
+rev = "main"
+path = "editors/zed/tree-sitter-allen"

@@ -283,9 +283,12 @@ cargo test --workspace
 ./scripts/host-conformance.sh
 ./scripts/test-installer.sh
 python3 -m unittest plugins/josh-allen/tests/test_server.py
+npm --prefix editors/vscode test
+./editors/zed/scripts/test.sh
 ```
 
-The VS Code grammar and packaged extension live under `editors/vscode`.
+The VS Code extension lives under `editors/vscode`. The Zed extension and its
+Tree-sitter grammar live under `editors/zed`.
 
 Tags matching `v0.1.*` run the release workflow. The tag must match the
 workspace and plugin versions. Each release publishes macOS arm64 and static
