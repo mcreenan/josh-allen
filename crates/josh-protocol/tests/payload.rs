@@ -4,9 +4,10 @@ use josh_protocol::{
     AgentAskParams, AgentMessageParams, AgentMessageResult, AgentTranscriptParams,
     AgentTranscriptResult, CatalogSetParams, CatalogSetResult, EventKind, EventSequenceTracker,
     ExecutionEventParams, ExecutionStartParams, FEATURES, FileEncoding, GrantDuration,
-    InitializeParams, InitializeResult, ModelRequestParams, PROTOCOL_VERSION, PeerInfo,
-    PermissionRequestParams, PermissionRequestResult, PermissionRevokeParams, PermissionRight,
-    PermissionTargetKind, ProgramLoadParams, ProtocolError, ProtocolLimits, SourceFile,
+    HostProjectionSetParams, InitializeParams, InitializeResult, ModelRequestParams,
+    PROTOCOL_VERSION, PeerInfo, PermissionRequestParams, PermissionRequestResult,
+    PermissionRevokeParams, PermissionRight, PermissionTargetKind, ProgramLoadParams,
+    ProjectionSectionKind, ProtocolError, ProtocolLimits, SessionBindingLevel, SourceFile,
     SubAgentAskParams, SubAgentCreateParams, SubAgentCreateResult, SubAgentMessageParams,
     SubAgentRunParams, ToolInvokeResult, TranscriptPart, Validate, request_params,
 };
@@ -62,6 +63,30 @@ fn limits() -> ProtocolLimits {
         max_catalog_tools: 256,
         max_catalog_bytes: 3_145_728,
     }
+}
+
+fn host_projection() -> HostProjectionSetParams {
+    let catalog: CatalogSetParams = serde_json::from_value(json!({
+        "schema_dialect": "https://json-schema.org/draft/2020-12/schema",
+        "metadata": {
+            "source": "test-host",
+            "source_revision": "revision-7",
+            "observed_at_unix_ms": 1,
+            "freshness": "current",
+            "complete": true
+        },
+        "tools": []
+    }))
+    .unwrap();
+    HostProjectionSetParams::complete_for_catalog(
+        "projection-1",
+        PeerInfo {
+            name: "host".to_owned(),
+            version: "1.0.0".to_owned(),
+        },
+        SessionBindingLevel::None,
+        &catalog,
+    )
 }
 
 #[test]
@@ -123,6 +148,109 @@ fn catalog_payloads_preserve_provenance_and_projection() {
     let mut incomplete = result;
     incomplete.metadata.complete = false;
     assert!(incomplete.validate().is_err());
+}
+
+#[test]
+fn host_projection_requires_every_complete_canonical_section() {
+    let projection = host_projection();
+    projection.validate().unwrap();
+    assert_eq!(projection.sections.len(), ProjectionSectionKind::ALL.len());
+    assert_eq!(
+        projection.section(ProjectionSectionKind::Tools).item_count,
+        0
+    );
+
+    for index in 0..ProjectionSectionKind::ALL.len() {
+        let mut missing = projection.clone();
+        missing.sections.remove(index);
+        assert!(missing.validate().is_err(), "missing section {index}");
+
+        let mut duplicate = projection.clone();
+        let replacement = (index + 1) % duplicate.sections.len();
+        duplicate.sections[index] = duplicate.sections[replacement].clone();
+        assert!(duplicate.validate().is_err(), "duplicate section {index}");
+
+        let mut reordered = projection.clone();
+        let other = (index + 1) % reordered.sections.len();
+        reordered.sections.swap(index, other);
+        assert!(reordered.validate().is_err(), "reordered section {index}");
+
+        let mut incomplete = projection.clone();
+        incomplete.sections[index].complete = false;
+        assert!(incomplete.validate().is_err(), "incomplete section {index}");
+
+        for invalid in [
+            {
+                let mut invalid = projection.clone();
+                invalid.sections[index].source.clear();
+                invalid
+            },
+            {
+                let mut invalid = projection.clone();
+                invalid.sections[index].source_revision = "bad\nrevision".to_owned();
+                invalid
+            },
+            {
+                let mut invalid = projection.clone();
+                invalid.sections[index].observed_at_unix_ms = 0;
+                invalid
+            },
+            {
+                let mut invalid = projection.clone();
+                invalid.sections[index].item_count = 1_048_577;
+                invalid
+            },
+        ] {
+            assert!(invalid.validate().is_err(), "invalid section {index}");
+        }
+    }
+}
+
+#[test]
+fn host_projection_rejects_invalid_top_level_and_wire_fields() {
+    let projection = host_projection();
+
+    let mut wrong_profile = projection.clone();
+    wrong_profile.profile = "josh.host-projection/other".to_owned();
+    assert!(wrong_profile.validate().is_err());
+    let mut invalid_id = projection.clone();
+    invalid_id.projection_id.clear();
+    assert!(invalid_id.validate().is_err());
+    let mut invalid_host = projection.clone();
+    invalid_host.host.name.clear();
+    assert!(invalid_host.validate().is_err());
+
+    let original = serde_json::to_value(&projection).unwrap();
+    for mutate in [
+        |value: &mut serde_json::Value| {
+            value["sections"][0]["freshness"] = json!("stale");
+        },
+        |value: &mut serde_json::Value| {
+            value["sections"][0]["kind"] = json!("unknown");
+        },
+        |value: &mut serde_json::Value| {
+            value["sections"][0]
+                .as_object_mut()
+                .unwrap()
+                .remove("source");
+        },
+        |value: &mut serde_json::Value| {
+            value["sections"][0]["unexpected"] = json!(true);
+        },
+    ] {
+        let mut value = original.clone();
+        mutate(&mut value);
+        assert!(serde_json::from_value::<HostProjectionSetParams>(value).is_err());
+    }
+}
+
+#[test]
+fn host_projection_section_lookup_does_not_depend_on_enum_discriminants() {
+    let mut projection = host_projection();
+    projection.sections.reverse();
+    for kind in ProjectionSectionKind::ALL {
+        assert_eq!(projection.section(kind).kind, kind);
+    }
 }
 
 #[test]
@@ -201,8 +329,8 @@ fn initialize_result_features_are_exact() {
 }
 
 #[test]
-fn exec_grants_use_the_strict_josh_1_5_start_contract() {
-    assert_eq!(PROTOCOL_VERSION, "josh/1.5");
+fn exec_grants_use_the_strict_josh_1_6_start_contract() {
+    assert_eq!(PROTOCOL_VERSION, "josh/1.6");
     assert!(FEATURES.contains(&"exec-run"));
     let value = json!({
         "execution_id":"exec-1",

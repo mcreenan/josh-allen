@@ -43,8 +43,11 @@ bound to the current agent session and will return an unavailable-provider
 error.
 
 The MCP bridge is prompt-assisted. It does not prove caller identity, provide
-signed receipts, expose a complete tool registry, or isolate child-agent
-authority.
+signed receipts, route providers natively, or isolate child-agent authority.
+Its default projection contains only the built-in integration tool. A native
+host adapter may inject a larger complete projection, catalog, and explicit
+authorization list through `JOSH_ALLEN_HOST_PROJECTION_PATH`; that still does
+not make the prompt-assisted session authenticated.
 
 ## Author the program
 
@@ -82,8 +85,10 @@ response under the outer `result` key.
 Use these provider result shapes:
 
 - For `tool/invoke`, call the named host tool with the requested input. Resume
-  with `{"outcome":"ok","value":<tool output>}`. The packaged bridge exposes
-  only `allen_integration_echo` in its frozen JOSH catalog.
+  with `{"outcome":"ok","value":<tool output>}`. By default, the packaged
+  bridge projects and authorizes only `allen_integration_echo`. A host-injected
+  catalog may name other tools, but call one only when it is actually available
+  in the current host and appears in the frozen, host-authorized projection.
 - For `agent/message`, show the message in the current task and resume with
   `{"accepted":true}`.
 - For `agent/ask` or `model/request`, return a value that satisfies
@@ -114,7 +119,13 @@ and provenance metadata. JOSH rejects catalogs marked incomplete, freezes the
 definitions, and returns the metadata, digest, count, and tool summaries used
 as the program input.
 
-The packaged MCP bridge proves only its one-tool integration catalog. It
-cannot enumerate the current Codex built-ins, apps, collaboration tools, or
-tools from other MCP servers. Do not reconstruct those lists from memory or
-mark a catalog complete without a host contract that guarantees it.
+Without host injection, the packaged MCP bridge proves only its one-tool
+integration catalog and cannot enumerate the current Codex built-ins, apps,
+collaboration tools, or tools from other MCP servers. A native host adapter can
+inject an exact projection/catalog/authorization snapshot through
+`JOSH_ALLEN_HOST_PROJECTION_PATH`; JOSH validates its tools metadata and count,
+then the bridge grants only tool names returned from the verified artifact and
+authorized by that snapshot. Do not reconstruct registries from memory, infer
+grants from source text, claim authenticated identity, or mark an inventory
+complete without a host contract that guarantees it. Injection changes the
+frozen contract, not the manual `next_action` routing mode.

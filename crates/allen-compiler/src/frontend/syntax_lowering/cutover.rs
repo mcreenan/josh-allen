@@ -12,20 +12,20 @@ use std::fs;
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 
-const EXAMPLE_SOURCE_COUNT: usize = 91;
-const CLI_FIXTURE_SOURCE_COUNT: usize = 101;
+const EXAMPLE_SOURCE_COUNT: usize = 96;
+const CLI_FIXTURE_SOURCE_COUNT: usize = 104;
 const SYNTAX_GOLDEN_SOURCE_COUNT: usize = 2;
 const PARSER_SEED_COUNT: usize = 15;
 const EXAMPLE_CORPUS_DIGEST: &str =
-    "ff01328fbc687405dcb28604c295aeb37aa2768890aba15210b83dacfa3895d5";
+    "d45b4d5349f7bfff595b8f442dce915a3783f3b776ca6034e59b8129ff41f53a";
 const CLI_FIXTURE_CORPUS_DIGEST: &str =
-    "cf577e3187ce1cf79812053186315dc5fb8a06d195ad9e4df8dd897ba8e4587e";
+    "b587c3b3222821d7a7f56ee2ace1038bae1174110817470115875f5b5c657f90";
 const SYNTAX_GOLDEN_CORPUS_DIGEST: &str =
     "1915516a5d951385ae11a7409b21d4ca0e6db1a3f3453180d5a767c7d466d2c6";
 const PARSER_SEED_CORPUS_DIGEST: &str =
     "38b8986f56ada7d3c75af46f4328beec0312c79c0f60b6b2c87380e913976e94";
 const COMPLETE_CORPUS_DIGEST: &str =
-    "4b16731dd07fe50e76cdb910947e3428d569f6c327a0bb250bd39ab5c3bdf834";
+    "12cb9cbeb131bd3b19b9276d6a58b4d9f870535b2d0f1af421b0ef505aca067c";
 
 fn repository_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -210,7 +210,7 @@ fn compile_prepared_catalog_route(source: &str, support: &str) -> PreparedCatalo
 }
 
 #[test]
-fn closed_209_input_inventory_is_complete_disjoint_and_unchanged() {
+fn closed_217_input_inventory_is_complete_disjoint_and_unchanged() {
     let (examples, fixtures, goldens, seeds) = corpus_classes();
     assert_eq!(examples.len(), EXAMPLE_SOURCE_COUNT);
     assert_eq!(fixtures.len(), CLI_FIXTURE_SOURCE_COUNT);
@@ -228,7 +228,7 @@ fn closed_209_input_inventory_is_complete_disjoint_and_unchanged() {
         .chain(&seeds)
         .cloned()
         .collect::<Vec<_>>();
-    assert_eq!(complete.len(), 209);
+    assert_eq!(complete.len(), 217);
     assert_eq!(
         complete
             .iter()
@@ -284,7 +284,7 @@ fn every_utf8_corpus_input_has_a_deterministic_lossless_canonical_outcome() {
             );
         }
     }
-    assert_eq!((utf8, invalid_utf8), (208, 1));
+    assert_eq!((utf8, invalid_utf8), (216, 1));
 }
 
 #[test]
@@ -296,6 +296,7 @@ fn every_production_source_mode_is_deterministic_on_the_closed_routes() {
         let label = relative(&path);
         if label.contains("/filesystem-package/")
             || label.contains("/functions-and-effects/")
+            || label.contains("/template-package/")
             || excluded.contains(label.as_str())
         {
             continue;
@@ -322,7 +323,7 @@ fn every_production_source_mode_is_deterministic_on_the_closed_routes() {
         );
         loose += 1;
     }
-    assert_eq!(loose, 53);
+    assert_eq!(loose, 56);
 
     let module_root = root.join("examples/functions-and-effects");
     let module_sources = BTreeMap::from([
@@ -417,7 +418,7 @@ fn package_and_module_routes_are_canonical() {
             (!nested).then(|| directory.to_owned())
         })
         .collect::<Vec<_>>();
-    assert_eq!(package_roots.len(), 9);
+    assert_eq!(package_roots.len(), 10);
     for package_root in package_roots {
         let limits = LoadLimits::default();
         let lock = generate_lock(&package_root, &limits).expect("generate package lock");

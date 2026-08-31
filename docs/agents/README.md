@@ -12,7 +12,7 @@ adapter merely to execute an ALLEN file.
 Default to:
 
 - language `0.1` (the current evolving early-alpha profile);
-- protocol `josh/1.5`;
+- protocol `josh/1.6`;
 - unattended mode when no existing invoking-agent session was supplied;
 - attached mode only when the host supplied a real opaque invoking-session ID;
 - one loose `.allen` file and no package manifest until the program actually
@@ -162,6 +162,7 @@ Before running:
 - source and manifest types agree with the selected entry;
 - every effectful function declares its effects;
 - package files are normalized, unique, and UTF-8 sorted for `program/load`;
+- one complete honest host projection is frozen after initialization;
 - the catalog is frozen before program loading;
 - `program_id` and `artifact_digest` come from the successful load response;
 - capability, tool, and origin grants are sorted, unique, and no wider than the

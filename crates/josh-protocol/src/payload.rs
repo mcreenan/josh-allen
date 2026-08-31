@@ -8,10 +8,11 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::message::invalid;
-use crate::{ProtocolError, WireMessage};
+use crate::{PeerInfo, ProtocolError, WireMessage};
 
 pub const SCHEMA_DIALECT: &str = "https://json-schema.org/draft/2020-12/schema";
 pub const SCHEMA_PROFILE: &str = "allen.tool-schema/0.1";
+pub const HOST_PROJECTION_PROFILE: &str = "josh.host-projection/0.1";
 pub trait Validate {
     /// Validates semantic constraints not represented by the Serde shape.
     ///
@@ -102,6 +103,163 @@ pub enum Idempotency {
 pub enum CatalogFreshness {
     Current,
     Cached,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProjectionSectionKind {
+    Tools,
+    Resources,
+    Attachments,
+    Transcript,
+    Models,
+    UserInteraction,
+    Agents,
+    Roots,
+    Permissions,
+    Telemetry,
+}
+
+impl ProjectionSectionKind {
+    pub const ALL: [Self; 10] = [
+        Self::Tools,
+        Self::Resources,
+        Self::Attachments,
+        Self::Transcript,
+        Self::Models,
+        Self::UserInteraction,
+        Self::Agents,
+        Self::Roots,
+        Self::Permissions,
+        Self::Telemetry,
+    ];
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionBindingLevel {
+    None,
+    PromptAssisted,
+    Authenticated,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProjectionSection {
+    pub kind: ProjectionSectionKind,
+    pub source: String,
+    pub source_revision: String,
+    pub observed_at_unix_ms: u64,
+    pub freshness: CatalogFreshness,
+    pub complete: bool,
+    pub item_count: u64,
+}
+
+impl Validate for ProjectionSection {
+    fn validate(&self) -> Result<(), ProtocolError> {
+        validate_opaque(&self.source, "projection section source")?;
+        validate_opaque(&self.source_revision, "projection section source revision")?;
+        if self.observed_at_unix_ms == 0 {
+            return Err(invalid("projection section observation time is zero"));
+        }
+        if self.item_count > 1_048_576 {
+            return Err(invalid("projection section item count exceeds the limit"));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct HostProjectionSetParams {
+    pub profile: String,
+    pub projection_id: String,
+    pub host: PeerInfo,
+    pub session_binding: SessionBindingLevel,
+    pub sections: Vec<ProjectionSection>,
+}
+
+impl Validate for HostProjectionSetParams {
+    fn validate(&self) -> Result<(), ProtocolError> {
+        if self.profile != HOST_PROJECTION_PROFILE {
+            return Err(invalid("host projection profile is invalid"));
+        }
+        validate_opaque(&self.projection_id, "projection ID")?;
+        self.host.validate()?;
+        if self.sections.len() != ProjectionSectionKind::ALL.len() {
+            return Err(invalid(
+                "host projection must contain every canonical section",
+            ));
+        }
+        for (section, expected) in self.sections.iter().zip(ProjectionSectionKind::ALL) {
+            if section.kind != expected {
+                return Err(invalid(
+                    "host projection sections are not in canonical order",
+                ));
+            }
+            section.validate()?;
+            if !section.complete {
+                return Err(invalid("host projection section is incomplete"));
+            }
+        }
+        Ok(())
+    }
+}
+
+impl HostProjectionSetParams {
+    #[must_use]
+    pub fn section(&self, kind: ProjectionSectionKind) -> &ProjectionSection {
+        self.sections
+            .iter()
+            .find(|section| section.kind == kind)
+            .expect("validated host projection contains every canonical section")
+    }
+
+    #[must_use]
+    pub fn complete_for_catalog(
+        projection_id: &str,
+        host: PeerInfo,
+        session_binding: SessionBindingLevel,
+        catalog: &CatalogSetParams,
+    ) -> Self {
+        let sections = ProjectionSectionKind::ALL
+            .into_iter()
+            .map(|kind| ProjectionSection {
+                kind,
+                source: catalog.metadata.source.clone(),
+                source_revision: catalog.metadata.source_revision.clone(),
+                observed_at_unix_ms: catalog.metadata.observed_at_unix_ms,
+                freshness: catalog.metadata.freshness,
+                complete: true,
+                item_count: if kind == ProjectionSectionKind::Tools {
+                    u64::try_from(catalog.tools.len()).unwrap_or(u64::MAX)
+                } else {
+                    0
+                },
+            })
+            .collect();
+        Self {
+            profile: HOST_PROJECTION_PROFILE.to_owned(),
+            projection_id: projection_id.to_owned(),
+            host,
+            session_binding,
+            sections,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct HostProjectionSetResult {
+    pub projection_digest: String,
+    pub projection: HostProjectionSetParams,
+}
+
+impl Validate for HostProjectionSetResult {
+    fn validate(&self) -> Result<(), ProtocolError> {
+        validate_digest(&self.projection_digest)?;
+        self.projection.validate()
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -342,6 +500,7 @@ pub struct ProgramLoadResult {
     pub tool_contract_digest: String,
     pub diagnostics: Vec<CompilerDiagnostic>,
     pub entries: Vec<EntryContract>,
+    pub required_tools: Vec<String>,
     pub exec_commands: Vec<String>,
     pub exec_environment: Vec<String>,
 }
@@ -364,6 +523,10 @@ impl Validate for ProgramLoadResult {
         validate_sorted_unique(&names, "entries")?;
         for entry in &self.entries {
             entry.validate()?;
+        }
+        validate_sorted_unique(&self.required_tools, "required_tools")?;
+        for tool in &self.required_tools {
+            validate_tool_name(tool)?;
         }
         validate_sorted_unique(&self.exec_commands, "exec_commands")?;
         for pattern in &self.exec_commands {

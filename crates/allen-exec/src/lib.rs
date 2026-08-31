@@ -36,6 +36,8 @@ static PAUSE_BEFORE_IMAGE_SEAL: std::sync::atomic::AtomicBool =
 #[cfg(all(test, target_os = "linux"))]
 static IMAGE_READY_TO_ATTACK: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
+#[cfg(all(test, target_os = "linux"))]
+static PROCESS_RUN_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// One canonical package or host command pattern.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -810,12 +812,17 @@ fn finish_failed_attempt(child: &mut Child, kind: ExecErrorKind) -> ExecError {
 
 #[cfg(target_os = "linux")]
 fn terminate_and_reap(child: &mut Child) -> Result<(), ExecError> {
-    match child.try_wait() {
-        Ok(Some(_)) => return Ok(()),
-        Ok(None) => {}
+    let leader_exited = match child.try_wait() {
+        Ok(Some(_)) => true,
+        Ok(None) => false,
         Err(_) => return Err(ExecError::new(ExecErrorKind::TerminationFailed)),
+    };
+    // The group leader can exit while a descendant still holds an inherited
+    // output pipe open. Kill the group even after the leader has been reaped.
+    terminate_process_group(child, leader_exited)?;
+    if leader_exited {
+        return Ok(());
     }
-    terminate_process_group(child)?;
     let deadline = Instant::now()
         .checked_add(Duration::from_secs(1))
         .ok_or_else(|| ExecError::new(ExecErrorKind::TerminationFailed))?;
@@ -831,16 +838,19 @@ fn terminate_and_reap(child: &mut Child) -> Result<(), ExecError> {
 }
 
 #[cfg(target_os = "linux")]
-fn terminate_process_group(child: &mut Child) -> Result<(), ExecError> {
+fn terminate_process_group(child: &mut Child, leader_exited: bool) -> Result<(), ExecError> {
+    use rustix::io::Errno;
     use rustix::process::{Pid, Signal, kill_process_group};
 
     let process_group = i32::try_from(child.id()).ok().and_then(Pid::from_raw);
-    if process_group.is_none_or(|pid| kill_process_group(pid, Signal::KILL).is_err()) {
-        child
+    match process_group.map(|pid| kill_process_group(pid, Signal::KILL)) {
+        Some(Ok(())) => Ok(()),
+        Some(Err(Errno::SRCH)) if leader_exited => Ok(()),
+        Some(Err(_)) | None if !leader_exited => child
             .kill()
-            .map_err(|_| ExecError::new(ExecErrorKind::TerminationFailed))?;
+            .map_err(|_| ExecError::new(ExecErrorKind::TerminationFailed)),
+        Some(Err(_)) | None => Err(ExecError::new(ExecErrorKind::TerminationFailed)),
     }
-    Ok(())
 }
 
 #[cfg(target_os = "linux")]
@@ -978,6 +988,13 @@ mod tests {
         use super::*;
 
         #[cfg(target_os = "linux")]
+        fn process_run_test_guard() -> std::sync::MutexGuard<'static, ()> {
+            PROCESS_RUN_TEST_LOCK
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+        }
+
+        #[cfg(target_os = "linux")]
         struct Fixture {
             root: PathBuf,
             broker: ProcessBroker,
@@ -1042,6 +1059,7 @@ mod tests {
         #[test]
         #[cfg(target_os = "linux")]
         fn broker_uses_argv_pipes_and_the_explicit_environment_snapshot() {
+            let _guard = process_run_test_guard();
             let fixture = Fixture::new(
                 r#"printf '%s\n' "$1"
 printf '%s\n' "$BROKER_VALUE"
@@ -1063,6 +1081,7 @@ printf '%s' 'bounded stderr' >&2"#,
         #[test]
         #[cfg(target_os = "linux")]
         fn broker_enforces_input_output_and_deadline_limits() {
+            let _guard = process_run_test_guard();
             let input_fixture = Fixture::new("cat");
             let input_error = input_fixture
                 .broker
@@ -1124,6 +1143,7 @@ printf '%s' 'bounded stderr' >&2"#,
         #[test]
         #[cfg(target_os = "linux")]
         fn executable_image_ignores_a_path_replacement_after_preflight() {
+            let _guard = process_run_test_guard();
             let fixture = Fixture::new("printf original");
             let replacement = fixture.root.join("replacement");
             fs::write(&replacement, "#!/bin/sh\nprintf replacement\n").unwrap();
@@ -1140,6 +1160,7 @@ printf '%s' 'bounded stderr' >&2"#,
         #[test]
         #[cfg(target_os = "linux")]
         fn executable_image_ignores_an_in_place_overwrite_after_preflight() {
+            let _guard = process_run_test_guard();
             let fixture = Fixture::new("printf original");
             let mut replacement = OpenOptions::new()
                 .write(true)
@@ -1163,6 +1184,7 @@ printf '%s' 'bounded stderr' >&2"#,
         fn a_live_descriptor_mutation_cannot_change_the_sealed_image() {
             use std::sync::atomic::Ordering;
 
+            let _guard = process_run_test_guard();
             let fixture = Fixture::new("printf original");
             IMAGE_READY_TO_ATTACK.store(false, Ordering::Release);
             PAUSE_BEFORE_IMAGE_SEAL.store(true, Ordering::Release);

@@ -1,10 +1,10 @@
 {
   "profile": "host-0.1",
   "status": "conforming",
-  "completed_on": "2026-08-29",
+  "completed_on": "2026-08-30",
   "language_versions": ["0.1.1"],
   "bytecode_versions": [19],
-  "protocol_versions": ["josh/1.5"],
+  "protocol_versions": ["josh/1.6"],
   "required": {
     "agent_and_typed_response_operations": "conforming",
     "canary_secret_scans": "conforming",
@@ -12,6 +12,7 @@
     "deterministic_record_replay": "conforming",
     "fuzz_target_build": "conforming_stable_build",
     "fuzz_live_execution": "unverified_optional_cargo_fuzz_unavailable",
+    "host_projection_phase_1": "conforming",
     "josh_protocol_and_tools": "conforming",
     "loops_and_iteration": "conforming",
     "operators_and_short_circuiting": "conforming",
@@ -21,6 +22,42 @@
     "closed_result_provider_operations": "conforming",
     "error_registry": "conforming",
     "exec_replay_binding": "conforming_no_live_fallback"
+  },
+  "josh_protocol": {
+    "lifecycle": ["initialize", "host/project", "catalog/set", "program/load", "execution/start"],
+    "host_projection": {
+      "request": {
+        "profile": "josh.host-projection/0.1",
+        "projection_id": "projection-1",
+        "host": {"name": "allen-host", "version": "0.1.0"},
+        "session_binding": "prompt_assisted",
+        "sections": [
+          {"kind": "tools", "source": "allen-host", "source_revision": "revision-7", "observed_at_unix_ms": 1770000000000, "freshness": "current", "complete": true, "item_count": 0},
+          {"kind": "resources", "source": "allen-host", "source_revision": "revision-7", "observed_at_unix_ms": 1770000000000, "freshness": "current", "complete": true, "item_count": 0},
+          {"kind": "attachments", "source": "allen-host", "source_revision": "revision-7", "observed_at_unix_ms": 1770000000000, "freshness": "current", "complete": true, "item_count": 0},
+          {"kind": "transcript", "source": "allen-host", "source_revision": "revision-7", "observed_at_unix_ms": 1770000000000, "freshness": "current", "complete": true, "item_count": 0},
+          {"kind": "models", "source": "allen-host", "source_revision": "revision-7", "observed_at_unix_ms": 1770000000000, "freshness": "current", "complete": true, "item_count": 0},
+          {"kind": "user_interaction", "source": "allen-host", "source_revision": "revision-7", "observed_at_unix_ms": 1770000000000, "freshness": "current", "complete": true, "item_count": 0},
+          {"kind": "agents", "source": "allen-host", "source_revision": "revision-7", "observed_at_unix_ms": 1770000000000, "freshness": "current", "complete": true, "item_count": 0},
+          {"kind": "roots", "source": "allen-host", "source_revision": "revision-7", "observed_at_unix_ms": 1770000000000, "freshness": "current", "complete": true, "item_count": 0},
+          {"kind": "permissions", "source": "allen-host", "source_revision": "revision-7", "observed_at_unix_ms": 1770000000000, "freshness": "current", "complete": true, "item_count": 0},
+          {"kind": "telemetry", "source": "allen-host", "source_revision": "revision-7", "observed_at_unix_ms": 1770000000000, "freshness": "current", "complete": true, "item_count": 0}
+        ]
+      },
+      "expected_projection_digest": "sha256:916e4fdc62b900b36322bb1d285ccacfa79beb3286b3a52dd9a015cf5728335e",
+      "catalog": {
+        "schema_dialect": "https://json-schema.org/draft/2020-12/schema",
+        "metadata": {
+          "source": "allen-host",
+          "source_revision": "revision-7",
+          "observed_at_unix_ms": 1770000000000,
+          "freshness": "current",
+          "complete": true
+        },
+        "tools": []
+      }
+    },
+    "program_load_required_field": "required_tools"
   },
   "runner": {
     "command": "scripts/host-conformance.sh",

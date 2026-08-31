@@ -28,7 +28,7 @@ The workspace uses these crates:
 | `allen-http-get` | Restricted HTTPS GET and destination policy |
 | `allen-testkit` | Deterministic recording, replay, redaction, and provider test support |
 | `allen-cli` | `check`, `build`, `inspect`, `run`, and package commands |
-| `josh-protocol` | The current `josh/1.5` message, payload, framing, and connection-state contract |
+| `josh-protocol` | The current `josh/1.6` message, payload, framing, and connection-state contract |
 | `josh-host` | JOSH session lifecycle, provider adapters, stdio connection, and execution supervision |
 | `josh` | The `serve` and `run` executable entry points |
 
@@ -412,30 +412,87 @@ or an output limit. It never invokes a shell or retries.
 ## 10. Current JOSH protocol
 
 JOSH uses the fixed envelope marker `josh/1` and negotiates the sole current
-protocol version `josh/1.5`. Transport is an ASCII
+protocol version `josh/1.6`. Transport is an ASCII
 decimal byte length, `:`, exactly that many UTF-8 JSON bytes, and `,`. Frames are
 bounded before allocation. JSON objects reject duplicate and unknown fields;
 request IDs and methods are validated before entering connection state.
 
-The host sends `initialize` once with `protocol_versions: ["josh/1.5"]`, one
+The host sends `initialize` once with `protocol_versions: ["josh/1.6"]`, one
 execution mode, an invoking-session identity or `null`, limits, and standard
 capabilities.
-The runtime selects `josh/1.5` or rejects initialization. The result contains
-the runtime identity, effective limits, and the current feature set. There is no
-minor-version fallback.
+The runtime selects `josh/1.6` or rejects initialization. The result contains
+the runtime identity, effective limits, and the current feature set, including
+`host-projection`. There is no minor-version fallback.
 
-After initialization the host may freeze a tool catalog, load source or one
-current artifact, start and cancel executions, answer provider requests, and
-receive ordered execution events and one terminal response. Direction-scoped
-request IDs, active-request bounds, cancellation tombstones, and strict method
-state prevent duplicate, late, or cross-direction responses from resuming work.
+The required connection prefix is
+`initialize -> host/project -> catalog/set`. `host/project` is a host-to-runtime
+request, is single-assignment, and is valid only after successful initialization
+and before catalog freezing. Skipping, repeating, concurrently duplicating, or
+sending it in the wrong direction or state is rejected. After catalog freezing,
+the host may load source or one current artifact, start and cancel executions,
+answer provider requests, and receive ordered execution events and one terminal
+response. Direction-scoped request IDs, active-request bounds, cancellation
+tombstones, and strict method state prevent duplicate, late, or cross-direction
+responses from resuming work.
+
+`host/project` uses profile `josh.host-projection/0.1`. Its parameters contain
+exactly `profile`, one bounded opaque `projection_id`, the same `host` identity
+sent in `initialize`, one `session_binding`, and exactly ten complete section
+records in this canonical order:
+
+1. `tools`
+2. `resources`
+3. `attachments`
+4. `transcript`
+5. `models`
+6. `user_interaction`
+7. `agents`
+8. `roots`
+9. `permissions`
+10. `telemetry`
+
+Each section contains its `kind`, bounded nonempty `source` and
+`source_revision`, nonzero `observed_at_unix_ms`, `current` or `cached`
+`freshness`, `complete: true`, and an `item_count` from zero through 1,048,576.
+Completeness means that the producer accounted for the whole section under its
+declared policy; it does not grant use of any item. Phase 1 projects section
+manifests and counts. It does not yet carry typed items for the non-tool
+sections or make those items available to ALLEN.
+
+`session_binding` is exactly `none`, `prompt_assisted`, or `authenticated`.
+Unattended initialization requires `none`. Attached initialization requires
+`prompt_assisted` or `authenticated`. Prompt-assisted means only that an
+adapter can return provider work to the current prompt; it does not prove the
+invoking actor or session, authorize identity receipts, or permit the adapter
+to claim authenticated binding.
+
+After strict JSON decoding and semantic validation, JOSH serializes the typed
+`HostProjectionSetParams` in its declared struct and canonical section order,
+hashes those compact UTF-8 JSON bytes with SHA-256, and returns
+`projection_digest` as lowercase `sha256:<64 hex digits>` together with the
+validated request under `projection`. Supplied digests are not accepted. This
+is the phase-1 canonical encoding; it is deterministic for the fixed typed
+structure but is not a general JSON canonicalization scheme.
+
+Phase 1 does not bind `projection_digest` into execution accepted events,
+artifacts, or replay records. Before projected non-tool context or authority can
+affect an execution, a later protocol revision must add that binding explicitly.
 
 `catalog/set` carries source, source revision, observation time, freshness, and
 an explicit completeness claim alongside the sorted typed definitions. The
 runtime refuses an incomplete catalog before program loading. A successful
 result returns the frozen catalog digest, schema profile, tool count, the same
 metadata, and sorted name, version, and description summaries. Descriptions are
-display metadata and do not change the typed contract digest.
+display metadata and do not change the typed contract digest. Before freezing
+the catalog, JOSH requires the catalog metadata fields and exact tool count to
+equal the frozen `tools` projection section. A mismatch returns
+`projection.mismatch` and freezes no partial catalog state.
+
+`projection.invalid` rejects malformed projection content or a repeated
+session-level projection. `projection.mismatch` rejects initialized-host,
+execution-mode/session-binding, or projected-tool/catalog disagreement.
+Protocol direction and lifecycle violations continue to use the existing
+request/protocol state errors.
 
 The protocol routes invoking-agent messages, typed agent questions, transcript
 snapshots, model and user prompts, sub-agent creation/run/message/ask, permission
@@ -457,11 +514,15 @@ content, package digests, and lock data before it creates a program ID. Missing,
 extra, changed, escaping, and oversized resources fail `program/load`; the host
 does not read the runner's package directory.
 
-A successful `program/load` includes sorted `exec_commands` and
-`exec_environment` names from the verified artifact. `execution/start` adds
-sorted canonical `granted_exec` and `granted_exec_environment` lists. The
-`exec-run` feature declares support for those fields. Unknown fields, malformed
-patterns/names, duplicates, and unsorted lists are protocol errors.
+A successful `program/load` includes `required_tools`, the sorted unique exact
+tool names derived from the independently verified artifact manifest, plus
+sorted `exec_commands` and `exec_environment` names from that same manifest.
+This result reports requirements; it grants no authority. Hosts use it when
+selecting the exact per-execution `granted_tools`, and must not infer grants by
+searching source text. `execution/start` also adds sorted canonical
+`granted_exec` and `granted_exec_environment` lists. The `exec-run` feature
+declares support for those fields. Unknown fields, malformed names or patterns,
+duplicates, and unsorted lists are protocol errors.
 
 ### 10.1 Headless Executor tool provider
 
@@ -507,7 +568,7 @@ stderr, credentials, or paths.
 
 This adapter does not retry, run `executor resume`, open an approval flow, or
 fall back to a shell, agent, model, or another provider. It uses the existing
-`josh/1.5` `tool/invoke` request and response shapes, so it adds no protocol
+`josh/1.6` `tool/invoke` request and response shapes, so it adds no protocol
 method, feature string, or compatibility branch. Current recording captures
 the validated tool boundary result; replay returns that recorded result and
 does not start Executor.

@@ -36,8 +36,10 @@ both kinds of access.
 
 Never run callback effects through unattended `josh run`. It is not bound to
 the current task. The MCP bridge is prompt-assisted and does not prove caller
-identity, export a complete tool registry, issue signed receipts, or isolate
-child-agent authority.
+identity, discover a complete tool registry by default, issue signed receipts,
+or isolate child-agent authority. A native host may inject a frozen projection,
+catalog, and authorization snapshot, but that does not authenticate the bridge
+or add native callback routing.
 
 Use JOSH/ALLEN for a natural work request when all of these are true:
 

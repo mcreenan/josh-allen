@@ -46,6 +46,9 @@ fn active_host(params: &InitializeParams) -> ProtocolTracker {
     host.register_outgoing_request("init", "initialize")
         .unwrap();
     host.initialize_succeeded_with(params).unwrap();
+    host.register_outgoing_request("projection", "host/project")
+        .unwrap();
+    host.projection_succeeded().unwrap();
     host.register_outgoing_request("catalog", "catalog/set")
         .unwrap();
     host.catalog_succeeded().unwrap();
@@ -61,6 +64,7 @@ fn active_host(params: &InitializeParams) -> ProtocolTracker {
 fn active_runtime(params: &InitializeParams) -> ProtocolTracker {
     let mut runtime = ProtocolTracker::new(PeerRole::Runtime, 16);
     runtime.initialize_succeeded_with(params).unwrap();
+    runtime.projection_succeeded().unwrap();
     runtime.catalog_succeeded().unwrap();
     runtime.program_loaded().unwrap();
     runtime.execution_started_with("exec-1").unwrap();
@@ -292,6 +296,11 @@ fn tracks_same_text_id_independently_by_direction() {
     runtime.receive(&request("init", "initialize")).unwrap();
     runtime.initialize_succeeded().unwrap();
     runtime.commit_response("init").unwrap();
+    runtime
+        .receive(&request("projection", "host/project"))
+        .unwrap();
+    runtime.projection_succeeded().unwrap();
+    runtime.commit_response("projection").unwrap();
     runtime.receive(&request("catalog", "catalog/set")).unwrap();
     runtime.catalog_succeeded().unwrap();
     runtime.commit_response("catalog").unwrap();
@@ -325,6 +334,11 @@ fn rejects_duplicates_unknown_responses_and_active_overflow() {
     bounded.receive(&request("init", "initialize")).unwrap();
     bounded.initialize_succeeded().unwrap();
     bounded.commit_response("init").unwrap();
+    bounded
+        .receive(&request("projection", "host/project"))
+        .unwrap();
+    bounded.projection_succeeded().unwrap();
+    bounded.commit_response("projection").unwrap();
     bounded.receive(&request("catalog", "catalog/set")).unwrap();
     bounded.catalog_succeeded().unwrap();
     bounded.commit_response("catalog").unwrap();
@@ -363,11 +377,93 @@ fn enforces_method_direction_and_state() {
 }
 
 #[test]
+fn host_projection_cannot_be_skipped_duplicated_repeated_or_sent_after_catalog() {
+    let mut runtime = ProtocolTracker::new(PeerRole::Runtime, 8);
+    runtime.receive(&request("init", "initialize")).unwrap();
+    runtime.initialize_succeeded().unwrap();
+    runtime.commit_response("init").unwrap();
+
+    assert_eq!(
+        runtime
+            .receive(&request("catalog-skipped", "catalog/set"))
+            .unwrap_err()
+            .code,
+        WireErrorCode::RequestInvalidState
+    );
+
+    runtime
+        .receive(&request("projection-active", "host/project"))
+        .unwrap();
+    assert_eq!(
+        runtime
+            .receive(&request("projection-duplicate", "host/project"))
+            .unwrap_err()
+            .code,
+        WireErrorCode::RequestInvalidState
+    );
+    runtime.projection_succeeded().unwrap();
+    runtime.commit_response("projection-active").unwrap();
+
+    assert_eq!(
+        runtime
+            .receive(&request("projection-repeated", "host/project"))
+            .unwrap_err()
+            .code,
+        WireErrorCode::RequestInvalidState
+    );
+
+    runtime.receive(&request("catalog", "catalog/set")).unwrap();
+    runtime.catalog_succeeded().unwrap();
+    runtime.commit_response("catalog").unwrap();
+    assert_eq!(
+        runtime
+            .receive(&request("projection-after-catalog", "host/project"))
+            .unwrap_err()
+            .code,
+        WireErrorCode::RequestInvalidState
+    );
+}
+
+#[test]
+fn host_projection_has_exactly_one_wire_direction() {
+    let initialized = initialize_for("unattended", &json!(null));
+
+    let mut host_receiver = ProtocolTracker::new(PeerRole::Host, 4);
+    host_receiver
+        .initialize_succeeded_with(&initialized)
+        .unwrap();
+    assert_eq!(
+        host_receiver
+            .receive(&request("projection", "host/project"))
+            .unwrap_err()
+            .code,
+        WireErrorCode::RequestMethodNotFound
+    );
+
+    let mut runtime_sender = ProtocolTracker::new(PeerRole::Runtime, 4);
+    runtime_sender
+        .initialize_succeeded_with(&initialized)
+        .unwrap();
+    assert_eq!(
+        runtime_sender
+            .register_outgoing_request("projection", "host/project")
+            .unwrap_err()
+            .code,
+        WireErrorCode::RequestMethodNotFound
+    );
+}
+
+#[test]
 fn state_allows_program_load_during_an_active_execution() {
     let mut runtime = ProtocolTracker::new(PeerRole::Runtime, 8);
     runtime.receive(&request("init", "initialize")).unwrap();
     runtime.initialize_succeeded().unwrap();
     runtime.commit_response("init").unwrap();
+    runtime
+        .receive(&request("projection", "host/project"))
+        .unwrap();
+    runtime.projection_succeeded().unwrap();
+    runtime.commit_response("projection").unwrap();
     runtime.receive(&request("catalog", "catalog/set")).unwrap();
     runtime.catalog_succeeded().unwrap();
     runtime.commit_response("catalog").unwrap();
@@ -557,6 +653,7 @@ fn every_bound_request_has_one_direction_and_active_state() {
 
     let mut inactive = ProtocolTracker::new(PeerRole::Host, 8);
     inactive.initialize_succeeded_with(&attached).unwrap();
+    inactive.projection_succeeded().unwrap();
     inactive.catalog_succeeded().unwrap();
     inactive.program_loaded().unwrap();
     assert_eq!(

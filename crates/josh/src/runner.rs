@@ -13,11 +13,12 @@ use allen_schema::{
 use base64::Engine as _;
 use josh_protocol::{
     CatalogMetadata, CatalogSetParams, CatalogSetResult, DEFAULT_MAX_FRAME_BYTES, ExecutionMode,
-    ExecutionResult, ExecutionStartParams, FrameReader, InitializeParams, InitializeResult,
-    InvokingSessionId, PeerInfo, ProgramLoadParams, ProgramLoadResult, ProtocolLimits,
-    RuntimeReadyParams, SCHEMA_DIALECT, SerializedWriter, SourceFile, ToolInvokeParams, Validate,
-    WireError, WireErrorCode, WireMessage, decode_value, notification_params, request_params,
-    response_result,
+    ExecutionResult, ExecutionStartParams, FrameReader, HOST_PROJECTION_PROFILE,
+    HostProjectionSetParams, HostProjectionSetResult, InitializeParams, InitializeResult,
+    InvokingSessionId, PeerInfo, ProgramLoadParams, ProgramLoadResult, ProjectionSection,
+    ProjectionSectionKind, ProtocolLimits, RuntimeReadyParams, SCHEMA_DIALECT, SerializedWriter,
+    SessionBindingLevel, SourceFile, ToolInvokeParams, Validate, WireError, WireErrorCode,
+    WireMessage, decode_value, notification_params, request_params, response_result,
 };
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -90,7 +91,9 @@ fn execute(options: &RunOptions) -> Result<ExecutionResult, String> {
             extensions: Vec::new(),
         };
         let _: InitializeResult = client.request("h-1", "initialize", &initialize)?;
-        let catalog_result: CatalogSetResult = client.request("h-2", "catalog/set", &catalog)?;
+        let projection = host_projection(&initialize.host, &catalog);
+        let _: HostProjectionSetResult = client.request("h-2", "host/project", &projection)?;
+        let catalog_result: CatalogSetResult = client.request("h-3", "catalog/set", &catalog)?;
         let frozen_catalog = freeze_catalog(&catalog, &catalog_result)?;
         let load = load_params(Path::new(&options.path), &frozen_catalog)?;
         if options.executor {
@@ -100,7 +103,7 @@ fn execute(options: &RunOptions) -> Result<ExecutionResult, String> {
                 &options.granted_tools,
             )?);
         }
-        let loaded: ProgramLoadResult = client.request("h-3", "program/load", &load)?;
+        let loaded: ProgramLoadResult = client.request("h-4", "program/load", &load)?;
         let input = if options.catalog_input {
             serde_json::to_value(&catalog_result)
                 .map_err(|error| format!("cannot encode frozen catalog input: {error}"))?
@@ -121,7 +124,7 @@ fn execute(options: &RunOptions) -> Result<ExecutionResult, String> {
             granted_exec_environment: options.granted_exec_environment.clone(),
             limits,
         };
-        client.request("h-4", "execution/start", &start)
+        client.request("h-5", "execution/start", &start)
     })();
     client.finish(result.is_ok())?;
     result
@@ -153,6 +156,48 @@ fn current_unix_ms() -> Result<u64, String> {
         .duration_since(UNIX_EPOCH)
         .map_err(|_| "system clock is before the Unix epoch".to_owned())?;
     u64::try_from(elapsed.as_millis()).map_err(|_| "system clock value is too large".to_owned())
+}
+
+fn host_projection(host: &PeerInfo, catalog: &CatalogSetParams) -> HostProjectionSetParams {
+    let sections = ProjectionSectionKind::ALL
+        .into_iter()
+        .map(|kind| {
+            let (source, source_revision, observed_at_unix_ms, freshness, item_count) =
+                if kind == ProjectionSectionKind::Tools {
+                    (
+                        catalog.metadata.source.clone(),
+                        catalog.metadata.source_revision.clone(),
+                        catalog.metadata.observed_at_unix_ms,
+                        catalog.metadata.freshness,
+                        u64::try_from(catalog.tools.len()).unwrap_or(u64::MAX),
+                    )
+                } else {
+                    (
+                        host.name.clone(),
+                        host.version.clone(),
+                        catalog.metadata.observed_at_unix_ms,
+                        josh_protocol::CatalogFreshness::Current,
+                        0,
+                    )
+                };
+            ProjectionSection {
+                kind,
+                source,
+                source_revision,
+                observed_at_unix_ms,
+                freshness,
+                complete: true,
+                item_count,
+            }
+        })
+        .collect();
+    HostProjectionSetParams {
+        profile: HOST_PROJECTION_PROFILE.to_owned(),
+        projection_id: "josh-runner-projection".to_owned(),
+        host: host.clone(),
+        session_binding: SessionBindingLevel::None,
+        sections,
+    }
 }
 
 fn protocol_limits() -> ProtocolLimits {

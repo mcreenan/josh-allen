@@ -21,6 +21,7 @@ pub enum PeerRole {
 pub enum ConnectionState {
     New,
     Initialized,
+    Projected,
     CatalogFrozen,
     ProgramLoaded,
     Disconnected,
@@ -314,12 +315,27 @@ impl ProtocolTracker {
     ///
     /// Returns a fatal error when the connection is not initialized.
     pub fn catalog_succeeded(&mut self) -> Result<(), RequestStateError> {
-        if self.state != ConnectionState::Initialized {
+        if self.state != ConnectionState::Projected {
             return Err(RequestStateError::fatal(
                 "catalog state transition is invalid",
             ));
         }
         self.state = ConnectionState::CatalogFrozen;
+        Ok(())
+    }
+
+    /// Records a successfully frozen host projection.
+    ///
+    /// # Errors
+    ///
+    /// Returns a fatal error when the connection is not initialized.
+    pub fn projection_succeeded(&mut self) -> Result<(), RequestStateError> {
+        if self.state != ConnectionState::Initialized {
+            return Err(RequestStateError::fatal(
+                "host projection state transition is invalid",
+            ));
+        }
+        self.state = ConnectionState::Projected;
         Ok(())
     }
 
@@ -416,12 +432,14 @@ impl ProtocolTracker {
         }
         self.check_method(method, true)?;
         self.validate_request_binding(message)?;
-        if matches!(method.as_str(), "initialize" | "catalog/set")
-            && self
-                .incoming
-                .values()
-                .chain(self.outgoing.values())
-                .any(|active| active == method)
+        if matches!(
+            method.as_str(),
+            "initialize" | "host/project" | "catalog/set"
+        ) && self
+            .incoming
+            .values()
+            .chain(self.outgoing.values())
+            .any(|active| active == method)
         {
             return Err(RequestStateError::request(
                 WireErrorCode::RequestInvalidState,
@@ -592,7 +610,9 @@ impl ProtocolTracker {
             (PeerRole::Host, false) | (PeerRole::Runtime, true) => PeerRole::Host,
         };
         let defined_sender = match method {
-            "initialize" | "catalog/set" | "program/load" | "execution/start" => PeerRole::Host,
+            "initialize" | "host/project" | "catalog/set" | "program/load" | "execution/start" => {
+                PeerRole::Host
+            }
             "tool/invoke" | "agent/message" | "agent/ask" | "agent/transcript"
             | "permission/request" | "model/request" | "user/ask" | "sub_agent/create"
             | "sub_agent/run" | "sub_agent/message" | "sub_agent/ask" => PeerRole::Runtime,
@@ -611,7 +631,8 @@ impl ProtocolTracker {
         }
         let valid_state = match method {
             "initialize" => self.state == ConnectionState::New,
-            "catalog/set" => self.state == ConnectionState::Initialized,
+            "host/project" => self.state == ConnectionState::Initialized,
+            "catalog/set" => self.state == ConnectionState::Projected,
             "program/load" => matches!(
                 self.state,
                 ConnectionState::CatalogFrozen | ConnectionState::ProgramLoaded

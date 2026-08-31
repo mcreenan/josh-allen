@@ -68,13 +68,22 @@ fn execution_cannot_gain_negotiated_but_undeclared_authority() {
     let mut initialize = common::initialize_params();
     initialize.standard_capabilities = vec!["fs.read".to_owned()];
     session.initialize(&initialize).unwrap();
+    let catalog = CatalogSetParams {
+        schema_dialect: josh_protocol::SCHEMA_DIALECT.to_owned(),
+        metadata: josh_protocol::CatalogMetadata::complete("test-host", "1", 1),
+        tools: Vec::new(),
+    };
     session
-        .set_catalog(&CatalogSetParams {
-            schema_dialect: josh_protocol::SCHEMA_DIALECT.to_owned(),
-            metadata: josh_protocol::CatalogMetadata::complete("test-host", "1", 1),
-            tools: Vec::new(),
-        })
+        .set_projection(
+            &josh_protocol::HostProjectionSetParams::complete_for_catalog(
+                "test-projection",
+                initialize.host,
+                josh_protocol::SessionBindingLevel::None,
+                &catalog,
+            ),
+        )
         .unwrap();
+    session.set_catalog(&catalog).unwrap();
     let loaded = common::load_unit_program(&mut session);
     let mut params = common::execution_params(loaded, "exec-authority");
     params.granted_capabilities.push("fs.read".to_owned());

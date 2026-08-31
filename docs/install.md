@@ -86,6 +86,90 @@ By default, the server treats the current project as its workspace. Set
 `JOSH_ALLEN_WORKSPACE` to an absolute directory when the host launches the
 server from another location.
 
+## Inject a host projection into the MCP bridge
+
+By default, the packaged bridge projects only its built-in
+`allen_integration_echo` tool and reports empty inventories for resources,
+attachments, transcript, models, user interaction, agents, roots, permissions,
+and telemetry. A native host adapter can set
+`JOSH_ALLEN_HOST_PROJECTION_PATH` to a host-owned JSON file that replaces that
+default projection and catalog:
+
+```sh
+JOSH_ALLEN_HOST_PROJECTION_PATH=/absolute/path/host-projection.json
+```
+
+The file is read once when the bridge object is constructed, before any JOSH
+process is spawned. All sessions created by that bridge use this immutable
+snapshot; changing the file later has no effect until the agent host restarts
+or reconstructs the bridge. The file must be one UTF-8 JSON value no larger
+than 1,048,576 bytes, with no duplicate object keys and exactly these three
+top-level keys:
+
+- `projection`: the exact `josh.host-projection/0.1` parameters sent through
+  `host/project`;
+- `catalog`: the complete canonical parameters sent through `catalog/set`; and
+- `granted_tools`: at most 256 sorted unique nonempty tool names authorized by
+  host policy for executions through this bridge.
+
+The projection must use `session_binding: "prompt_assisted"`, because the MCP
+bridge can return callbacks through the current prompt but does not
+authenticate the invoking actor or session. The projection host becomes the
+`initialize.host` identity. The catalog metadata and tool count must exactly
+match the projection's `tools` section. JOSH performs the detailed projection,
+catalog, and artifact validation.
+
+After `program/load`, the bridge reads the exact `required_tools` names derived
+from the verified artifact. It rejects any requirement absent from
+`granted_tools` and otherwise sends exactly the required list in
+`execution/start`; mentioning a tool name in source text never grants it.
+Discovery and authorization remain separate, and this injection does not add
+native provider dispatch: supported callbacks still return `next_action` to
+the current prompt.
+
+This minimal bundle projects an empty tool catalog:
+
+```json
+{
+  "projection": {
+    "profile": "josh.host-projection/0.1",
+    "projection_id": "host-snapshot-1",
+    "host": {"name": "example-host", "version": "1.0.0"},
+    "session_binding": "prompt_assisted",
+    "sections": [
+      {"kind": "tools", "source": "example-host", "source_revision": "snapshot-1", "observed_at_unix_ms": 1770000000000, "freshness": "current", "complete": true, "item_count": 0},
+      {"kind": "resources", "source": "example-host", "source_revision": "snapshot-1", "observed_at_unix_ms": 1770000000000, "freshness": "current", "complete": true, "item_count": 0},
+      {"kind": "attachments", "source": "example-host", "source_revision": "snapshot-1", "observed_at_unix_ms": 1770000000000, "freshness": "current", "complete": true, "item_count": 0},
+      {"kind": "transcript", "source": "example-host", "source_revision": "snapshot-1", "observed_at_unix_ms": 1770000000000, "freshness": "current", "complete": true, "item_count": 0},
+      {"kind": "models", "source": "example-host", "source_revision": "snapshot-1", "observed_at_unix_ms": 1770000000000, "freshness": "current", "complete": true, "item_count": 0},
+      {"kind": "user_interaction", "source": "example-host", "source_revision": "snapshot-1", "observed_at_unix_ms": 1770000000000, "freshness": "current", "complete": true, "item_count": 0},
+      {"kind": "agents", "source": "example-host", "source_revision": "snapshot-1", "observed_at_unix_ms": 1770000000000, "freshness": "current", "complete": true, "item_count": 0},
+      {"kind": "roots", "source": "example-host", "source_revision": "snapshot-1", "observed_at_unix_ms": 1770000000000, "freshness": "current", "complete": true, "item_count": 0},
+      {"kind": "permissions", "source": "example-host", "source_revision": "snapshot-1", "observed_at_unix_ms": 1770000000000, "freshness": "current", "complete": true, "item_count": 0},
+      {"kind": "telemetry", "source": "example-host", "source_revision": "snapshot-1", "observed_at_unix_ms": 1770000000000, "freshness": "current", "complete": true, "item_count": 0}
+    ]
+  },
+  "catalog": {
+    "schema_dialect": "https://json-schema.org/draft/2020-12/schema",
+    "metadata": {
+      "source": "example-host",
+      "source_revision": "snapshot-1",
+      "observed_at_unix_ms": 1770000000000,
+      "freshness": "current",
+      "complete": true
+    },
+    "tools": []
+  },
+  "granted_tools": []
+}
+```
+
+Treat this file as authority-bearing host configuration: create it from a
+trusted adapter, restrict who can modify it, and avoid secrets in projection
+metadata. The current bridge follows symlinks and does not verify file owner or
+permission bits; the launching host is responsible for path, ownership, mode,
+and replacement safety.
+
 The MCP bridge accepts manifest-first `.allen` files inside that workspace. It
 supports typed agent, model, user, tool, and child-agent callbacks. It does not
 grant filesystem or network capabilities. Use `josh run` for those effects.

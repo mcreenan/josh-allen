@@ -62,6 +62,12 @@ identities, and affine lazy sequences.
 Finish one feature as a complete current-language change before marking its
 checkbox complete. A parser-only implementation does not complete a feature.
 
+## Accepted
+
+| ID | Proposal | Summary | Delivery state |
+|---|---|---|---|
+| PD-11 | [Authenticated host projection and native provider routing](roadmap/proposals/PD-11.md) | Project the host's complete tools, context facilities, providers, authority surfaces, limits, and telemetry into JOSH through one frozen contract; then replace prompt-assisted forwarding with native adapters. | Phase 1 implemented |
+
 ## Proposed
 
 | ID | Proposal | Summary | Main dependencies |

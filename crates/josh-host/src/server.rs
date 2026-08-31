@@ -27,15 +27,15 @@ use allen_vm::{
 use josh_protocol::{
     AgentAskParams, AgentMessageParams, AgentMessageResult, AgentTranscriptParams,
     AgentTranscriptResult, CatalogSetParams, EventKind, ExecutionEventParams, ExecutionResult,
-    ExecutionStartParams, FrameReader, GrantDuration, InitializeParams, ModelRequestParams,
-    PeerInfo, PermissionRequestParams, PermissionRequestResult, PermissionRevokeParams,
-    PermissionRight, PermissionTargetKind, ProgramLoadParams, PromptPolicy, PromptSegmentPayload,
-    ProtocolError, ProtocolTracker, ReceiveAction, ResponseSchemaPayload, RuntimeReadyParams,
-    StructuredPromptPayload, SubAgentAskParams, SubAgentCreateParams, SubAgentCreateResult,
-    SubAgentMessageParams, SubAgentProjectionPayload, SubAgentRunParams, ToolInvokeParams,
-    ToolInvokeResult, TranscriptPart, TranscriptRole, TypedResponseResult, UserAskParams, Validate,
-    ValidationIssuePayload, WireError, WireErrorCode, WireMessage, encode_frame,
-    notification_params, request_params, response_result,
+    ExecutionStartParams, FrameReader, GrantDuration, HostProjectionSetParams, InitializeParams,
+    ModelRequestParams, PeerInfo, PermissionRequestParams, PermissionRequestResult,
+    PermissionRevokeParams, PermissionRight, PermissionTargetKind, ProgramLoadParams, PromptPolicy,
+    PromptSegmentPayload, ProtocolError, ProtocolTracker, ReceiveAction, ResponseSchemaPayload,
+    RuntimeReadyParams, StructuredPromptPayload, SubAgentAskParams, SubAgentCreateParams,
+    SubAgentCreateResult, SubAgentMessageParams, SubAgentProjectionPayload, SubAgentRunParams,
+    ToolInvokeParams, ToolInvokeResult, TranscriptPart, TranscriptRole, TypedResponseResult,
+    UserAskParams, Validate, ValidationIssuePayload, WireError, WireErrorCode, WireMessage,
+    encode_frame, notification_params, request_params, response_result,
 };
 use serde_json::Value;
 
@@ -188,6 +188,21 @@ where
                                 let mut state = lock_tracker(&tracker)?;
                                 state.commit_response(id).map_err(state_error)?;
                                 state.catalog_succeeded().map_err(state_error)?;
+                            }
+                            Err(error) => finish_failed_request(&writer, &tracker, id, error)?,
+                        }
+                    }
+                    "host/project" => {
+                        let result =
+                            request_params::<HostProjectionSetParams>(&message, "host/project")
+                                .map_err(invalid_request)
+                                .and_then(|params| lock_session(&session)?.set_projection(&params));
+                        match result {
+                            Ok(result) => {
+                                write_result(&writer, id, &result)?;
+                                let mut state = lock_tracker(&tracker)?;
+                                state.commit_response(id).map_err(state_error)?;
+                                state.projection_succeeded().map_err(state_error)?;
                             }
                             Err(error) => finish_failed_request(&writer, &tracker, id, error)?,
                         }
@@ -3411,12 +3426,14 @@ mod tests {
     use super::*;
     use std::io;
 
-    const ALL_WIRE_ERROR_CODES: [WireErrorCode; 24] = [
+    const ALL_WIRE_ERROR_CODES: [WireErrorCode; 26] = [
         WireErrorCode::RequestInvalid,
         WireErrorCode::RequestMethodNotFound,
         WireErrorCode::RequestInvalidState,
         WireErrorCode::RequestLimit,
         WireErrorCode::RequestCancelled,
+        WireErrorCode::ProjectionInvalid,
+        WireErrorCode::ProjectionMismatch,
         WireErrorCode::CatalogInvalid,
         WireErrorCode::CatalogMismatch,
         WireErrorCode::ProgramInvalid,
@@ -3445,6 +3462,8 @@ mod tests {
             | WireErrorCode::RequestInvalidState
             | WireErrorCode::RequestLimit
             | WireErrorCode::RequestCancelled
+            | WireErrorCode::ProjectionInvalid
+            | WireErrorCode::ProjectionMismatch
             | WireErrorCode::CatalogInvalid
             | WireErrorCode::CatalogMismatch
             | WireErrorCode::ProgramInvalid

@@ -6,8 +6,8 @@ use allen_compiler::assemble_root_source_package;
 use allen_package::LoadLimits;
 use josh_protocol::{
     CatalogSetParams, ExecutionMode, ExecutionStartParams, FileEncoding, FrameReader,
-    InitializeParams, InvokingSessionId, PeerInfo, ProgramLoadParams, ProtocolLimits, SourceFile,
-    WireMessage, encode_frame,
+    HostProjectionSetParams, InitializeParams, InvokingSessionId, PeerInfo, ProgramLoadParams,
+    ProtocolLimits, SessionBindingLevel, SourceFile, WireMessage, encode_frame,
 };
 use serde_json::json;
 
@@ -181,6 +181,18 @@ fn raw_stdio_routes_all_sub_agent_operations_without_an_invoking_session() {
         } if id == "h-1" => {}
         message => panic!("unexpected initialize response: {message:?}"),
     }
+
+    let projection = HostProjectionSetParams::complete_for_catalog(
+        "sub-agent-stdio-projection",
+        initialize.host.clone(),
+        SessionBindingLevel::None,
+        &catalog,
+    );
+    send(&mut stdin, "h-p", "host/project", &projection);
+    assert!(matches!(
+        receive(&mut stdout),
+        WireMessage::Response { id, result: Some(_), error: None } if id == "h-p"
+    ));
 
     send(&mut stdin, "h-2", "catalog/set", &catalog);
     assert!(matches!(

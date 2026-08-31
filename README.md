@@ -42,7 +42,7 @@ still the simpler choice for a direct task.
 
 JOSH/ALLEN is early alpha. During the `0.1.x` series, the repository supports
 one source language, bytecode format, runtime contract, replay format, and
-`josh/1.5` protocol. The current runtime rejects artifacts from older builds.
+`josh/1.6` protocol. The current runtime rejects artifacts from older builds.
 
 A breaking change replaces the previous language and artifacts. The same
 change must update the implementation, specifications, tests, conformance

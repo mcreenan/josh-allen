@@ -55,6 +55,50 @@ fn receive(reader: &mut FrameReader<impl std::io::Read>) -> WireMessage {
     reader.read_message().unwrap().unwrap()
 }
 
+fn projection_value(
+    initialize: &serde_json::Value,
+    catalog: &serde_json::Value,
+) -> serde_json::Value {
+    let metadata = &catalog["metadata"];
+    let tool_count = catalog["tools"].as_array().map_or(0, Vec::len);
+    let sections = [
+        "tools",
+        "resources",
+        "attachments",
+        "transcript",
+        "models",
+        "user_interaction",
+        "agents",
+        "roots",
+        "permissions",
+        "telemetry",
+    ]
+    .into_iter()
+    .map(|kind| {
+        json!({
+            "kind":kind,
+            "source":metadata["source"],
+            "source_revision":metadata["source_revision"],
+            "observed_at_unix_ms":metadata["observed_at_unix_ms"],
+            "freshness":metadata["freshness"],
+            "complete":true,
+            "item_count":if kind == "tools" { tool_count } else { 0 },
+        })
+    })
+    .collect::<Vec<_>>();
+    json!({
+        "profile":"josh.host-projection/0.1",
+        "projection_id":"tool-roundtrip-projection",
+        "host":initialize["host"],
+        "session_binding":if initialize["execution_mode"] == "attached" {
+            "prompt_assisted"
+        } else {
+            "none"
+        },
+        "sections":sections,
+    })
+}
+
 fn send_message(stdin: &mut impl Write, message: &WireMessage) {
     let frame = encode_frame(message, josh_protocol::DEFAULT_MAX_FRAME_BYTES).unwrap();
     stdin.write_all(&frame).unwrap();
@@ -540,6 +584,11 @@ fn run_parity_transcript(
     };
     let mut input = Vec::new();
     input.extend(request("h-1", "initialize", json!(initialize)));
+    input.extend(request(
+        "h-p",
+        "host/project",
+        projection_value(&json!(initialize), &json!(catalog)),
+    ));
     input.extend(request("h-2", "catalog/set", json!(catalog)));
     input.extend(request("h-3", "program/load", json!(load)));
     input.extend(request("h-4", "execution/start", json!(start)));
@@ -738,11 +787,13 @@ optional = []
     ] {
         let mut input = Vec::new();
         input.extend(request("h-1", "initialize", json!(initialize)));
+        let catalog = json!({"schema_dialect":josh_protocol::SCHEMA_DIALECT,"metadata":{"source":"test-host","source_revision":"1","observed_at_unix_ms":1,"freshness":"current","complete":true},"tools":[]});
         input.extend(request(
-            "h-2",
-            "catalog/set",
-            json!({"schema_dialect":josh_protocol::SCHEMA_DIALECT,"metadata":{"source":"test-host","source_revision":"1","observed_at_unix_ms":1,"freshness":"current","complete":true},"tools":[]}),
+            "h-p",
+            "host/project",
+            projection_value(&json!(initialize), &catalog),
         ));
+        input.extend(request("h-2", "catalog/set", catalog));
         input.extend(request("h-3", "program/load", json!(load)));
         input.extend(request("h-4", "execution/start", json!(start)));
         let response_offset = u64::try_from(input.len()).unwrap();
@@ -994,11 +1045,13 @@ optional = []
         };
         let mut input = Vec::new();
         input.extend(request("h-1", "initialize", json!(initialize)));
+        let catalog = json!({"schema_dialect":josh_protocol::SCHEMA_DIALECT,"metadata":{"source":"test-host","source_revision":"1","observed_at_unix_ms":1,"freshness":"current","complete":true},"tools":[]});
         input.extend(request(
-            "h-2",
-            "catalog/set",
-            json!({"schema_dialect":josh_protocol::SCHEMA_DIALECT,"metadata":{"source":"test-host","source_revision":"1","observed_at_unix_ms":1,"freshness":"current","complete":true},"tools":[]}),
+            "h-p",
+            "host/project",
+            projection_value(&json!(initialize), &catalog),
         ));
+        input.extend(request("h-2", "catalog/set", catalog));
         input.extend(request("h-3", "program/load", json!(load)));
         input.extend(request("h-4", "execution/start", json!(start)));
         let response_offset = u64::try_from(input.len()).unwrap();
@@ -1215,11 +1268,13 @@ optional = []
     };
     let mut input = Vec::new();
     input.extend(request("h-1", "initialize", json!(initialize)));
+    let catalog_value = json!({"schema_dialect":josh_protocol::SCHEMA_DIALECT,"metadata":{"source":"test-host","source_revision":"1","observed_at_unix_ms":1,"freshness":"current","complete":true},"tools":[]});
     input.extend(request(
-        "h-2",
-        "catalog/set",
-        json!({"schema_dialect":josh_protocol::SCHEMA_DIALECT,"metadata":{"source":"test-host","source_revision":"1","observed_at_unix_ms":1,"freshness":"current","complete":true},"tools":[]}),
+        "h-p",
+        "host/project",
+        projection_value(&json!(initialize), &catalog_value),
     ));
+    input.extend(request("h-2", "catalog/set", catalog_value));
     input.extend(request("h-3", "program/load", json!(stopped_load)));
     input.extend(request(
         "h-4",
@@ -1360,25 +1415,25 @@ fn active_connection_returns_when_writer_breaks_and_input_stays_open() {
         use std::fmt::Write as _;
         write!(artifact_digest, "{byte:02x}").unwrap();
     }
-    let requests = [
+    let initialize = json!({
+        "host":{"name":"broken-host","version":"1.0.0"},
+        "protocol_versions":[josh_protocol::PROTOCOL_VERSION],
+        "language_versions":[">=0.1.0, <0.2.0"],
+        "execution_mode":"unattended",
+        "invoking_session_id":null,
+        "standard_capabilities":[],
+        "limits":limits(),
+        "extensions":[]
+    });
+    let catalog = json!({"schema_dialect":josh_protocol::SCHEMA_DIALECT,"metadata":{"source":"test-host","source_revision":"1","observed_at_unix_ms":1,"freshness":"current","complete":true},"tools":[]});
+    let requests = vec![
+        ("h-1", "initialize", initialize.clone()),
         (
-            "h-1",
-            "initialize",
-            json!({
-                "host":{"name":"broken-host","version":"1.0.0"},
-                "protocol_versions":[josh_protocol::PROTOCOL_VERSION],
-                "language_versions":[">=0.1.0, <0.2.0"],
-                "execution_mode":"unattended",
-                "standard_capabilities":[],
-                "limits":limits(),
-                "extensions":[]
-            }),
+            "h-p",
+            "host/project",
+            projection_value(&initialize, &catalog),
         ),
-        (
-            "h-2",
-            "catalog/set",
-            json!({"schema_dialect":josh_protocol::SCHEMA_DIALECT,"metadata":{"source":"test-host","source_revision":"1","observed_at_unix_ms":1,"freshness":"current","complete":true},"tools":[]}),
-        ),
+        ("h-2", "catalog/set", catalog),
         (
             "h-3",
             "program/load",
@@ -1492,6 +1547,11 @@ fn in_memory_connection_matches_the_golden_tool_transcript() {
     };
     let mut input = Vec::new();
     input.extend(request("h-1", "initialize", json!(initialize)));
+    input.extend(request(
+        "h-p",
+        "host/project",
+        projection_value(&json!(initialize), &json!(catalog)),
+    ));
     input.extend(request("h-2", "catalog/set", json!(catalog)));
     input.extend(request("h-3", "program/load", json!(load)));
     input.extend(request("h-4", "execution/start", json!(start)));
@@ -1538,6 +1598,7 @@ fn in_memory_connection_matches_the_golden_tool_transcript() {
         [
             "runtime/ready",
             "h-1",
+            "h-p",
             "h-2",
             "h-3",
             "accepted",
@@ -1614,6 +1675,11 @@ fn run_terminal_script(
     };
     let mut input = Vec::new();
     input.extend(request("h-1", "initialize", json!(initialize)));
+    input.extend(request(
+        "h-p",
+        "host/project",
+        projection_value(&json!(initialize), &json!(catalog)),
+    ));
     input.extend(request("h-2", "catalog/set", json!(catalog)));
     input.extend(request("h-3", "program/load", json!(load)));
     input.extend(request("h-4", "execution/start", json!(start)));
@@ -1835,6 +1901,11 @@ fn late_tool_response_after_cancel_is_fatal_without_a_second_terminal() {
     };
     let mut input = Vec::new();
     input.extend(request("h-1", "initialize", json!(initialize)));
+    input.extend(request(
+        "h-p",
+        "host/project",
+        projection_value(&json!(initialize), &json!(catalog)),
+    ));
     input.extend(request("h-2", "catalog/set", json!(catalog)));
     input.extend(request("h-3", "program/load", json!(load)));
     input.extend(request(
@@ -2003,6 +2074,11 @@ fn wrong_domain_tool_error_stops_before_a_matched_retry() {
     };
     let mut input = Vec::new();
     input.extend(request("h-1", "initialize", json!(initialize)));
+    input.extend(request(
+        "h-p",
+        "host/project",
+        projection_value(&json!(initialize), &json!(catalog)),
+    ));
     input.extend(request("h-2", "catalog/set", json!(catalog)));
     input.extend(request("h-3", "program/load", json!(load)));
     input.extend(request("h-4", "execution/start", json!(start)));
@@ -2134,6 +2210,15 @@ fn tool_call_and_reentrant_program_load_complete_over_raw_stdio() {
     send(&mut stdin, "h-1", "initialize", &initialize);
     assert!(
         matches!(receive(&mut reader), WireMessage::Response { ref id, result: Some(_), .. } if id == "h-1")
+    );
+    send(
+        &mut stdin,
+        "h-p",
+        "host/project",
+        &projection_value(&json!(initialize), &json!(catalog)),
+    );
+    assert!(
+        matches!(receive(&mut reader), WireMessage::Response { ref id, result: Some(_), .. } if id == "h-p")
     );
     send(&mut stdin, "h-2", "catalog/set", &catalog);
     assert!(

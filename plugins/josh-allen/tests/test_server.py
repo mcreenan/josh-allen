@@ -10,6 +10,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from typing import Any
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).parents[1] / "mcp"))
 import server  # noqa: E402
@@ -148,6 +149,37 @@ class BridgeValidationTests(unittest.TestCase):
         self.assertNotIn("input", schema["required"])
         self.assertIn("zero parameters", schema["properties"]["input"]["description"])
         self.assertEqual(schema["properties"]["entry"]["default"], "main")
+
+    def test_projection_bundle_is_exact_bounded_and_duplicate_safe(self) -> None:
+        catalog = server.BridgeCatalogAdapter().snapshot()
+        valid = {
+            "projection": server._projection_for_catalog(catalog),
+            "catalog": catalog,
+            "granted_tools": ["allen_integration_echo"],
+        }
+        path = self.workspace / "projection.json"
+        path.write_text(json.dumps(valid), encoding="utf-8")
+        self.assertEqual(server._read_projection_bundle(path), valid)
+
+        for invalid in [
+            {"projection": valid["projection"], "catalog": catalog},
+            {**valid, "granted_tools": ["z.tool", "a.tool"]},
+            {**valid, "granted_tools": ["a.tool", "a.tool"]},
+        ]:
+            path.write_text(json.dumps(invalid), encoding="utf-8")
+            with self.assertRaises(server.BridgeError):
+                server._read_projection_bundle(path)
+
+        path.write_text(
+            '{"projection":{},"projection":{},"catalog":{},"granted_tools":[]}',
+            encoding="utf-8",
+        )
+        with self.assertRaisesRegex(server.BridgeError, "duplicate key"):
+            server._read_projection_bundle(path)
+
+        path.write_bytes(b"x" * (server.MAX_FRAME_BYTES + 1))
+        with self.assertRaisesRegex(server.BridgeError, "exceeds"):
+            server._read_projection_bundle(path)
 
     def test_prompt_showcases_are_short_mechanics_free_requests(self) -> None:
         prompt_dir = Path(__file__).parents[3] / "examples" / "josh-allen" / "showcases" / "prompts"
@@ -491,6 +523,46 @@ export async fn main(value: String) returns Result<tools.allen_integration_echo.
             finally:
                 bridge.close_all()
             self.assertEqual(outcome["terminal"], {"outcome": "completed", "output": {"tag": "Ok", "value": {"text": "hello"}}})
+
+    def test_injected_projection_authorizes_only_verified_artifact_requirements(self) -> None:
+        catalog = server.BridgeCatalogAdapter().snapshot()
+        bundle = {
+            "projection": server._projection_for_catalog(catalog),
+            "catalog": catalog,
+            "granted_tools": [],
+        }
+        required_source = '''manifest { language: "0.1" entry: main capabilities: [] tools: { required: [ { name: "allen_integration_echo", version: ">=1.0.0, <2.0.0" } ] } }
+export async fn main(value: String) returns Result<tools.allen_integration_echo.Output, tools.allen_integration_echo.Error> effects [tool.allen_integration_echo@1] { await tools.allen_integration_echo.call({ text: value }) }
+'''
+        mention_only_source = '''manifest { language: "0.1" entry: main capabilities: [] }
+export fn main() returns String { "allen_integration_echo" }
+'''
+        with tempfile.TemporaryDirectory() as temporary:
+            workspace = Path(temporary)
+            bundle_path = workspace / "projection.json"
+            bundle_path.write_text(json.dumps(bundle), encoding="utf-8")
+            (workspace / "required.allen").write_text(required_source, encoding="utf-8")
+            (workspace / "mention.allen").write_text(mention_only_source, encoding="utf-8")
+            with mock.patch.dict(
+                server.os.environ,
+                {"JOSH_ALLEN_HOST_PROJECTION_PATH": str(bundle_path)},
+            ):
+                bridge = server.Bridge(workspace, self.josh)
+                try:
+                    with self.assertRaisesRegex(server.BridgeError, "not authorized"):
+                        bridge.start({"source_path": "required.allen", "input": "hello"})
+                finally:
+                    bridge.close_all()
+
+                bridge = server.Bridge(workspace, self.josh)
+                try:
+                    completed = bridge.start({"source_path": "mention.allen"})
+                finally:
+                    bridge.close_all()
+            self.assertEqual(
+                completed["terminal"],
+                {"outcome": "completed", "output": "allen_integration_echo"},
+            )
 
     def test_repository_mvp_example_routes_every_provider_action(self) -> None:
         bridge = server.Bridge(self.repo_root, self.josh)

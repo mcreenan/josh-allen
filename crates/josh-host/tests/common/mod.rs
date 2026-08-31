@@ -11,7 +11,7 @@ use base64::Engine as _;
 use josh_host::Session;
 use josh_protocol::{
     CatalogSetParams, ExecutionMode, ExecutionStartParams, InitializeParams, InvokingSessionId,
-    PeerInfo, ProgramLoadParams, ProgramLoadResult, ProtocolLimits,
+    PeerInfo, ProgramLoadParams, ProgramLoadResult, ProtocolLimits, SessionBindingLevel,
 };
 
 pub fn initialize_params() -> InitializeParams {
@@ -39,14 +39,24 @@ pub fn initialize_params() -> InitializeParams {
 
 pub fn initialized_session() -> Session {
     let mut session = Session::new();
-    session.initialize(&initialize_params()).unwrap();
+    let initialize = initialize_params();
+    session.initialize(&initialize).unwrap();
+    let catalog = CatalogSetParams {
+        schema_dialect: josh_protocol::SCHEMA_DIALECT.to_owned(),
+        metadata: josh_protocol::CatalogMetadata::complete("test-host", "1", 1),
+        tools: Vec::new(),
+    };
     session
-        .set_catalog(&CatalogSetParams {
-            schema_dialect: josh_protocol::SCHEMA_DIALECT.to_owned(),
-            metadata: josh_protocol::CatalogMetadata::complete("test-host", "1", 1),
-            tools: Vec::new(),
-        })
+        .set_projection(
+            &josh_protocol::HostProjectionSetParams::complete_for_catalog(
+                "test-projection",
+                initialize.host,
+                SessionBindingLevel::None,
+                &catalog,
+            ),
+        )
         .unwrap();
+    session.set_catalog(&catalog).unwrap();
     session
 }
 

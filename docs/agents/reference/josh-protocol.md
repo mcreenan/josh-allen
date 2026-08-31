@@ -1,6 +1,6 @@
 # JOSH protocol reference for AI agents
 
-Status: Operational guide for the current `josh/1.5` protocol
+Status: Operational guide for the current `josh/1.6` protocol
 
 Entry point: [`docs/agents/README.md`](../README.md). The implementation
 specification is authoritative for runtime behavior.
@@ -69,7 +69,7 @@ negotiated protocol version:
   "method": "initialize",
   "params": {
     "host": {"name": "allen-host", "version": "0.1.0"},
-    "protocol_versions": ["josh/1.5"],
+    "protocol_versions": ["josh/1.6"],
     "language_versions": [">=0.1.0, <0.2.0"],
     "execution_mode": "attached",
     "invoking_session_id": "session-1",
@@ -91,11 +91,12 @@ negotiated protocol version:
 stable `invoking_session_id`; unattended mode sends it as `null`. Limits and
 standard capability names are canonical, bounded, sorted, and unique.
 
-The runtime either selects `josh/1.5` and language `0.1.1` or rejects
+The runtime either selects `josh/1.6` and language `0.1.1` or rejects
 initialization. Its result returns the runtime identity, effective limits, and
 these exact feature strings:
-`agent`, `exec-run`, `external-fs-grants`, `model`, `record-replay`, `structured-prompts`,
-`catalog-provenance`, `structured-transcript`, `sub-agents`, `typed-responses`, `typed-tools`, and
+`agent`, `catalog-provenance`, `exec-run`, `external-fs-grants`,
+`host-projection`, `model`, `record-replay`, `structured-prompts`,
+`structured-transcript`, `sub-agents`, `typed-responses`, `typed-tools`, and
 `user-interaction`.
 There is no minor-version fallback or alternate feature set.
 
@@ -103,13 +104,19 @@ There is no minor-version fallback or alternate feature set.
 
 After initialization, the host may:
 
-1. freeze the tool catalog;
-2. load source, a package source bundle, or one current artifact;
-3. start an execution with entry input, capabilities, limits, origins, workdir,
+1. freeze one complete host projection;
+2. freeze the matching tool catalog;
+3. load source, a package source bundle, or one current artifact;
+4. start an execution with entry input, capabilities, limits, origins, workdir,
    and optional replay binding;
-4. service runtime-to-host provider requests while execution runs;
-5. receive ordered execution events; and
-6. receive exactly one terminal execution result.
+5. service runtime-to-host provider requests while execution runs;
+6. receive ordered execution events; and
+7. receive exactly one terminal execution result.
+
+The prefix `initialize -> host/project -> catalog/set` is mandatory.
+`host/project` is host-to-runtime and valid exactly once in the initialized
+state. Do not skip it, overlap a duplicate request, repeat it after success, or
+send it after the catalog is frozen.
 
 Program and execution IDs are connection-local, opaque, bounded, and never
 reused. A failed load creates no program ID. A failed start creates no reusable
@@ -123,6 +130,44 @@ request, protocol method, feature string, replay entry, retry, or fallback.
 bounded response tombstones so a late provider response remains detectable and
 cannot resume another operation. Disconnect cancels all active execution and
 provider work.
+
+### 4.1 Host projection
+
+Use profile `josh.host-projection/0.1`. Send exactly ten `complete: true`
+section records in this order: `tools`, `resources`, `attachments`,
+`transcript`, `models`, `user_interaction`, `agents`, `roots`, `permissions`,
+and `telemetry`. Each record has a bounded nonempty `source` and
+`source_revision`, nonzero Unix-millisecond observation time, `current` or
+`cached` freshness, and an item count no greater than 1,048,576. Completeness
+accounts for the whole inventory under the declared producer policy; discovery
+does not disclose an item or grant authority to use it.
+
+The projection `host` must exactly equal the initialized host. Unattended mode
+uses `session_binding: "none"`. Attached mode uses `prompt_assisted` when the
+adapter can return work to the current prompt without authenticating its actor,
+or `authenticated` only when the host contract really binds an authenticated
+actor and session. Never upgrade a prompt-assisted binding by assertion.
+
+This is an exact valid request with ten empty inventories:
+
+```json
+{"protocol":"josh/1","kind":"request","id":"projection-1","method":"host/project","params":{"profile":"josh.host-projection/0.1","projection_id":"projection-1","host":{"name":"allen-host","version":"0.1.0"},"session_binding":"prompt_assisted","sections":[{"kind":"tools","source":"allen-host","source_revision":"revision-7","observed_at_unix_ms":1770000000000,"freshness":"current","complete":true,"item_count":0},{"kind":"resources","source":"allen-host","source_revision":"revision-7","observed_at_unix_ms":1770000000000,"freshness":"current","complete":true,"item_count":0},{"kind":"attachments","source":"allen-host","source_revision":"revision-7","observed_at_unix_ms":1770000000000,"freshness":"current","complete":true,"item_count":0},{"kind":"transcript","source":"allen-host","source_revision":"revision-7","observed_at_unix_ms":1770000000000,"freshness":"current","complete":true,"item_count":0},{"kind":"models","source":"allen-host","source_revision":"revision-7","observed_at_unix_ms":1770000000000,"freshness":"current","complete":true,"item_count":0},{"kind":"user_interaction","source":"allen-host","source_revision":"revision-7","observed_at_unix_ms":1770000000000,"freshness":"current","complete":true,"item_count":0},{"kind":"agents","source":"allen-host","source_revision":"revision-7","observed_at_unix_ms":1770000000000,"freshness":"current","complete":true,"item_count":0},{"kind":"roots","source":"allen-host","source_revision":"revision-7","observed_at_unix_ms":1770000000000,"freshness":"current","complete":true,"item_count":0},{"kind":"permissions","source":"allen-host","source_revision":"revision-7","observed_at_unix_ms":1770000000000,"freshness":"current","complete":true,"item_count":0},{"kind":"telemetry","source":"allen-host","source_revision":"revision-7","observed_at_unix_ms":1770000000000,"freshness":"current","complete":true,"item_count":0}]}}
+```
+
+JOSH strictly decodes that typed request, serializes the fixed structure in its
+declared field and section order, hashes the compact UTF-8 JSON with SHA-256,
+and returns the computed digest plus the validated projection. For the request
+above, the exact result is:
+
+```json
+{"protocol":"josh/1","kind":"response","id":"projection-1","result":{"projection_digest":"sha256:916e4fdc62b900b36322bb1d285ccacfa79beb3286b3a52dd9a015cf5728335e","projection":{"profile":"josh.host-projection/0.1","projection_id":"projection-1","host":{"name":"allen-host","version":"0.1.0"},"session_binding":"prompt_assisted","sections":[{"kind":"tools","source":"allen-host","source_revision":"revision-7","observed_at_unix_ms":1770000000000,"freshness":"current","complete":true,"item_count":0},{"kind":"resources","source":"allen-host","source_revision":"revision-7","observed_at_unix_ms":1770000000000,"freshness":"current","complete":true,"item_count":0},{"kind":"attachments","source":"allen-host","source_revision":"revision-7","observed_at_unix_ms":1770000000000,"freshness":"current","complete":true,"item_count":0},{"kind":"transcript","source":"allen-host","source_revision":"revision-7","observed_at_unix_ms":1770000000000,"freshness":"current","complete":true,"item_count":0},{"kind":"models","source":"allen-host","source_revision":"revision-7","observed_at_unix_ms":1770000000000,"freshness":"current","complete":true,"item_count":0},{"kind":"user_interaction","source":"allen-host","source_revision":"revision-7","observed_at_unix_ms":1770000000000,"freshness":"current","complete":true,"item_count":0},{"kind":"agents","source":"allen-host","source_revision":"revision-7","observed_at_unix_ms":1770000000000,"freshness":"current","complete":true,"item_count":0},{"kind":"roots","source":"allen-host","source_revision":"revision-7","observed_at_unix_ms":1770000000000,"freshness":"current","complete":true,"item_count":0},{"kind":"permissions","source":"allen-host","source_revision":"revision-7","observed_at_unix_ms":1770000000000,"freshness":"current","complete":true,"item_count":0},{"kind":"telemetry","source":"allen-host","source_revision":"revision-7","observed_at_unix_ms":1770000000000,"freshness":"current","complete":true,"item_count":0}]}}}
+```
+
+The current encoding is deterministic for this fixed typed structure, not a
+general JSON canonicalization rule. Phase 1 carries manifests and counts; only
+the tools section has a corresponding typed item payload through `catalog/set`.
+The later non-tool item projection and binding of `projection_digest` into
+execution accepted events, artifacts, and replay are not part of phase 1.
 
 ## 5. Program loading
 
@@ -144,8 +189,11 @@ the host never reopens the caller's package directory.
 
 Artifacts must use the one current format and pass decoding plus independent
 verification. The result identifies the loaded program and its entries,
-capabilities, limits, origins, required tools, and boundary schemas. Each entry
-also exposes `input_contract_digest` and `output_contract_digest`. These
+capabilities, limits, origins, and boundary schemas. Its `required_tools` field
+is the sorted unique exact name list derived from the verified artifact
+manifest. It reports requirements and grants nothing; select per-execution
+grants from this field instead of searching source text. Each entry also
+exposes `input_contract_digest` and `output_contract_digest`. These
 directional digests cover the strict schema and all effective named record
 invariant sites, so equal wire schemas can have different boundary contracts.
 The artifact verifier independently derives the exact required site set from
@@ -156,8 +204,8 @@ values.
 
 ## 6. Tool catalog
 
-The host freezes at most one tool catalog before loading a program that needs
-tools. `catalog/set` includes metadata with a bounded source and source
+The host freezes exactly one tool catalog after `host/project` and before
+program loading. `catalog/set` includes metadata with a bounded source and source
 revision, a nonzero Unix-millisecond observation time, `current` or `cached`
 freshness, and an explicit completeness Boolean. The runtime rejects
 `complete: false` before it freezes any state.
@@ -177,6 +225,10 @@ The summaries are the runtime-confirmed projection of what it froze. Tool
 descriptions are display metadata and are excluded from the typed contract
 digest. Source and completeness remain host claims unless a separate host
 contract authenticates them.
+
+The catalog metadata and exact tool count must match the frozen `tools`
+projection section. A mismatch returns `projection.mismatch` without freezing
+partial catalog state.
 
 `tool/invoke` carries the execution ID, operation ID, tool name, exact input,
 and deadline. Its response is one of validated output, validated declared
@@ -233,7 +285,7 @@ omit raw input, output, stderr, credentials, and temporary paths. The runner
 never retries, calls `executor resume`, opens an approval flow, or falls back
 to a shell, agent, model, or another provider.
 
-This route uses the current `josh/1.5` `tool/invoke` contract unchanged. It
+This route uses the current `josh/1.6` `tool/invoke` contract unchanged. It
 does not add a method, feature string, or alternate protocol version. Recording
 stores the validated tool boundary result, and replay uses that result without
 starting Executor.
@@ -355,9 +407,12 @@ the protocol never claims that an external effect happened again.
 
 Wire errors describe request or connection failures, not ALLEN entry values.
 Current families include invalid request, invalid state, unsupported protocol,
-catalog or program rejection, limit failure, cancellation, and internal safe
-failure. Provider denials and unavailable outcomes use their exact provider
-response envelope and become source-visible closed results where specified.
+projection, catalog or program rejection, limit failure, cancellation, and
+internal safe failure. `projection.invalid` covers malformed or repeated
+projection content. `projection.mismatch` covers initialized host, session
+binding, or projected-tools/catalog disagreement. Provider denials and
+unavailable outcomes use their exact provider response envelope and become
+source-visible closed results where specified.
 
 A protocol violation closes the connection after active work is cancelled. It
 must not produce a second terminal response or expose internal error detail.
@@ -366,13 +421,16 @@ must not produce a second terminal response or expose internal error detail.
 
 When writing or reviewing a JOSH client:
 
-1. Offer only `josh/1.5`.
+1. Offer only `josh/1.6`.
 2. Send `initialize` exactly once.
 3. Use strict length framing and exact JSON shapes.
 4. Keep request IDs unique per direction while active.
-5. Freeze catalogs before loading tool-dependent programs.
-6. Never request authority absent from the loaded program contract.
-7. Preserve attached session identity on all `agent/*` calls.
-8. Treat opaque handles as execution-local and nonserializable.
-9. Keep servicing reentrant provider requests while execution is active.
-10. Cancel active work on disconnect and reject late responses.
+5. Send one honest complete `host/project` before `catalog/set`.
+6. Match catalog metadata and count to the projected tools section.
+7. Freeze the catalog before loading any program.
+8. Read exact `required_tools` from `program/load`; do not infer grants from source.
+9. Never request authority absent from the loaded program contract.
+10. Preserve attached session identity on all `agent/*` calls.
+11. Treat opaque handles as execution-local and nonserializable.
+12. Keep servicing reentrant provider requests while execution is active.
+13. Cancel active work on disconnect and reject late responses.

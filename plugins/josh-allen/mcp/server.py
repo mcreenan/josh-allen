@@ -24,17 +24,18 @@ MAX_SESSIONS = 16
 MAX_RETAINED_SESSIONS = 64
 DEFAULT_WALL_MS = 600_000
 MAX_WALL_MS = 3_600_000
+MAX_CATALOG_TOOLS = 256
 JOSH_RESPONSE_TIMEOUT_SECONDS = 30
 # MCP version used by the local stdio clients supported by this plugin.
 MCP_PROTOCOL_VERSION = "2025-06-18"
 JOSH_PROTOCOL = "josh/1"
-JOSH_PROTOCOL_VERSION = "josh/1.5"
+JOSH_PROTOCOL_VERSION = "josh/1.6"
 JOSH_LIMITS = {
     "max_frame_bytes": MAX_FRAME_BYTES,
     "max_active_requests": 64,
     "max_loaded_programs": 1,
     "max_total_executions": 1,
-    "max_catalog_tools": 1,
+    "max_catalog_tools": MAX_CATALOG_TOOLS,
     "max_catalog_bytes": MAX_FRAME_BYTES,
 }
 JOSH_ERROR_CODES = {
@@ -43,6 +44,8 @@ JOSH_ERROR_CODES = {
     "request.invalid_state",
     "request.limit",
     "request.cancelled",
+    "projection.invalid",
+    "projection.mismatch",
     "catalog.invalid",
     "catalog.mismatch",
     "program.invalid",
@@ -261,6 +264,79 @@ class BridgeCatalogAdapter(CatalogAdapter):
         }
 
 
+def _projection_for_catalog(catalog: dict[str, Any]) -> dict[str, Any]:
+    metadata = _require_object(catalog.get("metadata"), "catalog metadata")
+    tools = catalog.get("tools")
+    if not isinstance(tools, list):
+        raise BridgeError("catalog tools must be a list")
+    section_names = [
+        "tools",
+        "resources",
+        "attachments",
+        "transcript",
+        "models",
+        "user_interaction",
+        "agents",
+        "roots",
+        "permissions",
+        "telemetry",
+    ]
+    sections = []
+    for kind in section_names:
+        sections.append({
+            "kind": kind,
+            "source": metadata.get("source", "josh-allen-mcp"),
+            "source_revision": metadata.get("source_revision", "0.1.2"),
+            "observed_at_unix_ms": metadata.get("observed_at_unix_ms", 0),
+            "freshness": metadata.get("freshness", "current"),
+            "complete": True,
+            "item_count": len(tools) if kind == "tools" else 0,
+        })
+    return {
+        "profile": "josh.host-projection/0.1",
+        "projection_id": f"mcp-{secrets.token_hex(12)}",
+        "host": {"name": "josh-allen-mcp", "version": "0.1.2"},
+        "session_binding": "prompt_assisted",
+        "sections": sections,
+    }
+
+
+def _read_projection_bundle(path: Path) -> dict[str, Any]:
+    try:
+        content = path.read_bytes()
+    except OSError as error:
+        raise BridgeError(f"cannot read host projection: {error}") from error
+    if len(content) > MAX_FRAME_BYTES:
+        raise BridgeError("host projection exceeds the bridge frame limit")
+
+    def reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+        value: dict[str, Any] = {}
+        for key, item in pairs:
+            if key in value:
+                raise BridgeError(f"host projection contains duplicate key {key!r}")
+            value[key] = item
+        return value
+
+    try:
+        value = json.loads(content, object_pairs_hook=reject_duplicate_keys)
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise BridgeError("host projection must be one UTF-8 JSON value") from error
+    bundle = _require_object(value, "host projection bundle")
+    if set(bundle) != {"projection", "catalog", "granted_tools"}:
+        raise BridgeError("host projection bundle requires projection, catalog, and granted_tools")
+    _require_object(bundle["projection"], "host projection")
+    _require_object(bundle["catalog"], "host projection catalog")
+    grants = bundle["granted_tools"]
+    if (
+        not isinstance(grants, list)
+        or len(grants) > MAX_CATALOG_TOOLS
+        or any(not isinstance(name, str) or not name for name in grants)
+        or grants != sorted(set(grants))
+    ):
+        raise BridgeError("host projection tool grants must be a sorted unique string list")
+    return bundle
+
+
 def _result_payload(value: dict[str, Any]) -> dict[str, Any]:
     return {"content": [{"type": "text", "text": json.dumps(value, ensure_ascii=False, sort_keys=True)}], "structuredContent": value}
 
@@ -460,7 +536,24 @@ class Bridge:
             installed = shutil.which("josh")
             self.executable = Path(installed) if installed else self.workspace / "target" / "debug" / "josh"
         self.sessions: dict[str, Session] = {}
+        projection_path = os.environ.get("JOSH_ALLEN_HOST_PROJECTION_PATH")
+        if projection_path and catalog_adapter is not None:
+            raise BridgeError("a test catalog adapter cannot override a configured host projection")
+        self.projection_bundle = (
+            _read_projection_bundle(Path(projection_path)) if projection_path else None
+        )
         self.catalog_adapter = catalog_adapter or BridgeCatalogAdapter()
+
+    def _projection_snapshot(self) -> tuple[dict[str, Any], dict[str, Any], list[str]]:
+        if self.projection_bundle is not None:
+            return (
+                self.projection_bundle["projection"],
+                self.projection_bundle["catalog"],
+                self.projection_bundle["granted_tools"],
+            )
+        catalog = self.catalog_adapter.snapshot()
+        grants = [tool["name"] for tool in catalog.get("tools", [])]
+        return _projection_for_catalog(catalog), catalog, grants
 
     def _evict_terminal_sessions(self) -> None:
         while len(self.sessions) >= MAX_RETAINED_SESSIONS:
@@ -610,8 +703,10 @@ class Bridge:
             ready = endpoint.receive()
             if ready.get("kind") != "notification" or ready.get("method") != "runtime/ready":
                 raise BridgeError("JOSH did not announce runtime/ready")
+            projection, catalog, authorized_tools = self._projection_snapshot()
+            projection_host = _require_object(projection.get("host"), "projection host")
             self._send_request(session, "init-1", "initialize", {
-                "host": {"name": "josh-allen-mcp", "version": "0.1.2"},
+                "host": projection_host,
                 "protocol_versions": [JOSH_PROTOCOL_VERSION],
                 "language_versions": [">=0.1.0, <0.2.0"],
                 "execution_mode": "attached",
@@ -621,7 +716,10 @@ class Bridge:
                 "extensions": [],
             })
             self._expect_response(session, "init-1", "initialize")
-            catalog = self.catalog_adapter.snapshot()
+            if not _json_size_is_bounded(projection):
+                raise BridgeError("host projection exceeds bridge limit")
+            self._send_request(session, "projection-1", "host/project", projection)
+            self._expect_response(session, "projection-1", "host/project")
             if not _json_size_is_bounded(catalog):
                 raise BridgeError("catalog adapter result exceeds bridge limit")
             self._send_request(session, "catalog-1", "catalog/set", catalog)
@@ -633,6 +731,20 @@ class Bridge:
                 "files": [{"path": "src/main.allen", "encoding": "utf8", "content": source}],
             })
             loaded = self._expect_response(session, "load-1", "program/load")
+            required_tools = loaded.get("required_tools")
+            if (
+                not isinstance(required_tools, list)
+                or len(required_tools) > MAX_CATALOG_TOOLS
+                or any(not isinstance(name, str) or not name for name in required_tools)
+                or required_tools != sorted(set(required_tools))
+            ):
+                raise BridgeError("program/load returned invalid required_tools")
+            unauthorized = sorted(set(required_tools) - set(authorized_tools))
+            if unauthorized:
+                raise BridgeError(
+                    "program requires tools not authorized by the host projection: "
+                    + ", ".join(unauthorized)
+                )
             self._send_request(session, session.start_id, "execution/start", {
                 "execution_id": execution_id,
                 "program_id": _require_string(loaded.get("program_id"), "JOSH program_id", 128),
@@ -643,10 +755,9 @@ class Bridge:
                 # would itself require the matching filesystem capability.
                 "working_directory": None,
                 "granted_capabilities": [],
-                # The source manifest, not the host catalog, selects tools.
-                # This one-tool bridge grants it only when its exact catalog name
-                # occurs in the source-side manifest/program contract.
-                "granted_tools": ["allen_integration_echo"] if "allen_integration_echo" in source else [],
+                # The verified artifact requirements select tools. Host-owned
+                # projection policy authorizes that exact set.
+                "granted_tools": required_tools,
                 "allowed_http_origins": [],
                 # The callback bridge does not grant live subprocess authority.
                 "granted_exec": [],

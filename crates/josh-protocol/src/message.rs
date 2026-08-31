@@ -61,6 +61,10 @@ pub enum WireErrorCode {
     RequestLimit,
     #[serde(rename = "request.cancelled")]
     RequestCancelled,
+    #[serde(rename = "projection.invalid")]
+    ProjectionInvalid,
+    #[serde(rename = "projection.mismatch")]
+    ProjectionMismatch,
     #[serde(rename = "catalog.invalid")]
     CatalogInvalid,
     #[serde(rename = "catalog.mismatch")]

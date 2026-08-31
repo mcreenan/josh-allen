@@ -10,9 +10,10 @@ use allen_bytecode::{
 use allen_schema::{ExactVersion, SchemaLimits, ToolName, ToolSchema, generated_tool_effect};
 use base64::Engine as _;
 use josh_protocol::{
-    CatalogSetParams, CatalogTool, ExecutionMode, ExecutionStartParams, FrameReader, Idempotency,
-    InitializeParams, InvokingSessionId, PeerInfo, ProgramLoadParams, ProtocolLimits,
-    ToolInvokeResult, WireMessage, encode_frame,
+    CatalogSetParams, CatalogTool, ExecutionMode, ExecutionStartParams, FrameReader,
+    HostProjectionSetParams, Idempotency, InitializeParams, InvokingSessionId, PeerInfo,
+    ProgramLoadParams, ProtocolLimits, SessionBindingLevel, ToolInvokeResult, WireMessage,
+    encode_frame,
 };
 use serde_json::json;
 
@@ -46,6 +47,18 @@ fn send<T: serde::Serialize>(input: &mut impl Write, id: &str, method: &str, par
 
 fn receive(reader: &mut FrameReader<impl std::io::Read>) -> WireMessage {
     reader.read_message().unwrap().unwrap()
+}
+
+fn projection(
+    initialize: &InitializeParams,
+    catalog: &CatalogSetParams,
+) -> HostProjectionSetParams {
+    HostProjectionSetParams::complete_for_catalog(
+        "stdio-test-projection",
+        initialize.host.clone(),
+        SessionBindingLevel::None,
+        catalog,
+    )
 }
 
 #[allow(clippy::too_many_lines)]
@@ -214,6 +227,13 @@ fn executable_serves_the_exact_stdio_handshake() {
         .write_all(&request("h-1", "initialize", &initialize))
         .unwrap();
     stdin
+        .write_all(&request(
+            "h-p",
+            "host/project",
+            &projection(&initialize, &catalog),
+        ))
+        .unwrap();
+    stdin
         .write_all(&request("h-2", "catalog/set", &catalog))
         .unwrap();
     drop(stdin);
@@ -230,7 +250,7 @@ fn executable_serves_the_exact_stdio_handshake() {
         ready,
         WireMessage::Notification { ref method, .. } if method == "runtime/ready"
     ));
-    for expected_id in ["h-1", "h-2"] {
+    for expected_id in ["h-1", "h-p", "h-2"] {
         assert!(matches!(
             reader.read_message().unwrap().unwrap(),
             WireMessage::Response { ref id, result: Some(_), error: None } if id == expected_id
@@ -302,6 +322,13 @@ fn independent_stdio_host_matches_the_golden_tool_transcript() {
     record(receive(&mut output));
     send(&mut input, "h-1", "initialize", &initialize);
     record(receive(&mut output));
+    send(
+        &mut input,
+        "h-p",
+        "host/project",
+        &projection(&initialize, &catalog),
+    );
+    record(receive(&mut output));
     send(&mut input, "h-2", "catalog/set", &catalog);
     record(receive(&mut output));
     send(&mut input, "h-3", "program/load", &load);
@@ -363,6 +390,7 @@ fn independent_stdio_host_matches_the_golden_tool_transcript() {
         [
             "runtime/ready",
             "h-1",
+            "h-p",
             "h-2",
             "h-3",
             "accepted",
@@ -431,6 +459,13 @@ fn active_partial_frame_eof_cleans_up_and_reports_only_a_safe_error() {
     );
     send(&mut input, "h-1", "initialize", &initialize);
     assert!(matches!(receive(&mut output), WireMessage::Response { ref id, .. } if id == "h-1"));
+    send(
+        &mut input,
+        "h-p",
+        "host/project",
+        &projection(&initialize, &catalog),
+    );
+    assert!(matches!(receive(&mut output), WireMessage::Response { ref id, .. } if id == "h-p"));
     send(&mut input, "h-2", "catalog/set", &catalog);
     assert!(matches!(receive(&mut output), WireMessage::Response { ref id, .. } if id == "h-2"));
     send(&mut input, "h-3", "program/load", &load);

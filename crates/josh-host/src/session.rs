@@ -23,10 +23,12 @@ use allen_schema::{
 use allen_vm::{CancellationSource, Checkpoint, CheckpointObserver, ExecutionOutcome};
 use base64::Engine as _;
 use josh_protocol::{
-    CatalogSetParams, CatalogSetResult, CatalogToolSummary, EntryContract, ExecutionResult,
-    ExecutionStartParams, InitializeParams, InitializeResult, PeerInfo, ProgramLoadParams,
-    ProgramLoadResult, ProtocolLimits, Validate, WireError, WireErrorCode,
+    CatalogSetParams, CatalogSetResult, CatalogToolSummary, EntryContract, ExecutionMode,
+    ExecutionResult, ExecutionStartParams, HostProjectionSetParams, HostProjectionSetResult,
+    InitializeParams, InitializeResult, PeerInfo, ProgramLoadParams, ProgramLoadResult,
+    ProjectionSectionKind, ProtocolLimits, SessionBindingLevel, Validate, WireError, WireErrorCode,
 };
+use sha2::{Digest as _, Sha256};
 
 const RUNTIME_NAME: &str = "allen-reference";
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -209,9 +211,12 @@ struct ActiveExecution {
 
 pub struct Session {
     initialized: bool,
+    initialized_host: Option<PeerInfo>,
+    execution_mode: Option<ExecutionMode>,
     invoking_session_id: Option<String>,
     standard_capabilities: BTreeSet<String>,
     effective_limits: ProtocolLimits,
+    projection: Option<HostProjectionSetResult>,
     catalog: Option<Arc<FrozenCatalog>>,
     programs: BTreeMap<String, Arc<LoadedProgram>>,
     next_program_id: u64,
@@ -230,9 +235,12 @@ impl Session {
     pub fn new() -> Self {
         Self {
             initialized: false,
+            initialized_host: None,
+            execution_mode: None,
             invoking_session_id: None,
             standard_capabilities: BTreeSet::new(),
             effective_limits: runtime_limits(),
+            projection: None,
             catalog: None,
             programs: BTreeMap::new(),
             next_program_id: 1,
@@ -255,6 +263,8 @@ impl Session {
         }
         self.effective_limits = lower_limits(runtime_limits(), params.limits);
         self.standard_capabilities = params.standard_capabilities.iter().cloned().collect();
+        self.initialized_host = Some(params.host.clone());
+        self.execution_mode = Some(params.execution_mode);
         self.invoking_session_id = params.bound_session_id().map(str::to_owned);
         self.initialized = true;
         Ok(InitializeResult {
@@ -272,6 +282,56 @@ impl Session {
         })
     }
 
+    /// Validates and freezes the complete host projection for this connection.
+    ///
+    /// # Errors
+    ///
+    /// Returns a stable projection error without storing partial state.
+    pub fn set_projection(
+        &mut self,
+        params: &HostProjectionSetParams,
+    ) -> Result<HostProjectionSetResult, HostError> {
+        if !self.initialized || self.projection.is_some() || params.validate().is_err() {
+            return Err(HostError::new(
+                WireErrorCode::ProjectionInvalid,
+                "host projection is invalid",
+            ));
+        }
+        if self.initialized_host.as_ref() != Some(&params.host) {
+            return Err(HostError::new(
+                WireErrorCode::ProjectionMismatch,
+                "host projection identity does not match initialization",
+            ));
+        }
+        let binding_matches = matches!(
+            (self.execution_mode, params.session_binding),
+            (Some(ExecutionMode::Unattended), SessionBindingLevel::None)
+                | (
+                    Some(ExecutionMode::Attached),
+                    SessionBindingLevel::PromptAssisted | SessionBindingLevel::Authenticated
+                )
+        );
+        if !binding_matches {
+            return Err(HostError::new(
+                WireErrorCode::ProjectionMismatch,
+                "host projection session binding does not match initialization",
+            ));
+        }
+        let encoded = serde_json::to_vec(params).map_err(|_| {
+            HostError::new(
+                WireErrorCode::ProjectionInvalid,
+                "host projection is invalid",
+            )
+        })?;
+        let digest: [u8; 32] = Sha256::digest(encoded).into();
+        let result = HostProjectionSetResult {
+            projection_digest: digest_text(&digest),
+            projection: params.clone(),
+        };
+        self.projection = Some(result.clone());
+        Ok(result)
+    }
+
     /// Validates and freezes the complete connection tool catalog.
     ///
     /// # Errors
@@ -281,7 +341,11 @@ impl Session {
         &mut self,
         params: &CatalogSetParams,
     ) -> Result<CatalogSetResult, HostError> {
-        if !self.initialized || self.catalog.is_some() || params.validate().is_err() {
+        if !self.initialized
+            || self.projection.is_none()
+            || self.catalog.is_some()
+            || params.validate().is_err()
+        {
             return Err(HostError::new(
                 WireErrorCode::CatalogInvalid,
                 "tool catalog is invalid",
@@ -291,6 +355,24 @@ impl Session {
             return Err(HostError::new(
                 WireErrorCode::CatalogInvalid,
                 "tool catalog is incomplete",
+            ));
+        }
+        let tools_projection = self
+            .projection
+            .as_ref()
+            .expect("projection presence checked above")
+            .projection
+            .section(ProjectionSectionKind::Tools);
+        let metadata_matches = tools_projection.source == params.metadata.source
+            && tools_projection.source_revision == params.metadata.source_revision
+            && tools_projection.observed_at_unix_ms == params.metadata.observed_at_unix_ms
+            && tools_projection.freshness == params.metadata.freshness
+            && tools_projection.complete == params.metadata.complete
+            && usize::try_from(tools_projection.item_count).ok() == Some(params.tools.len());
+        if !metadata_matches {
+            return Err(HostError::new(
+                WireErrorCode::ProjectionMismatch,
+                "tool catalog does not match the host projection",
             ));
         }
         let schema_limits = SchemaLimits::default();
@@ -403,6 +485,11 @@ impl Session {
             HostError::new(WireErrorCode::ProgramInvalid, "program manifest is missing")
         })?;
         let tool_contract_digest = digest_text(&manifest.tool_contract_digest);
+        let required_tools = manifest
+            .required_tools
+            .iter()
+            .map(|tool| tool.name.clone())
+            .collect();
         let exec_commands = manifest.exec_commands.clone();
         let exec_environment = manifest.exec_environment.clone();
         let entries = verified
@@ -435,6 +522,7 @@ impl Session {
             tool_contract_digest,
             diagnostics: Vec::new(),
             entries,
+            required_tools,
             exec_commands,
             exec_environment,
         })
@@ -890,6 +978,21 @@ mod tests {
         }
     }
 
+    fn set_projection(
+        session: &mut Session,
+        binding: SessionBindingLevel,
+        catalog: &CatalogSetParams,
+    ) {
+        session
+            .set_projection(&HostProjectionSetParams::complete_for_catalog(
+                "test-projection",
+                initialize_params().host,
+                binding,
+                catalog,
+            ))
+            .unwrap();
+    }
+
     fn artifact() -> Artifact {
         Artifact {
             metadata: ArtifactMetadata::default(),
@@ -971,7 +1074,9 @@ mod tests {
     fn loaded_session() -> (Session, ProgramLoadResult) {
         let mut session = Session::new();
         session.initialize(&initialize_params()).unwrap();
-        session.set_catalog(&empty_catalog()).unwrap();
+        let catalog = empty_catalog();
+        set_projection(&mut session, SessionBindingLevel::None, &catalog);
+        session.set_catalog(&catalog).unwrap();
         let loaded = session
             .load_program(&ProgramLoadParams::Bytecode {
                 artifact: base64::engine::general_purpose::STANDARD.encode(artifact_bytes()),
@@ -1003,7 +1108,9 @@ mod tests {
             session.initialize(&initialize_params()).unwrap_err().code,
             WireErrorCode::RequestInvalid
         );
-        let catalog = session.set_catalog(&empty_catalog()).unwrap();
+        let empty = empty_catalog();
+        set_projection(&mut session, SessionBindingLevel::None, &empty);
+        let catalog = session.set_catalog(&empty).unwrap();
         assert_eq!(catalog.tool_count, 0);
         assert_eq!(catalog.metadata.source, "test-host");
         assert!(catalog.metadata.complete);
@@ -1015,15 +1122,310 @@ mod tests {
     }
 
     #[test]
+    fn projection_binding_digest_and_single_assignment_are_strict() {
+        let catalog = empty_catalog();
+        let valid = HostProjectionSetParams::complete_for_catalog(
+            "projection-stable",
+            initialize_params().host,
+            SessionBindingLevel::None,
+            &catalog,
+        );
+
+        let mut uninitialized = Session::new();
+        assert_eq!(
+            uninitialized.set_projection(&valid).unwrap_err().code,
+            WireErrorCode::ProjectionInvalid
+        );
+
+        let mut first = Session::new();
+        first.initialize(&initialize_params()).unwrap();
+        let mut wrong_host = valid.clone();
+        wrong_host.host.name = "another-host".to_owned();
+        assert_eq!(
+            first.set_projection(&wrong_host).unwrap_err().code,
+            WireErrorCode::ProjectionMismatch
+        );
+        let mut wrong_binding = valid.clone();
+        wrong_binding.session_binding = SessionBindingLevel::PromptAssisted;
+        assert_eq!(
+            first.set_projection(&wrong_binding).unwrap_err().code,
+            WireErrorCode::ProjectionMismatch
+        );
+        let first_result = first.set_projection(&valid).unwrap();
+        assert!(first_result.projection_digest.starts_with("sha256:"));
+        assert_eq!(
+            first.set_projection(&valid).unwrap_err().code,
+            WireErrorCode::ProjectionInvalid
+        );
+
+        let mut second = Session::new();
+        second.initialize(&initialize_params()).unwrap();
+        let second_result = second.set_projection(&valid).unwrap();
+        assert_eq!(
+            first_result.projection_digest,
+            second_result.projection_digest
+        );
+
+        let mut attached = initialize_params();
+        attached.execution_mode = ExecutionMode::Attached;
+        attached.invoking_session_id = InvokingSessionId::Id("session-1".to_owned());
+        let mut attached_session = Session::new();
+        attached_session.initialize(&attached).unwrap();
+        assert_eq!(
+            attached_session.set_projection(&valid).unwrap_err().code,
+            WireErrorCode::ProjectionMismatch
+        );
+        let attached_projection = HostProjectionSetParams::complete_for_catalog(
+            "projection-attached",
+            attached.host,
+            SessionBindingLevel::Authenticated,
+            &catalog,
+        );
+        attached_session
+            .set_projection(&attached_projection)
+            .unwrap();
+    }
+
+    #[test]
+    fn every_execution_mode_and_projection_binding_combination_is_enforced() {
+        let catalog = empty_catalog();
+        for (mode, binding, accepted) in [
+            (ExecutionMode::Unattended, SessionBindingLevel::None, true),
+            (
+                ExecutionMode::Unattended,
+                SessionBindingLevel::PromptAssisted,
+                false,
+            ),
+            (
+                ExecutionMode::Unattended,
+                SessionBindingLevel::Authenticated,
+                false,
+            ),
+            (ExecutionMode::Attached, SessionBindingLevel::None, false),
+            (
+                ExecutionMode::Attached,
+                SessionBindingLevel::PromptAssisted,
+                true,
+            ),
+            (
+                ExecutionMode::Attached,
+                SessionBindingLevel::Authenticated,
+                true,
+            ),
+        ] {
+            let mut initialize = initialize_params();
+            initialize.execution_mode = mode;
+            initialize.invoking_session_id = match mode {
+                ExecutionMode::Unattended => InvokingSessionId::Null,
+                ExecutionMode::Attached => InvokingSessionId::Id("session-1".to_owned()),
+            };
+            let projection = HostProjectionSetParams::complete_for_catalog(
+                "projection-bindings",
+                initialize.host.clone(),
+                binding,
+                &catalog,
+            );
+            let mut session = Session::new();
+            session.initialize(&initialize).unwrap();
+            let result = session.set_projection(&projection);
+            if accepted {
+                result.unwrap();
+            } else {
+                assert_eq!(result.unwrap_err().code, WireErrorCode::ProjectionMismatch);
+            }
+        }
+    }
+
+    #[test]
+    fn host_projection_conformance_fixture_matches_runtime_digest_and_catalog() {
+        let report: Value =
+            serde_json::from_str(include_str!("../../../docs/conformance/host-0.1.json")).unwrap();
+        assert_eq!(
+            report["josh_protocol"]["lifecycle"],
+            serde_json::json!([
+                "initialize",
+                "host/project",
+                "catalog/set",
+                "program/load",
+                "execution/start"
+            ])
+        );
+        assert_eq!(
+            report["josh_protocol"]["program_load_required_field"],
+            "required_tools"
+        );
+        let fixture = &report["josh_protocol"]["host_projection"];
+        let projection: HostProjectionSetParams =
+            serde_json::from_value(fixture["request"].clone()).unwrap();
+        let catalog: CatalogSetParams = serde_json::from_value(fixture["catalog"].clone()).unwrap();
+        let expected_digest = fixture["expected_projection_digest"].as_str().unwrap();
+
+        let mut initialize = initialize_params();
+        initialize.host = projection.host.clone();
+        initialize.execution_mode = ExecutionMode::Attached;
+        initialize.invoking_session_id = InvokingSessionId::Id("session-1".to_owned());
+        let mut session = Session::new();
+        session.initialize(&initialize).unwrap();
+        let projected = session.set_projection(&projection).unwrap();
+        assert_eq!(projected.projection_digest, expected_digest);
+        assert_eq!(session.set_catalog(&catalog).unwrap().tool_count, 0);
+    }
+
+    #[test]
+    fn program_load_reports_exact_sorted_verified_tools_for_source_and_bytecode() {
+        let catalog: CatalogSetParams = serde_json::from_value(serde_json::json!({
+            "schema_dialect": josh_protocol::SCHEMA_DIALECT,
+            "metadata": {
+                "source": "test-host",
+                "source_revision": "tools-1",
+                "observed_at_unix_ms": 1,
+                "freshness": "current",
+                "complete": true
+            },
+            "tools": [
+                {
+                    "name": "alpha.echo",
+                    "version": "1.0.0",
+                    "description": "Alpha echo.",
+                    "input_schema": {"type": "string"},
+                    "output_schema": {"type": "string"},
+                    "error_schema": {"type": "string"},
+                    "effects": [],
+                    "idempotency": "idempotent"
+                },
+                {
+                    "name": "zeta.echo",
+                    "version": "1.0.0",
+                    "description": "Zeta echo.",
+                    "input_schema": {"type": "string"},
+                    "output_schema": {"type": "string"},
+                    "error_schema": {"type": "string"},
+                    "effects": [],
+                    "idempotency": "idempotent"
+                }
+            ]
+        }))
+        .unwrap();
+        let initialize = initialize_params();
+        let mut session = Session::new();
+        session.initialize(&initialize).unwrap();
+        session
+            .set_projection(&HostProjectionSetParams::complete_for_catalog(
+                "projection-tools",
+                initialize.host,
+                SessionBindingLevel::None,
+                &catalog,
+            ))
+            .unwrap();
+        session.set_catalog(&catalog).unwrap();
+
+        let source = r#"manifest {
+  language: "0.1"
+  entry: main
+  capabilities: []
+  tools: { required: [
+    { name: "zeta.echo", version: ">=1.0.0, <2.0.0" },
+    { name: "alpha.echo", version: ">=1.0.0, <2.0.0" }
+  ] }
+}
+export fn main() returns Void { () }
+"#;
+        let expected = vec!["alpha.echo".to_owned(), "zeta.echo".to_owned()];
+        let source_result = session
+            .load_program(&ProgramLoadParams::SourceBundle {
+                files: vec![josh_protocol::SourceFile {
+                    path: "src/main.allen".to_owned(),
+                    encoding: josh_protocol::FileEncoding::Utf8,
+                    content: source.to_owned(),
+                }],
+            })
+            .unwrap();
+        assert_eq!(source_result.required_tools, expected);
+
+        let compiled = assemble_inline_source(
+            source,
+            session
+                .catalog
+                .as_ref()
+                .expect("test session has a frozen catalog"),
+        )
+        .unwrap();
+        let bytecode_result = session
+            .load_program(&ProgramLoadParams::Bytecode {
+                artifact: base64::engine::general_purpose::STANDARD
+                    .encode(encode(&compiled.artifact).unwrap()),
+            })
+            .unwrap();
+        assert_eq!(bytecode_result.required_tools, expected);
+    }
+
+    #[test]
+    fn catalog_must_match_the_frozen_tools_projection() {
+        let catalog = empty_catalog();
+        let mut session = Session::new();
+        session.initialize(&initialize_params()).unwrap();
+        set_projection(&mut session, SessionBindingLevel::None, &catalog);
+
+        let mut wrong_source = catalog.clone();
+        wrong_source.metadata.source = "other-source".to_owned();
+        assert_eq!(
+            session.set_catalog(&wrong_source).unwrap_err().code,
+            WireErrorCode::ProjectionMismatch
+        );
+        let mut wrong_revision = catalog.clone();
+        wrong_revision.metadata.source_revision = "2".to_owned();
+        assert_eq!(
+            session.set_catalog(&wrong_revision).unwrap_err().code,
+            WireErrorCode::ProjectionMismatch
+        );
+        let mut wrong_observation = catalog.clone();
+        wrong_observation.metadata.observed_at_unix_ms = 2;
+        assert_eq!(
+            session.set_catalog(&wrong_observation).unwrap_err().code,
+            WireErrorCode::ProjectionMismatch
+        );
+        let mut wrong_freshness = catalog.clone();
+        wrong_freshness.metadata.freshness = josh_protocol::CatalogFreshness::Cached;
+        assert_eq!(
+            session.set_catalog(&wrong_freshness).unwrap_err().code,
+            WireErrorCode::ProjectionMismatch
+        );
+        let mut incomplete = catalog.clone();
+        incomplete.metadata.complete = false;
+        assert_eq!(
+            session.set_catalog(&incomplete).unwrap_err().code,
+            WireErrorCode::CatalogInvalid
+        );
+        assert_eq!(session.set_catalog(&catalog).unwrap().tool_count, 0);
+
+        let mut count_session = Session::new();
+        count_session.initialize(&initialize_params()).unwrap();
+        let mut wrong_count = HostProjectionSetParams::complete_for_catalog(
+            "projection-count",
+            initialize_params().host,
+            SessionBindingLevel::None,
+            &catalog,
+        );
+        wrong_count.sections[ProjectionSectionKind::Tools as usize].item_count = 1;
+        count_session.set_projection(&wrong_count).unwrap();
+        assert_eq!(
+            count_session.set_catalog(&catalog).unwrap_err().code,
+            WireErrorCode::ProjectionMismatch
+        );
+    }
+
+    #[test]
     fn incomplete_catalog_is_rejected_without_freezing_partial_state() {
         let mut session = Session::new();
         session.initialize(&initialize_params()).unwrap();
+        let complete = empty_catalog();
+        set_projection(&mut session, SessionBindingLevel::None, &complete);
         let mut incomplete = empty_catalog();
         incomplete.metadata.complete = false;
         let error = session.set_catalog(&incomplete).unwrap_err();
         assert_eq!(error.code, WireErrorCode::CatalogInvalid);
         assert_eq!(error.message, "tool catalog is incomplete");
-        assert_eq!(session.set_catalog(&empty_catalog()).unwrap().tool_count, 0);
+        assert_eq!(session.set_catalog(&complete).unwrap().tool_count, 0);
     }
 
     #[test]
@@ -1038,7 +1440,9 @@ mod tests {
             josh_protocol::PROTOCOL_VERSION
         );
         assert_eq!(initialized.features, josh_protocol::FEATURES);
-        session.set_catalog(&empty_catalog()).unwrap();
+        let catalog = empty_catalog();
+        set_projection(&mut session, SessionBindingLevel::PromptAssisted, &catalog);
+        session.set_catalog(&catalog).unwrap();
         let loaded = session
             .load_program(&ProgramLoadParams::Bytecode {
                 artifact: base64::engine::general_purpose::STANDARD.encode(artifact_bytes()),
@@ -1070,7 +1474,9 @@ mod tests {
     fn every_wire_execution_limit_maps_to_host_policy() {
         let mut session = Session::new();
         session.initialize(&initialize_params()).unwrap();
-        session.set_catalog(&empty_catalog()).unwrap();
+        let catalog = empty_catalog();
+        set_projection(&mut session, SessionBindingLevel::None, &catalog);
+        session.set_catalog(&catalog).unwrap();
         let params = ExecutionStartParams {
             execution_id: "limits".to_owned(),
             program_id: "program".to_owned(),
@@ -1324,7 +1730,9 @@ mod tests {
         ];
         let mut session = Session::new();
         session.initialize(&initialize_params()).unwrap();
-        session.set_catalog(&empty_catalog()).unwrap();
+        let catalog = empty_catalog();
+        set_projection(&mut session, SessionBindingLevel::None, &catalog);
+        session.set_catalog(&catalog).unwrap();
         let loaded = session
             .load_program(&ProgramLoadParams::Bytecode {
                 artifact: base64::engine::general_purpose::STANDARD
