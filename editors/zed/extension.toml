@@ -9,5 +9,5 @@ languages = ["languages/allen"]
 
 [grammars.allen]
 repository = "https://github.com/mcreenan/josh-allen"
-rev = "main"
+rev = "16ad9a6aa59b4bb206cc8f46ef1e31db562514ed"
 path = "editors/zed/tree-sitter-allen"
