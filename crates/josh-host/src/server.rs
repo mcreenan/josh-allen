@@ -355,6 +355,7 @@ where
     cancel_active(&session, "");
     join_executions(executions);
     grants.clear();
+    writer.finish(Instant::now() + CONNECTION_FLUSH_TIMEOUT);
     if let Ok(mut state) = tracker.lock() {
         state.disconnect();
     }
@@ -642,9 +643,13 @@ fn spawn_execution(
 
 const OUTBOUND_QUEUE_DEPTH: usize = 8;
 const CONTROL_ENQUEUE_TIMEOUT: Duration = Duration::from_secs(1);
+/// How long a closing connection waits for its queued frames to be written.
+const CONNECTION_FLUSH_TIMEOUT: Duration = Duration::from_secs(5);
 
 struct ConnectionWriter {
     sender: SyncSender<Vec<u8>>,
+    /// Signalled once the writer thread has written every earlier frame.
+    flushed: Mutex<Receiver<()>>,
     max_frame_bytes: AtomicUsize,
     failed: Arc<AtomicBool>,
     disconnected: Arc<AtomicBool>,
@@ -663,6 +668,7 @@ impl ConnectionWriter {
         pending: Arc<PendingRegistry>,
     ) -> Self {
         let (sender, receiver) = sync_channel::<Vec<u8>>(OUTBOUND_QUEUE_DEPTH);
+        let (flushed_sender, flushed) = sync_channel::<()>(1);
         let failed = Arc::new(AtomicBool::new(false));
         let writer_failed = Arc::clone(&failed);
         let writer_disconnected = Arc::clone(&disconnected);
@@ -671,6 +677,11 @@ impl ConnectionWriter {
         let writer_pending = Arc::clone(&pending);
         std::thread::spawn(move || {
             while let Ok(frame) = receiver.recv() {
+                // An empty frame is the close marker: every earlier frame is written.
+                if frame.is_empty() {
+                    let _ = flushed_sender.try_send(());
+                    break;
+                }
                 if output
                     .write_all(&frame)
                     .and_then(|()| output.flush())
@@ -689,6 +700,7 @@ impl ConnectionWriter {
         });
         Self {
             sender,
+            flushed: Mutex::new(flushed),
             max_frame_bytes: AtomicUsize::new(max_frame_bytes),
             failed,
             disconnected,
@@ -735,6 +747,29 @@ impl ConnectionWriter {
                     std::thread::yield_now();
                 }
             }
+        }
+    }
+
+    /// Wait until every queued frame is written, so a connection that ends
+    /// on input EOF still delivers its final responses before the process
+    /// exits. Gives up at `deadline` if the peer stops reading.
+    fn finish(&self, deadline: Instant) {
+        if self.failed.load(Ordering::Acquire) {
+            return;
+        }
+        let mut marker = Vec::new();
+        loop {
+            match self.sender.try_send(marker) {
+                Ok(()) => break,
+                Err(TrySendError::Full(frame)) if Instant::now() < deadline => {
+                    marker = frame;
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+                Err(_) => return,
+            }
+        }
+        if let Ok(flushed) = self.flushed.lock() {
+            let _ = flushed.recv_timeout(deadline.saturating_duration_since(Instant::now()));
         }
     }
 
