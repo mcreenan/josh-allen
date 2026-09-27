@@ -21,26 +21,28 @@ use allen_runtime::{
 use allen_sandbox_fs::{ExternalTargetKind, Rights};
 use allen_schema::ToolName;
 use allen_vm::{
-    BudgetWarning, Checkpoint, CheckpointObserver, PendingEffectId, TaskEvent, TaskEventKind,
-    VmError,
+    BudgetWarning, Checkpoint, CheckpointObserver, EffectOrigin, PendingEffectId, TaskEvent,
+    TaskEventKind, VmError,
 };
 use josh_protocol::{
     AgentAskParams, AgentMessageParams, AgentMessageResult, AgentTranscriptParams,
-    AgentTranscriptResult, CatalogSetParams, EventKind, ExecutionEventParams, ExecutionResult,
-    ExecutionStartParams, FrameReader, GrantDuration, HostProjectionSetParams, InitializeParams,
-    ModelRequestParams, PeerInfo, PermissionRequestParams, PermissionRequestResult,
-    PermissionRevokeParams, PermissionRight, PermissionTargetKind, ProgramLoadParams, PromptPolicy,
-    PromptSegmentPayload, ProtocolError, ProtocolTracker, ReceiveAction, ResponseSchemaPayload,
-    RuntimeReadyParams, StructuredPromptPayload, SubAgentAskParams, SubAgentCreateParams,
-    SubAgentCreateResult, SubAgentMessageParams, SubAgentProjectionPayload, SubAgentRunParams,
-    ToolInvokeParams, ToolInvokeResult, TranscriptPart, TranscriptRole, TypedResponseResult,
-    UserAskParams, Validate, ValidationIssuePayload, WireError, WireErrorCode, WireMessage,
-    encode_frame, notification_params, request_params, response_result,
+    AgentTranscriptResult, CatalogSetParams, EffectOriginPayload, EventKind, ExecutionEventParams,
+    ExecutionResult, ExecutionStartParams, FrameReader, GrantDuration, HostProjectionSetParams,
+    InitializeParams, ModelRequestParams, PeerInfo, PermissionRequestParams,
+    PermissionRequestResult, PermissionRevokeParams, PermissionRight, PermissionTargetKind,
+    ProgramLoadParams, PromptPolicy, PromptSegmentPayload, ProtocolError, ProtocolTracker,
+    ReceiveAction, ResponseSchemaPayload, RuntimeReadyParams, StructuredPromptPayload,
+    SubAgentAskParams, SubAgentCreateParams, SubAgentCreateResult, SubAgentMessageParams,
+    SubAgentProjectionPayload, SubAgentRunParams, ToolInvokeParams, ToolInvokeResult,
+    TranscriptPart, TranscriptRole, TypedResponseResult, UserAskParams, Validate,
+    ValidationIssuePayload, WireError, WireErrorCode, WireMessage, encode_frame,
+    notification_params, request_params, response_result,
 };
 use serde_json::Value;
 
 use crate::events::{EventClock, SystemEventClock, execution_event};
 use crate::grants::GrantRegistry;
+use crate::origin::{OriginStore, ProgramDebug};
 use crate::{HostError, PreparedExecution, Session};
 
 /// Runs one permanent JOSH connection over full-duplex byte streams.
@@ -428,6 +430,7 @@ fn spawn_execution(
         let replayed = Arc::new(AtomicBool::new(false));
         let tool_protocol_violation = Arc::new(AtomicBool::new(false));
         let cancelled = prepared.cancellation_flag();
+        let origins = Arc::new(OriginStore::default());
         let mut tools = WireToolProvider::new(
             prepared.execution_id().to_owned(),
             Arc::clone(prepared.catalog()),
@@ -510,7 +513,23 @@ fn spawn_execution(
                 .unwrap_or_else(Instant::now),
             replayed: Arc::clone(&replayed),
             started: false,
+            origins: prepared
+                .program_debug()
+                .map(|debug| (debug, Arc::clone(&origins))),
         };
+        tools.origins = Arc::clone(&origins);
+        if let Some(provider) = invoking_agent.as_mut() {
+            provider.origins = Arc::clone(&origins);
+        }
+        for provider in [model.as_mut(), user.as_mut()].into_iter().flatten() {
+            provider.origins = Arc::clone(&origins);
+        }
+        if let Some(provider) = sub_agent.as_mut() {
+            provider.origins = Arc::clone(&origins);
+        }
+        if let Some(provider) = external_grants.as_mut() {
+            provider.origins = Arc::clone(&origins);
+        }
         let mut providers = RuntimeProviders {
             tools: Some(&mut tools),
             invoking_agent: invoking_agent
@@ -1246,6 +1265,7 @@ struct WireToolProvider {
     cancelled: Arc<AtomicBool>,
     protocol_violation: Arc<AtomicBool>,
     active: BTreeMap<u64, PendingToolRequest>,
+    origins: Arc<OriginStore>,
 }
 
 struct PendingToolRequest {
@@ -1263,6 +1283,7 @@ struct WireInvokingAgentProvider {
     outgoing_ids: Arc<AtomicU64>,
     disconnected: Arc<AtomicBool>,
     active: BTreeMap<u64, PendingAgentRequest>,
+    origins: Arc<OriginStore>,
 }
 
 struct PendingAgentRequest {
@@ -1297,6 +1318,7 @@ impl WireInvokingAgentProvider {
             outgoing_ids,
             disconnected,
             active: BTreeMap::new(),
+            origins: Arc::default(),
         }
     }
 
@@ -1446,6 +1468,7 @@ fn agent_ask_params(
     execution_id: &str,
     session_id: &str,
     call: &AgentAskCall,
+    origin: Option<EffectOriginPayload>,
 ) -> Result<AgentAskParams, AgentHostError> {
     let common_operation = format!("op-{}", call.operation_id);
     let interaction_id = format!("interaction-{}", call.interaction_id);
@@ -1463,6 +1486,7 @@ fn agent_ask_params(
         attempt: call.attempt,
         validation_issues: validation_issue_payloads(&call.validation_issues),
         deadline_ms,
+        origin,
     };
     params.validate().map_err(|_| AgentHostError::Rejected)?;
     Ok(params)
@@ -1480,6 +1504,7 @@ impl InvokingAgentProvider for WireInvokingAgentProvider {
             session_id: self.session_id.clone(),
             message: call.message.clone(),
             deadline_ms: duration_ms(call.deadline),
+            origin: None,
         };
         params.validate().map_err(|_| AgentHostError::Rejected)?;
         let response = self.request(
@@ -1501,7 +1526,7 @@ impl InvokingAgentProvider for WireInvokingAgentProvider {
         call: &AgentAskCall,
         cancellation: &mut dyn AgentCancellationSignal,
     ) -> Result<Value, AgentHostError> {
-        let params = agent_ask_params(&self.execution_id, &self.session_id, call)?;
+        let params = agent_ask_params(&self.execution_id, &self.session_id, call, None)?;
         let response = self.request(
             "agent/ask",
             serde_json::to_value(params).map_err(|_| AgentHostError::Transport)?,
@@ -1527,6 +1552,7 @@ impl InvokingAgentProvider for WireInvokingAgentProvider {
             session_id: self.session_id.clone(),
             limit: u32::from(query.limit),
             deadline_ms: duration_ms(query.deadline),
+            origin: None,
         };
         params.validate().map_err(|_| AgentHostError::Rejected)?;
         let response = self.request(
@@ -1561,6 +1587,7 @@ impl InvokingAgentProvider for WireInvokingAgentProvider {
             session_id: self.session_id.clone(),
             message: call.message.clone(),
             deadline_ms: duration_ms(call.deadline),
+            origin: self.origins.get(pending),
         };
         params.validate().map_err(|_| AgentHostError::Rejected)?;
         self.start_request(
@@ -1581,7 +1608,12 @@ impl InvokingAgentProvider for WireInvokingAgentProvider {
         if cancellation.is_cancelled() {
             return Err(AgentHostError::Cancelled);
         }
-        let params = agent_ask_params(&self.execution_id, &self.session_id, call)?;
+        let params = agent_ask_params(
+            &self.execution_id,
+            &self.session_id,
+            call,
+            self.origins.get(pending),
+        )?;
         self.start_request(
             pending,
             "agent/ask",
@@ -1606,6 +1638,7 @@ impl InvokingAgentProvider for WireInvokingAgentProvider {
             session_id: self.session_id.clone(),
             limit: u32::from(query.limit),
             deadline_ms: duration_ms(query.deadline),
+            origin: self.origins.get(pending),
         };
         params.validate().map_err(|_| AgentHostError::Rejected)?;
         self.start_request(
@@ -1715,6 +1748,7 @@ struct WireResponseProvider {
     outgoing_ids: Arc<AtomicU64>,
     disconnected: Arc<AtomicBool>,
     active: BTreeMap<u64, PendingOutbound>,
+    origins: Arc<OriginStore>,
 }
 
 impl WireResponseProvider {
@@ -1737,10 +1771,15 @@ impl WireResponseProvider {
             outgoing_ids,
             disconnected,
             active: BTreeMap::new(),
+            origins: Arc::default(),
         }
     }
 
-    fn params(&self, call: &AgentAskCall) -> Result<Value, ResponseHostError> {
+    fn params(
+        &self,
+        call: &AgentAskCall,
+        origin: Option<EffectOriginPayload>,
+    ) -> Result<Value, ResponseHostError> {
         let PromptPayload::Structured(prompt) = &call.prompt else {
             return Err(ResponseHostError::Rejected);
         };
@@ -1761,6 +1800,7 @@ impl WireResponseProvider {
                     attempt: call.attempt,
                     validation_issues,
                     deadline_ms,
+                    origin,
                 };
                 params.validate().map_err(|_| ResponseHostError::Rejected)?;
                 serde_json::to_value(params).map_err(|_| ResponseHostError::Transport)
@@ -1775,6 +1815,7 @@ impl WireResponseProvider {
                     attempt: call.attempt,
                     validation_issues,
                     deadline_ms,
+                    origin,
                 };
                 params.validate().map_err(|_| ResponseHostError::Rejected)?;
                 serde_json::to_value(params).map_err(|_| ResponseHostError::Transport)
@@ -1852,7 +1893,7 @@ impl ResponseProvider for WireResponseProvider {
             .unwrap_or_else(Instant::now);
         let response = send_outbound_request(
             self.kind.method(),
-            self.params(call)?,
+            self.params(call, None)?,
             &self.writer,
             &self.tracker,
             &self.pending,
@@ -1880,9 +1921,10 @@ impl ResponseProvider for WireResponseProvider {
         let deadline_at = Instant::now()
             .checked_add(call.deadline)
             .unwrap_or_else(Instant::now);
+        // A typed-response retry reuses the effect's pending ID and origin.
         let outbound = start_outbound_request(
             self.kind.method(),
-            self.params(call)?,
+            self.params(call, self.origins.get(pending))?,
             &self.writer,
             &self.tracker,
             &self.pending,
@@ -1959,6 +2001,7 @@ struct WireSubAgentProvider {
     outgoing_ids: Arc<AtomicU64>,
     disconnected: Arc<AtomicBool>,
     active: BTreeMap<u64, PendingWireSubAgent>,
+    origins: Arc<OriginStore>,
 }
 
 impl WireSubAgentProvider {
@@ -1978,6 +2021,7 @@ impl WireSubAgentProvider {
             outgoing_ids,
             disconnected,
             active: BTreeMap::new(),
+            origins: Arc::default(),
         }
     }
 
@@ -2129,6 +2173,7 @@ impl SubAgentProvider for WireSubAgentProvider {
             prompt: structured_prompt_payload(&call.prompt),
             projection: Self::projection(&call.projection),
             deadline_ms: duration_ms(call.deadline),
+            origin: None,
         };
         params.validate().map_err(|_| SubAgentHostError::Rejected)?;
         let response = self.send(
@@ -2148,7 +2193,7 @@ impl SubAgentProvider for WireSubAgentProvider {
         call: &SubAgentRunCall,
         cancellation: &mut dyn AgentCancellationSignal,
     ) -> Result<Value, SubAgentHostError> {
-        let params = sub_agent_run_params(&self.execution_id, call)?;
+        let params = sub_agent_run_params(&self.execution_id, call, None)?;
         let response = self.send(
             "sub_agent/run",
             serde_json::to_value(params).map_err(|_| SubAgentHostError::Transport)?,
@@ -2172,6 +2217,7 @@ impl SubAgentProvider for WireSubAgentProvider {
             sub_agent_id: call.target.as_str().to_owned(),
             message: call.message.clone(),
             deadline_ms: duration_ms(call.deadline),
+            origin: None,
         };
         params.validate().map_err(|_| SubAgentHostError::Rejected)?;
         let response = self.send(
@@ -2191,7 +2237,7 @@ impl SubAgentProvider for WireSubAgentProvider {
         call: &SubAgentAskCall,
         cancellation: &mut dyn AgentCancellationSignal,
     ) -> Result<Value, SubAgentHostError> {
-        let params = sub_agent_ask_params(&self.execution_id, call)?;
+        let params = sub_agent_ask_params(&self.execution_id, call, None)?;
         let response = self.send(
             "sub_agent/ask",
             serde_json::to_value(params).map_err(|_| SubAgentHostError::Transport)?,
@@ -2219,6 +2265,7 @@ impl SubAgentProvider for WireSubAgentProvider {
             prompt: structured_prompt_payload(&call.prompt),
             projection: Self::projection(&call.projection),
             deadline_ms: duration_ms(call.deadline),
+            origin: self.origins.get(pending),
         };
         params.validate().map_err(|_| SubAgentHostError::Rejected)?;
         self.start(
@@ -2239,7 +2286,7 @@ impl SubAgentProvider for WireSubAgentProvider {
         if cancellation.is_cancelled() {
             return Err(SubAgentHostError::Cancelled);
         }
-        let params = sub_agent_run_params(&self.execution_id, call)?;
+        let params = sub_agent_run_params(&self.execution_id, call, self.origins.get(pending))?;
         self.start(
             pending,
             "sub_agent/run",
@@ -2264,6 +2311,7 @@ impl SubAgentProvider for WireSubAgentProvider {
             sub_agent_id: call.target.as_str().to_owned(),
             message: call.message.clone(),
             deadline_ms: duration_ms(call.deadline),
+            origin: self.origins.get(pending),
         };
         params.validate().map_err(|_| SubAgentHostError::Rejected)?;
         self.start(
@@ -2284,7 +2332,7 @@ impl SubAgentProvider for WireSubAgentProvider {
         if cancellation.is_cancelled() {
             return Err(SubAgentHostError::Cancelled);
         }
-        let params = sub_agent_ask_params(&self.execution_id, call)?;
+        let params = sub_agent_ask_params(&self.execution_id, call, self.origins.get(pending))?;
         self.start(
             pending,
             "sub_agent/ask",
@@ -2337,6 +2385,7 @@ impl SubAgentProvider for WireSubAgentProvider {
 fn sub_agent_run_params(
     execution_id: &str,
     call: &SubAgentRunCall,
+    origin: Option<EffectOriginPayload>,
 ) -> Result<SubAgentRunParams, SubAgentHostError> {
     let (operation_id, interaction_id, prompt, response_schema, validation_issues, deadline_ms) =
         WireSubAgentProvider::response_fields(&call.response)?;
@@ -2350,6 +2399,7 @@ fn sub_agent_run_params(
         attempt: call.response.attempt,
         validation_issues,
         deadline_ms,
+        origin,
     };
     params.validate().map_err(|_| SubAgentHostError::Rejected)?;
     Ok(params)
@@ -2358,6 +2408,7 @@ fn sub_agent_run_params(
 fn sub_agent_ask_params(
     execution_id: &str,
     call: &SubAgentAskCall,
+    origin: Option<EffectOriginPayload>,
 ) -> Result<SubAgentAskParams, SubAgentHostError> {
     let (operation_id, interaction_id, prompt, response_schema, validation_issues, deadline_ms) =
         WireSubAgentProvider::response_fields(&call.response)?;
@@ -2371,6 +2422,7 @@ fn sub_agent_ask_params(
         attempt: call.response.attempt,
         validation_issues,
         deadline_ms,
+        origin,
     };
     params.validate().map_err(|_| SubAgentHostError::Rejected)?;
     Ok(params)
@@ -2415,6 +2467,7 @@ struct WireExternalGrantProvider {
     clock: Arc<dyn EventClock>,
     replayed: Arc<AtomicBool>,
     active: BTreeMap<u64, PendingPermissionRequest>,
+    origins: Arc<OriginStore>,
 }
 
 struct PendingPermissionRequest {
@@ -2455,6 +2508,7 @@ impl WireExternalGrantProvider {
             clock,
             replayed,
             active: BTreeMap::new(),
+            origins: Arc::default(),
         }
     }
 
@@ -2549,6 +2603,7 @@ impl ExternalGrantDecisionProvider for WireExternalGrantProvider {
             max_bytes: request.max_bytes,
             duration: GrantDuration::Execution,
             reason: request.reason.clone(),
+            origin: None,
         };
         params.validate().map_err(|_| VmError::AgentUnavailable)?;
         let response = send_outbound_request(
@@ -2659,6 +2714,7 @@ impl ExternalGrantDecisionProvider for WireExternalGrantProvider {
             max_bytes: request.max_bytes,
             duration: GrantDuration::Execution,
             reason: request.reason.clone(),
+            origin: self.origins.get(pending_id),
         };
         params.validate().map_err(|_| VmError::AgentUnavailable)?;
         let outbound = start_outbound_request(
@@ -2862,10 +2918,25 @@ struct WireTaskObserver {
     deadline: Instant,
     replayed: Arc<AtomicBool>,
     started: bool,
+    /// The program's debug tables and the execution's origin store, when the
+    /// artifact has debug information.
+    origins: Option<(Arc<ProgramDebug>, Arc<OriginStore>)>,
 }
 
 impl CheckpointObserver for WireTaskObserver {
     fn checkpoint(&mut self, _checkpoint: Checkpoint) {}
+
+    fn observes_effect_origins(&self) -> bool {
+        self.origins.is_some()
+    }
+
+    fn effect_started(&mut self, pending: PendingEffectId, origin: &EffectOrigin) {
+        if let Some((debug, store)) = &self.origins {
+            if let Some(origin) = debug.origin(origin) {
+                store.insert(pending, origin);
+            }
+        }
+    }
 
     fn execution_effect_provenance(&mut self, replayed: bool) {
         self.replayed.store(replayed, Ordering::Release);
@@ -3015,6 +3086,7 @@ impl WireToolProvider {
             cancelled,
             protocol_violation,
             active: BTreeMap::new(),
+            origins: Arc::default(),
         }
     }
 
@@ -3101,6 +3173,7 @@ impl ToolProvider for WireToolProvider {
             error_schema: definition.error_schema.digest().to_owned(),
             input,
             deadline_ms,
+            origin: None,
         };
         params.validate().map_err(|_| ToolHostError::Rejected)?;
         let message = WireMessage::Request {
@@ -3256,6 +3329,7 @@ impl ToolProvider for WireToolProvider {
             error_schema: definition.error_schema.digest().to_owned(),
             input,
             deadline_ms: duration_ms(invocation.deadline),
+            origin: self.origins.get(pending_id),
         };
         params.validate().map_err(|_| ToolHostError::Rejected)?;
         self.effect_event(
@@ -3753,6 +3827,7 @@ mod tests {
             deadline: Instant::now() + Duration::from_millis(10),
             replayed: Arc::new(AtomicBool::new(false)),
             started: false,
+            origins: None,
         };
         observer.task_event(TaskEvent {
             sequence: 1,
@@ -3783,6 +3858,7 @@ mod tests {
             deadline: Instant::now() + Duration::from_secs(1),
             replayed: Arc::new(AtomicBool::new(false)),
             started: false,
+            origins: None,
         };
         observer.task_event(TaskEvent {
             sequence: 1,
@@ -3849,6 +3925,7 @@ mod tests {
             deadline: Instant::now() + Duration::from_secs(1),
             replayed: Arc::new(AtomicBool::new(false)),
             started: false,
+            origins: None,
         };
 
         observer.execution_effect_provenance(true);
@@ -3902,6 +3979,7 @@ mod tests {
             deadline: Instant::now() + Duration::from_secs(1),
             replayed: Arc::new(AtomicBool::new(true)),
             started: false,
+            origins: None,
         };
         live.execution_effect_provenance(false);
         let deadline = Instant::now() + Duration::from_secs(1);

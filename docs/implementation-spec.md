@@ -28,7 +28,7 @@ The workspace uses these crates:
 | `allen-http-get` | Restricted HTTPS GET and destination policy |
 | `allen-testkit` | Deterministic recording, replay, redaction, and provider test support |
 | `allen-cli` | `check`, `build`, `inspect`, `run`, and package commands |
-| `josh-protocol` | The current `josh/1.6` message, payload, framing, and connection-state contract |
+| `josh-protocol` | The current `josh/1.7` message, payload, framing, and connection-state contract |
 | `josh-host` | JOSH session lifecycle, provider adapters, stdio connection, and execution supervision |
 | `josh` | The `serve` and `run` executable entry points |
 
@@ -273,6 +273,15 @@ early return, `?`, `break`, and `continue` join live children without
 cancelling them. Terminal failure, timeout, external cancellation, and `stop`
 cancel then join unfinished work before the terminal outcome is reported.
 
+A host observer may request effect origins. The VM then keeps, per call frame,
+the active executions of the loops recorded in the artifact's debug table:
+reaching a loop header that is not active enters a new instance at iteration
+1, a repeat edge advances the iteration, and leaving the loop's instruction
+range ends the activation. Spawned tasks remember the spawning frames. The
+observer receives the task, spawn chain, and frames immediately before the
+provider is asked to start each effect. Tracking adds no instructions and
+charges no budget; functions without loops do no per-instruction work.
+
 The VM validates every provider completion against the exact result type and
 operation-specific error-code allowlist before resuming a task. A missing
 provider produces the operation's documented unavailable result when that
@@ -430,17 +439,21 @@ or an output limit. It never invokes a shell or retries.
 ## 10. Current JOSH protocol
 
 JOSH uses the fixed envelope marker `josh/1` and negotiates the sole current
-protocol version `josh/1.6`. Transport is an ASCII
-decimal byte length, `:`, exactly that many UTF-8 JSON bytes, and `,`. Frames are
-bounded before allocation. JSON objects reject duplicate and unknown fields;
-request IDs and methods are validated before entering connection state.
+protocol version `josh/1.7`. Each frame is an ASCII header
+`Content-Length: <decimal byte count>\r\n`, the exact header
+`Content-Type: application/josh+json; charset=utf-8\r\n`, an empty `\r\n`
+line, and exactly that many UTF-8 JSON bytes. The default frame limit is
+4,194,304 bytes, and `initialize` negotiates a smaller `max_frame_bytes`.
+Frames are bounded before allocation. JSON objects reject duplicate and
+unknown fields; request IDs and methods are validated before entering
+connection state.
 
-The host sends `initialize` once with `protocol_versions: ["josh/1.6"]`, one
+The host sends `initialize` once with `protocol_versions: ["josh/1.7"]`, one
 execution mode, an invoking-session identity or `null`, limits, and standard
 capabilities.
-The runtime selects `josh/1.6` or rejects initialization. The result contains
+The runtime selects `josh/1.7` or rejects initialization. The result contains
 the runtime identity, effective limits, and the current feature set, including
-`host-projection`. There is no minor-version fallback.
+`host-projection` and `effect-origin`. There is no minor-version fallback.
 
 The required connection prefix is
 `initialize -> host/project -> catalog/set`. `host/project` is a host-to-runtime
@@ -542,7 +555,90 @@ searching source text. `execution/start` also adds sorted canonical
 declares support for those fields. Unknown fields, malformed names or patterns,
 duplicates, and unsorted lists are protocol errors.
 
-### 10.1 Headless Executor tool provider
+### 10.1 Effect origins
+
+The `effect-origin` feature reports where each provider request came from.
+Every runtime-to-host request (`tool/invoke`, `model/request`, `user/ask`,
+`agent/message`, `agent/ask`, `agent/transcript`, `sub_agent/create`,
+`sub_agent/run`, `sub_agent/message`, `sub_agent/ask`, and
+`permission/request`) has an optional `origin` field. It is present when the
+loaded artifact has debug information and absent otherwise. Blocking provider
+calls that have no VM pending effect omit it. Origins are diagnostic: they are
+not part of request digests, replay journals, or execution decisions, and a
+host must not use them for authorization. They expose function names and
+source spans, the same information class as runtime stack frames, and never
+values.
+
+```json
+"origin": {
+  "task": 0,
+  "site": {"id": 0, "function": "src/main.allen::main", "instruction": 23,
+           "source": "src/main.allen", "start": 512, "end": 590,
+           "line": 31, "column": 17, "end_line": 31, "end_column": 95},
+  "scope": [
+    {"kind": "for", "construct": 3, "source": "src/main.allen", "start": 347,
+     "end": 709, "line": 22, "column": 3, "end_line": 38, "end_column": 4,
+     "region": "body", "instance": 1, "iteration": 2},
+    {"kind": "call", "function": "src/main.allen::apply", "instruction": 40,
+     "source": "src/main.allen", "start": 410, "end": 432, "line": 27,
+     "column": 9, "end_line": 27, "end_column": 31}
+  ]
+}
+```
+
+- `task` is the scheduler task that owns the effect; the root task is `0`.
+  `parent_task` names the spawning task and is present exactly when `task` is
+  not `0`. A spawned effect future is its own task.
+- `site` is the instruction that started the request: the `await` that first
+  polls the effect future, or the `spawn` of an effect future. A future
+  created in one place and awaited in another is attributed to the `await`.
+  `id` names the static effect site from `program/load` when the future was
+  created by one effect call in the same function.
+- `scope` lists, outermost first, the constructs that enclose the site and
+  the frame and task boundaries that lead to it. A `call` entry names the
+  called `function` and the calling `instruction`; the entries after it
+  belong to the callee. A `spawn` entry names the spawned `task` and
+  `function`; the entries before it are the spawning task's scope at the
+  spawn, and the entries after it belong to the spawned task.
+- Construct entries have `kind` `for`, `while`, `loop`, `if`, `match`, or
+  `await_block`, and a `construct` ID from the artifact's debug table. `region`
+  names the part that contains the site or call: `condition` or `body` for
+  loops, `then` or `else` for `if` (repeated as `branch`), `arm` with a 0-based
+  `arm` number for `match`, and `body` for `await_block`. An `if` or `match`
+  whose condition or scrutinee contains the site is omitted, because that
+  effect decides the branch rather than running inside one.
+- Loop entries carry `instance`, which increases each time the loop is entered
+  anywhere in the execution, and the 1-based `iteration`. The iteration
+  advances when the loop takes a repeat edge; a `continue` counts as a
+  completed iteration, and a `for` over an empty collection has no effects.
+- Every entry and the site carry `source`, UTF-8 byte offsets `start` and
+  `end`, and, when the program was loaded from source text, 1-based `line`,
+  `column`, `end_line`, and `end_column`. Columns count Unicode scalar values;
+  the end position locates the exclusive end offset. Source paths are the
+  host's `source_bundle` paths when they match, otherwise the artifact's debug
+  paths.
+- `scope` has at most 64 entries. A deeper chain keeps its innermost entries
+  and sets `truncated: true`.
+- A typed-response retry of the same effect carries the same origin.
+
+A successful `program/load` also returns `debug`, which is `null` when the
+artifact has no debug information. It contains `constructs`, `effect_sites`,
+and `truncated`:
+
+- Each construct has its `id`, `kind`, readable `function`, `parent` construct
+  ID or `null`, source span with positions, and `regions`, each with `region`,
+  `arm` for match arms, and a source span.
+- Each effect site has an `id`, a `kind` (`tool`, `model`, `user`, `agent`,
+  `sub_agent`, `permission`, `fs`, `http`, or `exec`), the source `operation`
+  such as `model.request` or `tools.workspace.read.call`, the `tool` name for
+  tool calls, the `function`, the `instruction` that creates the effect future,
+  the `start_instruction` of the `await` or `spawn` that starts it in the same
+  function or `null`, a source span with positions, and the enclosing
+  `constructs`, outermost first, under the same omission rule as `scope`.
+- The runtime stops adding entries before the tables exceed one quarter of the
+  negotiated frame limit and then sets `truncated: true`.
+
+### 10.2 Headless Executor tool provider
 
 `josh run --executor` enables one unattended tool provider. A repeatable
 `--grant-tool <name>` grants only that exact canonical catalog name;
@@ -586,7 +682,7 @@ stderr, credentials, or paths.
 
 This adapter does not retry, run `executor resume`, open an approval flow, or
 fall back to a shell, agent, model, or another provider. It uses the existing
-`josh/1.6` `tool/invoke` request and response shapes, so it adds no protocol
+`josh/1.7` `tool/invoke` request and response shapes, so it adds no protocol
 method, feature string, or compatibility branch. Current recording captures
 the validated tool boundary result; replay returns that recorded result and
 does not start Executor.

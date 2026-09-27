@@ -619,17 +619,47 @@ fn run_parity_transcript(
         match message {
             WireMessage::Response {
                 id,
-                result: Some(result),
+                result: Some(mut result),
                 ..
             } if id == "h-3" || id == "h-4" => {
+                // Debug tables name host source paths and positions only when
+                // loaded from source; compare their byte spans.
+                if let Some(debug) = result.as_object_mut().unwrap().remove("debug") {
+                    let sites = debug["effect_sites"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .map(|site| {
+                            json!([
+                                site["id"],
+                                site["operation"],
+                                site["function"],
+                                site["start"],
+                                site["end"]
+                            ])
+                        })
+                        .collect::<Vec<_>>();
+                    normalized.push(json!({"sites":sites}));
+                }
                 normalized.push(json!({"response":id,"result":result}));
             }
             WireMessage::Notification { method, mut params } if method == "execution/event" => {
                 params.as_object_mut().unwrap().remove("elapsed_ms");
                 normalized.push(json!({"event":params}));
             }
-            WireMessage::Request { method, params, .. } if method == "tool/invoke" => {
+            WireMessage::Request {
+                method, mut params, ..
+            } if method == "tool/invoke" => {
+                // Origins are diagnostic. Only a source load has the text for
+                // line and column positions, so compare byte spans alone.
+                let origin = params.as_object_mut().unwrap().remove("origin").unwrap();
                 normalized.push(json!({"tool":params}));
+                normalized.push(json!({"site":[
+                    origin["site"]["function"],
+                    origin["site"]["instruction"],
+                    origin["site"]["start"],
+                    origin["site"]["end"],
+                ]}));
             }
             _ => {}
         }
@@ -2266,13 +2296,15 @@ fn tool_call_and_reentrant_program_load_complete_over_raw_stdio() {
     let WireMessage::Request {
         id: tool_id,
         method,
-        ..
+        params,
     } = invocation
     else {
         panic!("missing tool invocation");
     };
     assert_eq!(method, "tool/invoke");
     assert_eq!(tool_id, "r-1");
+    // This artifact has no debug information, so the request has no origin.
+    assert!(params.get("origin").is_none());
 
     let tool_result = serde_json::to_value(ToolInvokeResult::Ok {
         value: json!("answer"),
@@ -2701,4 +2733,250 @@ fn tool_call_and_reentrant_program_load_complete_over_raw_stdio() {
     let output = child.wait_with_output().unwrap();
     assert!(output.status.success());
     assert!(output.stderr.is_empty());
+}
+
+#[test]
+#[allow(clippy::too_many_lines)]
+fn provider_requests_carry_effect_origins_over_raw_stdio() {
+    let source = r#"manifest {
+  language: "0.1"
+  entry: main
+  capabilities: [model.request, user.ask]
+  tools: { required: [{ name: "example.lookup", version: ">=1.0.0, <2.0.0" }] }
+}
+export async fn main() returns String effects [model.request, user.ask, tool.example.lookup@1] {
+  mut answer = "";
+  for round in 0..2 {
+    answer = match await tools.example.lookup.call("question") {
+      Ok(value) => value
+      Err(_) => "failed"
+    };
+  }
+  let judged = match await model.request<String>(prompt { system: "Judge." output: String }) {
+    Ok(value) => value
+    Err(error) => error.code
+  };
+  let asked = match await user.ask<String>(prompt { system: "Ask." output: String }) {
+    Ok(value) => value
+    Err(error) => error.code
+  };
+  string.join([answer, judged, asked], ",")
+}
+"#;
+    let schema_json = json!({"type":"string"});
+    let initialize = InitializeParams {
+        host: PeerInfo {
+            name: "origin-host".to_owned(),
+            version: "1.0.0".to_owned(),
+        },
+        protocol_versions: vec![josh_protocol::PROTOCOL_VERSION.to_owned()],
+        language_versions: vec![">=0.1.0, <0.2.0".to_owned()],
+        execution_mode: ExecutionMode::Unattended,
+        invoking_session_id: InvokingSessionId::Null,
+        standard_capabilities: Vec::new(),
+        limits: limits(),
+        extensions: Vec::new(),
+    };
+    let catalog = CatalogSetParams {
+        schema_dialect: josh_protocol::SCHEMA_DIALECT.to_owned(),
+        metadata: josh_protocol::CatalogMetadata::complete("test-host", "1", 1),
+        tools: vec![CatalogTool {
+            name: "example.lookup".to_owned(),
+            version: "1.2.3".to_owned(),
+            description: "Look up one example value.".to_owned(),
+            input_schema: schema_json.clone(),
+            output_schema: schema_json.clone(),
+            error_schema: schema_json,
+            effects: Vec::new(),
+            idempotency: Idempotency::Unknown,
+        }],
+    };
+    let load = ProgramLoadParams::SourceBundle {
+        files: vec![SourceFile {
+            path: "src/main.allen".to_owned(),
+            encoding: FileEncoding::Utf8,
+            content: source.to_owned(),
+        }],
+    };
+    let mut child = Command::new(env!("CARGO_BIN_EXE_josh"))
+        .arg("serve")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    let stdout = child.stdout.take().unwrap();
+    let mut reader = FrameReader::new(stdout, josh_protocol::DEFAULT_MAX_FRAME_BYTES);
+    assert!(matches!(
+        receive(&mut reader),
+        WireMessage::Notification { ref method, .. } if method == "runtime/ready"
+    ));
+    let mut result = |id: &str| match receive(&mut reader) {
+        WireMessage::Response {
+            id: response,
+            result: Some(result),
+            ..
+        } if response == id => result,
+        other => panic!("unexpected {other:?}"),
+    };
+    send(&mut stdin, "h-1", "initialize", &initialize);
+    assert_eq!(
+        result("h-1")["protocol_version"],
+        josh_protocol::PROTOCOL_VERSION
+    );
+    send(
+        &mut stdin,
+        "h-p",
+        "host/project",
+        &projection_value(&json!(initialize), &json!(catalog)),
+    );
+    result("h-p");
+    send(&mut stdin, "h-2", "catalog/set", &catalog);
+    result("h-2");
+    send(&mut stdin, "h-3", "program/load", &load);
+    let loaded = result("h-3");
+    let debug = &loaded["debug"];
+    assert_eq!(debug["truncated"], false);
+    let constructs = debug["constructs"].as_array().unwrap();
+    let for_loop = constructs
+        .iter()
+        .find(|construct| construct["kind"] == "for")
+        .expect("for construct");
+    assert_eq!(for_loop["source"], "src/main.allen");
+    assert_eq!(
+        (&for_loop["line"], &for_loop["column"]),
+        (&json!(9), &json!(3))
+    );
+    let sites = debug["effect_sites"].as_array().unwrap();
+    let site_summary = sites
+        .iter()
+        .map(|site| {
+            (
+                site["kind"].as_str().unwrap(),
+                site["operation"].as_str().unwrap(),
+                site["line"].as_u64().unwrap(),
+                site["constructs"].as_array().unwrap().len(),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        site_summary,
+        [
+            ("tool", "tools.example.lookup.call", 10, 1),
+            ("model", "model.request", 15, 0),
+            ("user", "user.ask", 19, 0),
+        ]
+    );
+
+    let start = ExecutionStartParams {
+        execution_id: "exec-origin".to_owned(),
+        program_id: loaded["program_id"].as_str().unwrap().to_owned(),
+        artifact_digest: loaded["artifact_digest"].as_str().unwrap().to_owned(),
+        entry: "main".to_owned(),
+        input: serde_json::Value::Null,
+        working_directory: None,
+        granted_capabilities: Vec::new(),
+        granted_tools: vec!["example.lookup".to_owned()],
+        allowed_http_origins: Vec::new(),
+        granted_exec: Vec::new(),
+        granted_exec_environment: Vec::new(),
+        limits: BTreeMap::from([("wall_ms".to_owned(), 5_000)]),
+    };
+    send(&mut stdin, "h-4", "execution/start", &start);
+    let mut origins = Vec::new();
+    let output = loop {
+        match receive(&mut reader) {
+            WireMessage::Request { id, method, params } => {
+                let reply = match method.as_str() {
+                    "tool/invoke" => json!({"outcome":"ok","value":"answer"}),
+                    "model/request" => json!({"value":"judged"}),
+                    "user/ask" => json!({"value":"asked"}),
+                    other => panic!("unexpected provider request {other}"),
+                };
+                origins.push((method, params["origin"].clone()));
+                send_message(
+                    &mut stdin,
+                    &WireMessage::Response {
+                        id,
+                        result: Some(reply),
+                        error: None,
+                    },
+                );
+            }
+            WireMessage::Response {
+                id,
+                result: Some(result),
+                ..
+            } if id == "h-4" => break result,
+            WireMessage::Notification { .. } => {}
+            other => panic!("unexpected {other:?}"),
+        }
+    };
+    assert_eq!(
+        output,
+        json!({"outcome":"completed","output":"answer,judged,asked"})
+    );
+    drop(stdin);
+    assert!(child.wait().unwrap().success());
+
+    let summary = origins
+        .iter()
+        .map(|(method, origin)| {
+            let scope = origin["scope"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|entry| {
+                    let mut text = entry["kind"].as_str().unwrap().to_owned();
+                    for key in ["region", "arm", "instance", "iteration"] {
+                        if !entry[key].is_null() {
+                            text.push_str(&format!(" {key}={}", entry[key]));
+                        }
+                    }
+                    text
+                })
+                .collect::<Vec<_>>();
+            (
+                method.as_str(),
+                origin["task"].as_u64().unwrap(),
+                origin["site"]["line"].as_u64().unwrap(),
+                origin["site"]["id"].as_u64().unwrap(),
+                scope,
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        summary,
+        [
+            (
+                "tool/invoke",
+                0,
+                10,
+                0,
+                vec!["for region=\"body\" instance=1 iteration=1".to_owned()]
+            ),
+            (
+                "tool/invoke",
+                0,
+                10,
+                0,
+                vec!["for region=\"body\" instance=1 iteration=2".to_owned()]
+            ),
+            ("model/request", 0, 15, 1, Vec::new()),
+            ("user/ask", 0, 19, 2, Vec::new()),
+        ]
+    );
+    let site = &origins[0].1["site"];
+    assert_eq!(site["function"], "src/main.allen::main");
+    assert_eq!(site["source"], "src/main.allen");
+    assert_eq!(
+        &source[usize::try_from(site["start"].as_u64().unwrap()).unwrap()
+            ..usize::try_from(site["end"].as_u64().unwrap()).unwrap()],
+        r#"await tools.example.lookup.call("question")"#
+    );
+    assert_eq!(
+        (&site["column"], &site["end_line"]),
+        (&json!(20), &json!(10))
+    );
 }

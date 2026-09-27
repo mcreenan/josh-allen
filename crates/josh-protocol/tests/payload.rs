@@ -4,12 +4,13 @@ use josh_protocol::{
     AgentAskParams, AgentMessageParams, AgentMessageResult, AgentTranscriptParams,
     AgentTranscriptResult, CatalogSetParams, CatalogSetResult, EventKind, EventSequenceTracker,
     ExecutionEventParams, ExecutionStartParams, FEATURES, FileEncoding, GrantDuration,
-    HostProjectionSetParams, InitializeParams, InitializeResult, ModelRequestParams,
-    PROTOCOL_VERSION, PeerInfo, PermissionRequestParams, PermissionRequestResult,
-    PermissionRevokeParams, PermissionRight, PermissionTargetKind, ProgramLoadParams,
-    ProjectionSectionKind, ProtocolError, ProtocolLimits, SessionBindingLevel, SourceFile,
-    SubAgentAskParams, SubAgentCreateParams, SubAgentCreateResult, SubAgentMessageParams,
-    SubAgentRunParams, ToolInvokeResult, TranscriptPart, Validate, request_params,
+    HostProjectionSetParams, InitializeParams, InitializeResult, MAX_ORIGIN_SCOPE,
+    ModelRequestParams, PROTOCOL_VERSION, PeerInfo, PermissionRequestParams,
+    PermissionRequestResult, PermissionRevokeParams, PermissionRight, PermissionTargetKind,
+    ProgramDebugPayload, ProgramLoadParams, ProjectionSectionKind, ProtocolError, ProtocolLimits,
+    SessionBindingLevel, SourceFile, SubAgentAskParams, SubAgentCreateParams, SubAgentCreateResult,
+    SubAgentMessageParams, SubAgentRunParams, ToolInvokeParams, ToolInvokeResult, TranscriptPart,
+    Validate, request_params,
 };
 use serde_json::json;
 
@@ -329,8 +330,8 @@ fn initialize_result_features_are_exact() {
 }
 
 #[test]
-fn exec_grants_use_the_strict_josh_1_6_start_contract() {
-    assert_eq!(PROTOCOL_VERSION, "josh/1.6");
+fn exec_grants_use_the_strict_josh_1_7_start_contract() {
+    assert_eq!(PROTOCOL_VERSION, "josh/1.7");
     assert!(FEATURES.contains(&"exec-run"));
     let value = json!({
         "execution_id":"exec-1",
@@ -569,6 +570,7 @@ fn validates_exact_agent_payloads() {
         session_id: "session-1".into(),
         limit: 20,
         deadline_ms: 1_000,
+        origin: None,
     };
     transcript.validate().unwrap();
     let mut invalid = transcript;
@@ -662,6 +664,7 @@ fn validates_file_and_directory_permission_decisions() {
         max_bytes: 1_000,
         duration: GrantDuration::Execution,
         reason: "Read the selected report.".into(),
+        origin: None,
     };
     file_request.validate().unwrap();
     let file_allow = PermissionRequestResult::Allow {
@@ -695,6 +698,7 @@ fn validates_file_and_directory_permission_decisions() {
         max_bytes: 2_000,
         duration: GrantDuration::Execution,
         reason: "Read selected reports.".into(),
+        origin: None,
     };
     directory_request.validate().unwrap();
     let directory_allow = PermissionRequestResult::Allow {
@@ -883,4 +887,168 @@ fn request_param_helper_does_not_reparse_wire_bytes() {
     let error: ProtocolError =
         request_params::<InitializeParams>(&message, "catalog/set").unwrap_err();
     assert!(matches!(error, ProtocolError::InvalidMessage(_)));
+}
+
+fn origin_value() -> serde_json::Value {
+    let span = |line: u32| json!({"source":"src/main.allen","start":10,"end":30,"line":line,"column":3,"end_line":line,"end_column":23});
+    let entry = |extra: serde_json::Value| {
+        let mut value = span(2);
+        value
+            .as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        value
+    };
+    let mut site = span(2);
+    site.as_object_mut().unwrap().extend(
+        json!({"id":0,"function":"src/main.allen::main","instruction":7})
+            .as_object()
+            .unwrap()
+            .clone(),
+    );
+    json!({
+        "task":3,
+        "parent_task":0,
+        "site":site,
+        "scope":[
+            entry(json!({"kind":"for","construct":0,"region":"body","instance":1,"iteration":2})),
+            entry(json!({"kind":"while","construct":1,"region":"condition","instance":4,"iteration":1})),
+            entry(json!({"kind":"if","construct":2,"region":"else","branch":"else"})),
+            entry(json!({"kind":"match","construct":3,"region":"arm","arm":1})),
+            entry(json!({"kind":"await_block","construct":4,"region":"body"})),
+            entry(json!({"kind":"spawn","function":"src/main.allen::work","instruction":9,"task":3})),
+            entry(json!({"kind":"call","function":"src/main.allen::helper","instruction":5})),
+        ],
+    })
+}
+
+#[test]
+fn effect_origins_are_optional_bounded_and_kind_consistent() {
+    let tool = |origin: Option<serde_json::Value>| {
+        let mut value = json!({
+            "execution_id":"exec-1",
+            "operation_id":"op-1",
+            "tool":"example.lookup",
+            "tool_version":"1.0.0",
+            "catalog_digest":format!("sha256:{}", "a".repeat(64)),
+            "input_schema":format!("sha256:{}", "b".repeat(64)),
+            "output_schema":format!("sha256:{}", "c".repeat(64)),
+            "error_schema":format!("sha256:{}", "d".repeat(64)),
+            "input":"question",
+            "deadline_ms":1000,
+        });
+        if let Some(origin) = origin {
+            value["origin"] = origin;
+        }
+        serde_json::from_value::<ToolInvokeParams>(value)
+            .map_err(|error| error.to_string())
+            .and_then(|params| {
+                params
+                    .validate()
+                    .map(|()| params)
+                    .map_err(|error| error.to_string())
+            })
+    };
+    assert!(tool(None).unwrap().origin.is_none());
+    let parsed = tool(Some(origin_value())).unwrap();
+    let origin = parsed.origin.as_ref().unwrap();
+    assert_eq!(origin.scope.len(), 7);
+    assert_eq!(origin.site.id, Some(0));
+    assert_eq!(
+        serde_json::to_value(&parsed).unwrap()["origin"],
+        origin_value(),
+        "origins round-trip exactly"
+    );
+
+    let invalid = |mutate: &dyn Fn(&mut serde_json::Value)| {
+        let mut origin = origin_value();
+        mutate(&mut origin);
+        assert!(tool(Some(origin.clone())).is_err(), "accepted {origin}");
+    };
+    invalid(&|origin| origin["parent_task"] = serde_json::Value::Null);
+    invalid(&|origin| origin["task"] = json!(0));
+    invalid(&|origin| origin["unknown"] = json!(true));
+    invalid(&|origin| origin["site"]["line"] = json!(0));
+    invalid(&|origin| {
+        origin["site"].as_object_mut().unwrap().remove("end_column");
+    });
+    invalid(&|origin| origin["site"]["start"] = json!(40));
+    invalid(&|origin| {
+        origin["scope"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("iteration");
+    });
+    invalid(&|origin| origin["scope"][0]["iteration"] = json!(0));
+    invalid(&|origin| origin["scope"][0]["region"] = json!("then"));
+    invalid(&|origin| origin["scope"][2]["branch"] = json!("then"));
+    invalid(&|origin| {
+        origin["scope"][3].as_object_mut().unwrap().remove("arm");
+    });
+    invalid(&|origin| origin["scope"][4]["construct"] = serde_json::Value::Null);
+    invalid(&|origin| origin["scope"][5]["construct"] = json!(9));
+    invalid(&|origin| {
+        origin["scope"][6]
+            .as_object_mut()
+            .unwrap()
+            .remove("function");
+    });
+    invalid(&|origin| origin["scope"][6]["task"] = json!(1));
+    invalid(&|origin| origin["scope"][6]["kind"] = json!("frame"));
+    invalid(&|origin| {
+        let entry = origin["scope"][0].clone();
+        origin["scope"] = json!(vec![entry; MAX_ORIGIN_SCOPE + 1]);
+    });
+    // The bound itself is accepted.
+    let mut bounded = origin_value();
+    let entry = bounded["scope"][0].clone();
+    bounded["scope"] = json!(vec![entry; MAX_ORIGIN_SCOPE]);
+    bounded["truncated"] = json!(true);
+    assert!(tool(Some(bounded)).is_ok());
+}
+
+#[test]
+fn program_debug_tables_validate_identifiers_and_regions() {
+    let span = json!({"source":"src/main.allen","start":0,"end":40});
+    let with = |base: &serde_json::Value, extra: serde_json::Value| {
+        let mut value = base.clone();
+        value
+            .as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        value
+    };
+    let tables = json!({
+        "constructs":[
+            with(&span, json!({"id":0,"kind":"for","function":"src/main.allen::main","parent":null,
+                "regions":[with(&span, json!({"region":"body"}))]})),
+            with(&span, json!({"id":1,"kind":"match","function":"src/main.allen::main","parent":0,
+                "regions":[with(&span, json!({"region":"scrutinee"})), with(&span, json!({"region":"arm","arm":0}))]})),
+        ],
+        "effect_sites":[
+            with(&span, json!({"id":0,"kind":"tool","operation":"tools.example.lookup.call",
+                "tool":"example.lookup","function":"src/main.allen::main","instruction":3,
+                "start_instruction":4,"constructs":[0, 1]})),
+        ],
+        "truncated":false,
+    });
+    let parse = |value: serde_json::Value| {
+        serde_json::from_value::<ProgramDebugPayload>(value)
+            .map_err(|error| error.to_string())
+            .and_then(|tables| tables.validate().map_err(|error| error.to_string()))
+    };
+    parse(tables.clone()).unwrap();
+    for mutate in [
+        (|tables: &mut serde_json::Value| tables["constructs"][1]["parent"] = json!(1))
+            as fn(&mut serde_json::Value),
+        |tables| tables["constructs"][1]["id"] = json!(0),
+        |tables| tables["constructs"][0]["regions"][0]["region"] = json!("arm"),
+        |tables| tables["constructs"][1]["regions"][1]["arm"] = serde_json::Value::Null,
+        |tables| tables["effect_sites"][0]["kind"] = json!("database"),
+        |tables| tables["effect_sites"][0]["operation"] = json!(""),
+    ] {
+        let mut invalid = tables.clone();
+        mutate(&mut invalid);
+        assert!(parse(invalid.clone()).is_err(), "accepted {invalid}");
+    }
 }

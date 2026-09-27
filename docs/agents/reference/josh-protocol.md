@@ -1,6 +1,6 @@
 # JOSH protocol reference for AI agents
 
-Status: Operational guide for the current `josh/1.6` protocol
+Status: Operational guide for the current `josh/1.7` protocol
 
 Entry point: [`docs/agents/README.md`](../README.md). The implementation
 specification is authoritative for runtime behavior.
@@ -15,13 +15,17 @@ not require JOSH.
 JOSH uses one framed UTF-8 JSON message per record:
 
 ```text
-<ASCII decimal byte length>:<exact JSON bytes>,
+Content-Length: <ASCII decimal byte count>\r\n
+Content-Type: application/josh+json; charset=utf-8\r\n
+\r\n
+<exact JSON bytes>
 ```
 
-The length counts bytes, not characters. A frame has no whitespace before the
-length, no leading zero except `0`, and no trailing bytes after the comma.
-Readers bound the decimal header and payload length before allocation. A clean
-EOF between frames ends the connection; EOF inside a frame is fatal.
+The length counts bytes, not characters. The two header lines are exact and
+in this order. Readers bound the header and payload length before allocation;
+the default limit is 4,194,304 bytes and `initialize` negotiates a smaller
+`max_frame_bytes`. A clean EOF between frames ends the connection; EOF inside a
+frame is fatal.
 
 JSON objects reject duplicate and unknown fields. Numbers, strings, IDs,
 methods, enum values, and nested payloads use their exact declared shape. Do
@@ -69,7 +73,7 @@ negotiated protocol version:
   "method": "initialize",
   "params": {
     "host": {"name": "allen-host", "version": "0.1.0"},
-    "protocol_versions": ["josh/1.6"],
+    "protocol_versions": ["josh/1.7"],
     "language_versions": [">=0.1.0, <0.2.0"],
     "execution_mode": "attached",
     "invoking_session_id": "session-1",
@@ -91,10 +95,10 @@ negotiated protocol version:
 stable `invoking_session_id`; unattended mode sends it as `null`. Limits and
 standard capability names are canonical, bounded, sorted, and unique.
 
-The runtime either selects `josh/1.6` and language `0.1.1` or rejects
+The runtime either selects `josh/1.7` and language `0.1.1` or rejects
 initialization. Its result returns the runtime identity, effective limits, and
 these exact feature strings:
-`agent`, `catalog-provenance`, `exec-run`, `external-fs-grants`,
+`agent`, `catalog-provenance`, `effect-origin`, `exec-run`, `external-fs-grants`,
 `host-projection`, `model`, `record-replay`, `structured-prompts`,
 `structured-transcript`, `sub-agents`, `typed-responses`, `typed-tools`, and
 `user-interaction`.
@@ -202,6 +206,15 @@ It also returns sorted `exec_commands` and `exec_environment` lists from the
 verified manifest contract. These expose names and patterns, never environment
 values.
 
+The result's `debug` field is `null` without artifact debug information.
+Otherwise it holds static `constructs` (control-flow constructs with `id`,
+`kind`, `function`, `parent`, span, and `regions`), `effect_sites` (each effect
+call with `id`, `kind`, source `operation`, `tool`, `function`, `instruction`,
+`start_instruction`, span, and enclosing `constructs`), and `truncated`. These
+IDs match the `origin` of provider requests (section 9.1). Spans are UTF-8 byte
+offsets; source loads add 1-based `line`, `column`, `end_line`, and
+`end_column`.
+
 ## 6. Tool catalog
 
 The host freezes exactly one tool catalog after `host/project` and before
@@ -285,7 +298,7 @@ omit raw input, output, stderr, credentials, and temporary paths. The runner
 never retries, calls `executor resume`, opens an approval flow, or falls back
 to a shell, agent, model, or another provider.
 
-This route uses the current `josh/1.6` `tool/invoke` contract unchanged. It
+This route uses the current `josh/1.7` `tool/invoke` contract unchanged. It
 does not add a method, feature string, or alternate protocol version. Recording
 stores the validated tool boundary result, and replay uses that result without
 starting Executor.
@@ -355,6 +368,47 @@ issues, and deadline. Valid output returns the ordinary typed result. Expected
 denial, unavailability, and exhausted validation use the source-visible closed
 error type. Late or malformed responses are protocol violations.
 
+### 9.1 Effect origins
+
+With the `effect-origin` feature, every runtime-to-host provider request
+(`tool/invoke`, `model/request`, `user/ask`, `agent/*`, `sub_agent/*`, and
+`permission/request`) may carry an optional `origin`. It is present when the
+artifact has debug information. It is diagnostic only: it is not in request
+digests or replay journals and must not drive authorization.
+
+```json
+"origin": {
+  "task": 0,
+  "site": {"id": 0, "function": "src/main.allen::main", "instruction": 23,
+           "source": "src/main.allen", "start": 512, "end": 590,
+           "line": 31, "column": 17, "end_line": 31, "end_column": 95},
+  "scope": [
+    {"kind": "for", "construct": 3, "source": "src/main.allen", "start": 347,
+     "end": 709, "line": 22, "column": 3, "end_line": 38, "end_column": 4,
+     "region": "body", "instance": 1, "iteration": 2},
+    {"kind": "if", "construct": 4, "source": "src/main.allen", "start": 371,
+     "end": 705, "line": 23, "column": 5, "end_line": 37, "end_column": 6,
+     "region": "else", "branch": "else"},
+    {"kind": "call", "function": "src/main.allen::apply", "instruction": 40,
+     "source": "src/main.allen", "start": 410, "end": 432, "line": 27,
+     "column": 9, "end_line": 27, "end_column": 31}
+  ]
+}
+```
+
+- `task` owns the effect (root `0`); `parent_task` is present for spawned
+  tasks. A spawned effect future is its own task.
+- `site` is the `await` or `spawn` that started the request, with the static
+  effect-site `id` when known.
+- `scope` is outermost first. `call` and `spawn` entries mark frame and task
+  boundaries; construct entries (`for`, `while`, `loop`, `if`, `match`,
+  `await_block`) carry `construct`, `region`, and for loops `instance` and
+  1-based `iteration`, for `if` `branch`, and for `match` the 0-based `arm`.
+  An `if` or `match` whose condition or scrutinee contains the site is
+  omitted.
+- `scope` has at most 64 entries; deeper chains keep the innermost entries
+  and set `truncated: true`. A typed-response retry repeats the same origin.
+
 ## 10. Structured transcript
 
 `agent/transcript` takes a bounded oldest-first query with `limit`. A snapshot
@@ -421,9 +475,9 @@ must not produce a second terminal response or expose internal error detail.
 
 When writing or reviewing a JOSH client:
 
-1. Offer only `josh/1.6`.
+1. Offer only `josh/1.7`.
 2. Send `initialize` exactly once.
-3. Use strict length framing and exact JSON shapes.
+3. Use strict `Content-Length` framing and exact JSON shapes.
 4. Keep request IDs unique per direction while active.
 5. Send one honest complete `host/project` before `catalog/set`.
 6. Match catalog metadata and count to the projected tools section.

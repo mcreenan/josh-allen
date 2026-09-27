@@ -30,6 +30,8 @@ use josh_protocol::{
 };
 use sha2::{Digest as _, Sha256};
 
+use crate::origin::ProgramDebug;
+
 const RUNTIME_NAME: &str = "allen-reference";
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 const MAX_LOADED_PROGRAMS: usize = 32;
@@ -67,6 +69,7 @@ impl std::error::Error for HostError {}
 struct LoadedProgram {
     artifact: Arc<VerifiedArtifact>,
     artifact_digest: String,
+    debug: Option<Arc<ProgramDebug>>,
 }
 
 #[derive(Debug)]
@@ -175,6 +178,11 @@ impl PreparedExecution {
 
     pub(crate) fn catalog(&self) -> &Arc<FrozenCatalog> {
         &self.catalog
+    }
+
+    /// The loaded program's debug tables, if its artifact has debug information.
+    pub(crate) fn program_debug(&self) -> Option<Arc<ProgramDebug>> {
+        self.program.debug.clone()
     }
 }
 
@@ -490,7 +498,7 @@ impl Session {
             .required_tools
             .iter()
             .map(|tool| tool.name.clone())
-            .collect();
+            .collect::<Vec<_>>();
         let exec_commands = manifest.exec_commands.clone();
         let exec_environment = manifest.exec_environment.clone();
         let entries = verified
@@ -508,6 +516,13 @@ impl Session {
                 output_contract_digest: digest_text(&entry.output_contract_digest),
             })
             .collect();
+        let program_debug = program_debug(params, &verified, &required_tools);
+        // Leave most of the response frame for the other result fields.
+        let table_budget =
+            usize::try_from(self.effective_limits.max_frame_bytes / 4).unwrap_or(usize::MAX);
+        let debug = program_debug
+            .as_ref()
+            .map(|program_debug| program_debug.tables(table_budget));
         let program_id = format!("program-{}", self.next_program_id);
         self.next_program_id = self.next_program_id.saturating_add(1);
         self.programs.insert(
@@ -515,6 +530,7 @@ impl Session {
             Arc::new(LoadedProgram {
                 artifact: Arc::new(verified),
                 artifact_digest: artifact_digest.clone(),
+                debug: program_debug,
             }),
         );
         Ok(ProgramLoadResult {
@@ -526,6 +542,7 @@ impl Session {
             required_tools,
             exec_commands,
             exec_environment,
+            debug,
         })
     }
 
@@ -688,6 +705,32 @@ fn lower_limits(left: ProtocolLimits, right: ProtocolLimits) -> ProtocolLimits {
     }
 }
 
+#[allow(clippy::case_sensitive_file_extension_comparisons)]
+/// Prepare the debug tables of a verified artifact, with line positions for
+/// source files that the host supplied as UTF-8 text.
+fn program_debug(
+    params: &ProgramLoadParams,
+    verified: &VerifiedArtifact,
+    required_tools: &[String],
+) -> Option<Arc<ProgramDebug>> {
+    let debug = verified.debug()?;
+    let texts = match params {
+        ProgramLoadParams::SourceBundle { files } => files
+            .iter()
+            .filter(|file| file.encoding == josh_protocol::FileEncoding::Utf8)
+            .map(|file| (file.path.clone(), file.content.clone()))
+            .collect(),
+        ProgramLoadParams::Bytecode { .. } => BTreeMap::new(),
+    };
+    Some(Arc::new(ProgramDebug::new(
+        verified.verified_module().module(),
+        debug,
+        required_tools,
+        &texts,
+    )))
+}
+
+// Source paths are case-sensitive package paths.
 #[allow(clippy::case_sensitive_file_extension_comparisons)]
 fn assemble_source_bundle(
     files: &[josh_protocol::SourceFile],

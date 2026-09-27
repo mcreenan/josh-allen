@@ -3,6 +3,7 @@
 mod framing;
 mod handshake;
 mod message;
+mod origin;
 mod payload;
 mod state;
 mod strict_json;
@@ -17,6 +18,7 @@ pub use message::{
     ProtocolError, WireError, WireErrorCode, WireMessage, decode_message, decode_value,
     encode_message, validate_id, validate_method, validate_reason,
 };
+pub use origin::*;
 pub use payload::*;
 pub use state::{ConnectionState, PeerRole, ProtocolTracker, ReceiveAction, RequestStateError};
 pub use version::{FEATURES, LANGUAGE_VERSION, PROTOCOL_VERSION};

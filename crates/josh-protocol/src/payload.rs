@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::message::invalid;
-use crate::{PeerInfo, ProtocolError, WireMessage};
+use crate::{EffectOriginPayload, PeerInfo, ProgramDebugPayload, ProtocolError, WireMessage};
 
 pub const SCHEMA_DIALECT: &str = "https://json-schema.org/draft/2020-12/schema";
 pub const SCHEMA_PROFILE: &str = "allen.tool-schema/0.1";
@@ -509,10 +509,15 @@ pub struct ProgramLoadResult {
     pub required_tools: Vec<String>,
     pub exec_commands: Vec<String>,
     pub exec_environment: Vec<String>,
+    /// Static construct and effect-site tables; null without debug information.
+    pub debug: Option<ProgramDebugPayload>,
 }
 
 impl Validate for ProgramLoadResult {
     fn validate(&self) -> Result<(), ProtocolError> {
+        if let Some(debug) = &self.debug {
+            debug.validate()?;
+        }
         if self.program_id.is_empty() || self.program_id.len() > 64 {
             return Err(invalid("program_id is invalid"));
         }
@@ -746,10 +751,14 @@ pub struct ToolInvokeParams {
     pub error_schema: String,
     pub input: Value,
     pub deadline_ms: u64,
+    /// Where the effect started; diagnostic and absent without debug information.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<EffectOriginPayload>,
 }
 
 impl Validate for ToolInvokeParams {
     fn validate(&self) -> Result<(), ProtocolError> {
+        validate_origin(self.origin.as_ref())?;
         validate_opaque(&self.execution_id, "execution_id")?;
         validate_opaque(&self.operation_id, "operation_id")?;
         validate_tool_name(&self.tool)?;
@@ -786,10 +795,14 @@ pub struct AgentMessageParams {
     pub session_id: String,
     pub message: String,
     pub deadline_ms: u64,
+    /// Where the effect started; diagnostic and absent without debug information.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<EffectOriginPayload>,
 }
 
 impl Validate for AgentMessageParams {
     fn validate(&self) -> Result<(), ProtocolError> {
+        validate_origin(self.origin.as_ref())?;
         validate_bound_operation(
             &self.execution_id,
             &self.operation_id,
@@ -968,10 +981,14 @@ pub struct AgentAskParams {
     pub attempt: u32,
     pub validation_issues: Vec<ValidationIssuePayload>,
     pub deadline_ms: u64,
+    /// Where the effect started; diagnostic and absent without debug information.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<EffectOriginPayload>,
 }
 
 impl Validate for AgentAskParams {
     fn validate(&self) -> Result<(), ProtocolError> {
+        validate_origin(self.origin.as_ref())?;
         validate_bound_operation(
             &self.execution_id,
             &self.operation_id,
@@ -1011,10 +1028,14 @@ pub struct ModelRequestParams {
     pub attempt: u32,
     pub validation_issues: Vec<ValidationIssuePayload>,
     pub deadline_ms: u64,
+    /// Where the effect started; diagnostic and absent without debug information.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<EffectOriginPayload>,
 }
 
 impl Validate for ModelRequestParams {
     fn validate(&self) -> Result<(), ProtocolError> {
+        validate_origin(self.origin.as_ref())?;
         validate_unbound_operation(&self.execution_id, &self.operation_id, self.deadline_ms)?;
         validate_typed_response_request(
             &self.interaction_id,
@@ -1037,10 +1058,14 @@ pub struct UserAskParams {
     pub attempt: u32,
     pub validation_issues: Vec<ValidationIssuePayload>,
     pub deadline_ms: u64,
+    /// Where the effect started; diagnostic and absent without debug information.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<EffectOriginPayload>,
 }
 
 impl Validate for UserAskParams {
     fn validate(&self) -> Result<(), ProtocolError> {
+        validate_origin(self.origin.as_ref())?;
         validate_unbound_operation(&self.execution_id, &self.operation_id, self.deadline_ms)?;
         validate_typed_response_request(
             &self.interaction_id,
@@ -1094,10 +1119,14 @@ pub struct SubAgentCreateParams {
     pub prompt: StructuredPromptPayload,
     pub projection: SubAgentProjectionPayload,
     pub deadline_ms: u64,
+    /// Where the effect started; diagnostic and absent without debug information.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<EffectOriginPayload>,
 }
 
 impl Validate for SubAgentCreateParams {
     fn validate(&self) -> Result<(), ProtocolError> {
+        validate_origin(self.origin.as_ref())?;
         validate_unbound_operation(&self.execution_id, &self.operation_id, self.deadline_ms)?;
         self.prompt.validate()?;
         self.projection.validate()
@@ -1116,10 +1145,14 @@ pub struct SubAgentRunParams {
     pub attempt: u32,
     pub validation_issues: Vec<ValidationIssuePayload>,
     pub deadline_ms: u64,
+    /// Where the effect started; diagnostic and absent without debug information.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<EffectOriginPayload>,
 }
 
 impl Validate for SubAgentRunParams {
     fn validate(&self) -> Result<(), ProtocolError> {
+        validate_origin(self.origin.as_ref())?;
         validate_unbound_operation(&self.execution_id, &self.operation_id, self.deadline_ms)?;
         self.projection.validate()?;
         validate_typed_response_request(
@@ -1140,10 +1173,14 @@ pub struct SubAgentMessageParams {
     pub sub_agent_id: String,
     pub message: String,
     pub deadline_ms: u64,
+    /// Where the effect started; diagnostic and absent without debug information.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<EffectOriginPayload>,
 }
 
 impl Validate for SubAgentMessageParams {
     fn validate(&self) -> Result<(), ProtocolError> {
+        validate_origin(self.origin.as_ref())?;
         validate_unbound_operation(&self.execution_id, &self.operation_id, self.deadline_ms)?;
         validate_ascii_id(&self.sub_agent_id, "sub_agent_id", 128)?;
         if self.message.len() > 1_048_576 {
@@ -1165,10 +1202,14 @@ pub struct SubAgentAskParams {
     pub attempt: u32,
     pub validation_issues: Vec<ValidationIssuePayload>,
     pub deadline_ms: u64,
+    /// Where the effect started; diagnostic and absent without debug information.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<EffectOriginPayload>,
 }
 
 impl Validate for SubAgentAskParams {
     fn validate(&self) -> Result<(), ProtocolError> {
+        validate_origin(self.origin.as_ref())?;
         validate_unbound_operation(&self.execution_id, &self.operation_id, self.deadline_ms)?;
         validate_ascii_id(&self.sub_agent_id, "sub_agent_id", 128)?;
         validate_typed_response_request(
@@ -1248,10 +1289,14 @@ pub struct AgentTranscriptParams {
     pub session_id: String,
     pub limit: u32,
     pub deadline_ms: u64,
+    /// Where the effect started; diagnostic and absent without debug information.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<EffectOriginPayload>,
 }
 
 impl Validate for AgentTranscriptParams {
     fn validate(&self) -> Result<(), ProtocolError> {
+        validate_origin(self.origin.as_ref())?;
         validate_bound_operation(
             &self.execution_id,
             &self.operation_id,
@@ -1459,10 +1504,14 @@ pub struct PermissionRequestParams {
     pub max_bytes: u64,
     pub duration: GrantDuration,
     pub reason: String,
+    /// Where the effect started; diagnostic and absent without debug information.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<EffectOriginPayload>,
 }
 
 impl Validate for PermissionRequestParams {
     fn validate(&self) -> Result<(), ProtocolError> {
+        validate_origin(self.origin.as_ref())?;
         validate_opaque(&self.execution_id, "execution_id")?;
         validate_opaque(&self.operation_id, "operation_id")?;
         validate_session_id(&self.session_id)?;
@@ -2090,6 +2139,10 @@ fn validate_description(description: &str) -> Result<(), ProtocolError> {
         return Err(invalid("tool description is invalid"));
     }
     Ok(())
+}
+
+fn validate_origin(origin: Option<&EffectOriginPayload>) -> Result<(), ProtocolError> {
+    origin.map_or(Ok(()), EffectOriginPayload::validate)
 }
 
 fn validate_opaque(value: &str, name: &str) -> Result<(), ProtocolError> {
