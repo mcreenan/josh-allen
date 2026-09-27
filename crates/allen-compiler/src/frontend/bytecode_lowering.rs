@@ -7102,7 +7102,7 @@ impl FunctionLowering<'_, '_> {
             }
         }
         self.bindings = restored;
-        let effects = result.effects;
+        let effects = body_hir.effects;
         if returns_from_function {
             if result.value_type != ValueType::Never && result.value_type != self.return_type {
                 return Err(Diagnostic::new(
@@ -10539,8 +10539,7 @@ impl FunctionLowering<'_, '_> {
         if !runtime_falls_through {
             self.runtime_terminal_values.insert(register);
         }
-        let effects =
-            self.union_effects([condition.effects, false_value.effects, true_value.effects]);
+        let effects = self.union_effects([condition.effects, false_hir.effects, true_hir.effects]);
         Ok(CompiledExpr {
             register,
             value_type: value_type.clone(),

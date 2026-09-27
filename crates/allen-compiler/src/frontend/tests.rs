@@ -4280,6 +4280,55 @@ export fn main() returns Int effects [fs.read, fs.write, net.http_get] {
 }
 
 #[test]
+fn control_flow_statement_effects_inside_branches_count_toward_block_unions() {
+    let source = r#"
+fn effect_a() returns Int effects [fs.read] { 1 }
+fn effect_b() returns Int effects [fs.write] { 2 }
+fn effect_c() returns Int effects [net.http_get] { 3 }
+export async fn main() returns Int effects [fs.read, fs.write, net.http_get] {
+  mut total = 0;
+  if (total == 0) {
+    let a = effect_a();
+    let b = effect_b();
+    if (total == 0) {
+      let c = effect_c();
+    }
+    let d = await {
+      let e = effect_c();
+      e
+    };
+  }
+  total
+}
+"#;
+    let compilation =
+        compile_source(source).expect("branch statement effects are part of block unions");
+    let main = compilation
+        .hir
+        .modules
+        .iter()
+        .flat_map(|module| &module.functions)
+        .find(|function| function.name == "main")
+        .expect("main HIR");
+    let HirExprKind::Block(expressions) = &main.body.kind else {
+        panic!("main body is a HIR block");
+    };
+    let conditional = expressions
+        .iter()
+        .find(|expression| matches!(expression.kind, HirExprKind::If { .. }))
+        .expect("conditional HIR expression");
+    assert_eq!(
+        compilation.module.effect_sets[conditional.effects as usize],
+        [
+            "fs.read".to_owned(),
+            "fs.write".to_owned(),
+            "net.http_get".to_owned()
+        ]
+    );
+    verify(compilation.module).expect("branch-statement-effect module verifies");
+}
+
+#[test]
 fn control_flow_declared_callback_superset_propagates_into_conditional_and_body_unions() {
     let source = r#"
 fn read() returns Int effects [fs.read] { 1 }
