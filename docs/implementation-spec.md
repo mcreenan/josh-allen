@@ -283,6 +283,12 @@ observer receives the task, spawn chain, and frames immediately before the
 provider is asked to start each effect. Tracking adds no instructions and
 charges no budget; functions without loops do no per-instruction work.
 
+When no task can run and at least one waits on a provider effect, the VM asks
+the provider to wait for progress, with a timeout that grows from 50
+microseconds to 10 milliseconds, before polling again. A host provider returns
+as soon as any response may have arrived, so a pending provider request costs
+no CPU. The default provider sleeps for the timeout.
+
 The VM validates every provider completion against the exact result type and
 operation-specific error-code allowlist before resuming a task. A missing
 provider produces the operation's documented unavailable result when that
@@ -447,7 +453,10 @@ line, and exactly that many UTF-8 JSON bytes. The default frame limit is
 4,194,304 bytes, and `initialize` negotiates a smaller `max_frame_bytes`.
 Frames are bounded before allocation. JSON objects reject duplicate and
 unknown fields; request IDs and methods are validated before entering
-connection state.
+connection state. A frame that exceeds the negotiated `max_frame_bytes`, has an
+invalid header, ends early, or is not strict JSON closes the connection after
+active work is cancelled; `josh serve` exits unsuccessfully and names the
+reason on stderr.
 
 The host sends `initialize` once with `protocol_versions: ["josh/1.7"]`, one
 execution mode, an invoking-session identity or `null`, limits, and standard

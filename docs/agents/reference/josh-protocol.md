@@ -25,7 +25,9 @@ The length counts bytes, not characters. The two header lines are exact and
 in this order. Readers bound the header and payload length before allocation;
 the default limit is 4,194,304 bytes and `initialize` negotiates a smaller
 `max_frame_bytes`. A clean EOF between frames ends the connection; EOF inside a
-frame is fatal.
+frame is fatal. An oversized or malformed frame closes the connection after
+active work is cancelled, and `josh serve` names the reason on stderr. Keep
+every frame you send within the negotiated limit.
 
 JSON objects reject duplicate and unknown fields. Numbers, strings, IDs,
 methods, enum values, and nested payloads use their exact declared shape. Do

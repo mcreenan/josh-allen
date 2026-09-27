@@ -916,6 +916,17 @@ pub trait EffectProvider {
     /// Cancel one provider operation that previously returned pending.
     fn cancel_effect(&mut self, _pending: PendingEffectId) {}
 
+    /// Block until a pending provider operation may have progressed, or until
+    /// `timeout` elapses.
+    ///
+    /// The VM calls this only when no task can run and at least one task waits
+    /// on a provider effect, then polls again. Providers that can signal
+    /// completion should return as soon as any pending operation may be
+    /// ready. The default sleeps for `timeout`.
+    fn wait_for_effects(&mut self, timeout: Duration) {
+        std::thread::sleep(timeout);
+    }
+
     /// Cancel every issued provider operation that is still pending.
     ///
     /// The VM calls this before it produces a terminal cancellation or stopped
@@ -1913,6 +1924,15 @@ fn origin_frames(task: &MachineTask) -> Vec<OriginFrame> {
         .collect()
 }
 
+/// The provider wait after `idle_turns` consecutive idle scheduler turns.
+fn idle_wait(idle_turns: u32) -> Duration {
+    const FIRST: Duration = Duration::from_micros(50);
+    const LONGEST: Duration = Duration::from_millis(10);
+    FIRST
+        .checked_mul(1_u32 << idle_turns.min(8))
+        .map_or(LONGEST, |wait| wait.min(LONGEST))
+}
+
 fn machine_failure(task: &MachineTask, error: VmError) -> TaskFailure {
     TaskFailure {
         error,
@@ -1942,6 +1962,8 @@ fn execute_task_machine(
         }
     };
     let origins = debug.is_some() && budget.observer.observes_effect_origins();
+    // Consecutive scheduler turns in which every task waited on a provider.
+    let mut idle_turns = 0_u32;
     let mut machine = TaskMachine {
         cleanup_limit: limits.cleanup_instructions,
         cleanup_remaining: limits.cleanup_instructions,
@@ -2068,6 +2090,11 @@ fn execute_task_machine(
                                 frames: Vec::new(),
                             });
                         }
+                        // Wait for provider progress instead of polling in a
+                        // tight loop. The wait grows from 50 microseconds to
+                        // 10 milliseconds while nothing becomes ready.
+                        effects.wait_for_effects(idle_wait(idle_turns));
+                        idle_turns = idle_turns.saturating_add(1);
                         continue;
                     }
                     machine.cancel_pending_effects(budget, effects);
@@ -2085,6 +2112,7 @@ fn execute_task_machine(
                 }
             }
         };
+        idle_turns = 0;
         machine.rotation_cursor = Some(task_id);
         let failed_checkpoint = machine.tasks.get(&task_id).and_then(|task| {
             task.frames.last().map(|frame| ActiveFrame {

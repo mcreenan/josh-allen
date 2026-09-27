@@ -510,6 +510,143 @@ fn active_partial_frame_eof_cleans_up_and_reports_only_a_safe_error() {
     assert!(!process.status.success());
     assert_eq!(
         String::from_utf8(process.stderr).unwrap(),
-        "josh: protocol frame is invalid\n"
+        "josh: protocol frame header is invalid; closing the connection\n"
+    );
+}
+
+/// CPU time used so far by one process, in clock ticks, on Linux.
+#[cfg(target_os = "linux")]
+fn cpu_ticks(pid: u32) -> u64 {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).unwrap();
+    // Fields after the parenthesized command name; utime and stime are fields 14 and 15.
+    let fields = stat[stat.rfind(')').unwrap() + 2..]
+        .split(' ')
+        .collect::<Vec<_>>();
+    fields[11].parse::<u64>().unwrap() + fields[12].parse::<u64>().unwrap()
+}
+
+#[test]
+#[allow(clippy::too_many_lines)]
+fn pending_provider_waits_idle_and_an_oversized_response_closes_the_connection_promptly() {
+    let schema_json = json!({"type":"string"});
+    let schema = ToolSchema::from_value(&schema_json, &SchemaLimits::default()).unwrap();
+    let initialize = InitializeParams {
+        host: PeerInfo {
+            name: "oversized-frame-host".to_owned(),
+            version: "1.0.0".to_owned(),
+        },
+        protocol_versions: vec![josh_protocol::PROTOCOL_VERSION.to_owned()],
+        language_versions: vec![">=0.1.0, <0.2.0".to_owned()],
+        execution_mode: ExecutionMode::Unattended,
+        invoking_session_id: InvokingSessionId::Null,
+        standard_capabilities: Vec::new(),
+        limits: ProtocolLimits {
+            max_frame_bytes: 65_536,
+            max_catalog_bytes: 65_536,
+            ..limits()
+        },
+        extensions: Vec::new(),
+    };
+    let catalog = CatalogSetParams {
+        schema_dialect: josh_protocol::SCHEMA_DIALECT.to_owned(),
+        metadata: josh_protocol::CatalogMetadata::complete("test-host", "1", 1),
+        tools: vec![CatalogTool {
+            name: "example.lookup".to_owned(),
+            version: "1.2.3".to_owned(),
+            description: "Look up one example value.".to_owned(),
+            input_schema: schema_json.clone(),
+            output_schema: schema_json.clone(),
+            error_schema: schema_json,
+            effects: Vec::new(),
+            idempotency: Idempotency::Unknown,
+        }],
+    };
+    let load = ProgramLoadParams::Bytecode {
+        artifact: base64::engine::general_purpose::STANDARD.encode(tool_artifact(&schema)),
+    };
+    let mut child = Command::new(env!("CARGO_BIN_EXE_josh"))
+        .arg("serve")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut input = child.stdin.take().unwrap();
+    let mut output = FrameReader::new(
+        child.stdout.take().unwrap(),
+        josh_protocol::DEFAULT_MAX_FRAME_BYTES,
+    );
+    receive(&mut output);
+    send(&mut input, "h-1", "initialize", &initialize);
+    receive(&mut output);
+    send(
+        &mut input,
+        "h-p",
+        "host/project",
+        &projection(&initialize, &catalog),
+    );
+    receive(&mut output);
+    send(&mut input, "h-2", "catalog/set", &catalog);
+    receive(&mut output);
+    send(&mut input, "h-3", "program/load", &load);
+    let WireMessage::Response {
+        result: Some(loaded),
+        ..
+    } = receive(&mut output)
+    else {
+        panic!("program load failed");
+    };
+    let start = ExecutionStartParams {
+        execution_id: "exec-oversized".to_owned(),
+        program_id: loaded["program_id"].as_str().unwrap().to_owned(),
+        artifact_digest: loaded["artifact_digest"].as_str().unwrap().to_owned(),
+        entry: "main".to_owned(),
+        input: json!("question"),
+        working_directory: None,
+        granted_capabilities: Vec::new(),
+        granted_tools: vec!["example.lookup".to_owned()],
+        allowed_http_origins: Vec::new(),
+        granted_exec: Vec::new(),
+        granted_exec_environment: Vec::new(),
+        limits: BTreeMap::from([("wall_ms".to_owned(), 30_000)]),
+    };
+    send(&mut input, "h-4", "execution/start", &start);
+    let request_id = loop {
+        if let WireMessage::Request { id, method, .. } = receive(&mut output) {
+            assert_eq!(method, "tool/invoke");
+            break id;
+        }
+    };
+
+    // While the host has not answered, the runtime blocks instead of polling.
+    #[cfg(target_os = "linux")]
+    {
+        let before = cpu_ticks(child.id());
+        std::thread::sleep(std::time::Duration::from_millis(600));
+        let used = cpu_ticks(child.id()) - before;
+        assert!(used < 15, "josh used {used} CPU ticks while waiting 600 ms");
+    }
+
+    // A response frame above the negotiated limit closes the connection with a
+    // specific diagnostic instead of stalling.
+    let body = format!(
+        r#"{{"protocol":"josh/1","kind":"response","id":"{request_id}","result":{{"outcome":"ok","value":"{}"}}}}"#,
+        "x".repeat(70_000)
+    );
+    let started = std::time::Instant::now();
+    let _ = write!(
+        input,
+        "Content-Length: {}\r\nContent-Type: application/josh+json; charset=utf-8\r\n\r\n{body}",
+        body.len()
+    );
+    let _ = input.flush();
+    drop(input);
+    while output.read_message().ok().flatten().is_some() {}
+    let process = child.wait_with_output().unwrap();
+    assert!(started.elapsed() < std::time::Duration::from_secs(5));
+    assert!(!process.status.success());
+    assert_eq!(
+        String::from_utf8(process.stderr).unwrap(),
+        "josh: protocol frame exceeds the negotiated max_frame_bytes; closing the connection\n"
     );
 }

@@ -919,6 +919,17 @@ pub struct RuntimeProviders<'provider> {
     pub model: Option<&'provider mut dyn ResponseProvider>,
     pub user: Option<&'provider mut dyn ResponseProvider>,
     pub sub_agent: Option<&'provider mut dyn SubAgentProvider>,
+    /// Wakes a waiting execution when a host provider may have progressed.
+    /// Without one, a waiting execution sleeps between polls.
+    pub effect_waiter: Option<&'provider dyn EffectWaiter>,
+}
+
+/// Blocks an execution whose tasks all wait on host providers until one of
+/// them may have progressed.
+pub trait EffectWaiter {
+    /// Return when any pending provider operation may be ready, or when
+    /// `timeout` elapses. Spurious early returns are allowed.
+    fn wait_for_progress(&self, timeout: Duration);
 }
 
 struct ProductionHttpFactory;
@@ -1836,6 +1847,7 @@ pub fn execute_prepared_with_context(
                     "production effect broker could not be initialized",
                 ));
             };
+            live_effects.effect_waiter = providers.effect_waiter.take();
             live_effects
         };
     let binding = catch_unwind(AssertUnwindSafe(|| {
@@ -2485,6 +2497,7 @@ struct BrokerEffects<'provider> {
     model: Option<&'provider mut dyn ResponseProvider>,
     user: Option<&'provider mut dyn ResponseProvider>,
     sub_agent: Option<&'provider mut dyn SubAgentProvider>,
+    effect_waiter: Option<&'provider dyn EffectWaiter>,
     sub_agent_handles: Vec<SubAgentHandleEntry>,
     projection_limits: BTreeMap<String, u64>,
     tool_catalog: Option<FrozenCatalog>,
@@ -2558,6 +2571,7 @@ impl<'provider> BrokerEffects<'provider> {
             model,
             user,
             sub_agent,
+            effect_waiter: None,
             sub_agent_handles: Vec::new(),
             projection_limits,
             tool_catalog,
@@ -4309,6 +4323,13 @@ impl EffectProvider for BrokerEffects<'_> {
         }
         self.pending_agents.remove(&pending);
         self.finish_agent_poll(pending, poll, pending_agent, cancellation)
+    }
+
+    fn wait_for_effects(&mut self, timeout: Duration) {
+        match self.effect_waiter {
+            Some(waiter) => waiter.wait_for_progress(timeout),
+            None => std::thread::sleep(timeout),
+        }
     }
 
     fn cancel_effect(&mut self, pending: PendingEffectId) {
@@ -10184,6 +10205,7 @@ export fn main() returns Range { Range { min: 2, max: 1 } }
                 model: None,
                 user: None,
                 sub_agent: None,
+                effect_waiter: None,
             };
             launch_with_providers(&artifact, &launch_request(), &policy, &mut providers).unwrap()
         };

@@ -8,13 +8,13 @@ use std::time::{Duration, Instant};
 
 use allen_runtime::{
     AgentAskCall, AgentCancellationSignal, AgentHostError, AgentMessageCall, AgentProviderPoll,
-    ExternalGrantDecision, ExternalGrantDecisionProvider, ExternalGrantId, ExternalGrantPoll,
-    ExternalGrantRequest, GrantDuration as RuntimeGrantDuration, InvokingAgentProvider,
-    PromptPayload, ResponseHostError, ResponseProvider, ResponseProviderPoll, RuntimeProviders,
-    SubAgentAskCall, SubAgentCreateCall, SubAgentHostError, SubAgentId, SubAgentMessageCall,
-    SubAgentProjection, SubAgentProvider, SubAgentProviderPoll, SubAgentRunCall,
-    ToolCancellationSignal, ToolHostError, ToolInvocation, ToolOutcome, ToolProvider,
-    ToolProviderPoll, TranscriptMessage as RuntimeTranscriptMessage,
+    EffectWaiter, ExternalGrantDecision, ExternalGrantDecisionProvider, ExternalGrantId,
+    ExternalGrantPoll, ExternalGrantRequest, GrantDuration as RuntimeGrantDuration,
+    InvokingAgentProvider, PromptPayload, ResponseHostError, ResponseProvider,
+    ResponseProviderPoll, RuntimeProviders, SubAgentAskCall, SubAgentCreateCall, SubAgentHostError,
+    SubAgentId, SubAgentMessageCall, SubAgentProjection, SubAgentProvider, SubAgentProviderPoll,
+    SubAgentRunCall, ToolCancellationSignal, ToolHostError, ToolInvocation, ToolOutcome,
+    ToolProvider, ToolProviderPoll, TranscriptMessage as RuntimeTranscriptMessage,
     TranscriptPart as RuntimeTranscriptPart, TranscriptQuery,
     TranscriptRole as RuntimeTranscriptRole, TranscriptSnapshot as RuntimeTranscriptSnapshot,
 };
@@ -93,12 +93,12 @@ where
                     disconnected.store(true, Ordering::Release);
                     break;
                 }
-                Err(_) => {
+                Err(error) => {
                     disconnected.store(true, Ordering::Release);
                     cancel_active(&session, "");
                     return Err(HostError {
                         code: WireErrorCode::ProtocolViolation,
-                        message: "protocol frame is invalid",
+                        message: frame_error_message(&error),
                     });
                 }
             };
@@ -547,6 +547,7 @@ fn spawn_execution(
             external_grants: external_grants
                 .as_mut()
                 .map(|provider| provider as &mut dyn ExternalGrantDecisionProvider),
+            effect_waiter: Some(pending.as_ref()),
             ..RuntimeProviders::default()
         };
         let computed = prepared.run_with_observer(&mut providers, &mut observer);
@@ -856,6 +857,26 @@ fn write_notification<T: serde::Serialize + Validate>(
     )
 }
 
+/// A safe, specific reason for closing the connection on an unreadable frame.
+const fn frame_error_message(error: &ProtocolError) -> &'static str {
+    match error {
+        ProtocolError::FrameTooLarge => {
+            "protocol frame exceeds the negotiated max_frame_bytes; closing the connection"
+        }
+        ProtocolError::HeaderLineTooLong
+        | ProtocolError::InvalidHeader
+        | ProtocolError::InvalidLength => {
+            "protocol frame header is invalid; closing the connection"
+        }
+        ProtocolError::UnexpectedEof => "protocol frame ended early; closing the connection",
+        ProtocolError::InvalidUtf8 | ProtocolError::InvalidJson(_) => {
+            "protocol frame body is not strict UTF-8 JSON; closing the connection"
+        }
+        ProtocolError::InvalidMessage(_) => "protocol message is invalid; closing the connection",
+        ProtocolError::Io(_) => "protocol input failed; closing the connection",
+    }
+}
+
 fn write_event(writer: &ConnectionWriter, event: &ExecutionEventParams) -> Result<(), HostError> {
     write_notification(writer, "execution/event", event)
 }
@@ -927,9 +948,21 @@ const fn poisoned() -> HostError {
 #[derive(Default)]
 struct PendingRegistry {
     calls: Mutex<BTreeMap<String, Arc<PendingCall>>>,
+    /// Counts completed and failed outbound requests to wake a waiting execution.
+    progress: Mutex<u64>,
+    progressed: Condvar,
+    /// The progress count that the execution's last wait observed.
+    observed: AtomicU64,
 }
 
 impl PendingRegistry {
+    fn record_progress(&self) {
+        if let Ok(mut progress) = self.progress.lock() {
+            *progress = progress.wrapping_add(1);
+            self.progressed.notify_all();
+        }
+    }
+
     fn insert(&self, id: String, call: Arc<PendingCall>) -> Result<(), ()> {
         let mut calls = self.calls.lock().map_err(|_| ())?;
         if calls.contains_key(&id) {
@@ -953,6 +986,7 @@ impl PendingRegistry {
             .and_then(|mut calls| calls.remove(id));
         if let Some(call) = call {
             call.complete(message);
+            self.record_progress();
         }
     }
 
@@ -962,19 +996,48 @@ impl PendingRegistry {
                 call.fail();
             }
         }
+        self.record_progress();
     }
 
     fn fail_all_with_ids(&self) -> Vec<String> {
         let Ok(mut calls) = self.calls.lock() else {
             return Vec::new();
         };
-        std::mem::take(&mut *calls)
+        let ids = std::mem::take(&mut *calls)
             .into_iter()
             .map(|(id, call)| {
                 call.fail();
                 id
             })
-            .collect()
+            .collect();
+        drop(calls);
+        self.record_progress();
+        ids
+    }
+}
+
+impl EffectWaiter for PendingRegistry {
+    /// Returns at once if any response arrived since the previous wait, so a
+    /// response that lands between the VM's poll and this wait is not missed.
+    fn wait_for_progress(&self, timeout: Duration) {
+        let Ok(mut progress) = self.progress.lock() else {
+            return;
+        };
+        let observed = self.observed.load(Ordering::Acquire);
+        if *progress == observed {
+            let started = Instant::now();
+            while *progress == observed {
+                let remaining = timeout.saturating_sub(started.elapsed());
+                if remaining.is_zero() {
+                    break;
+                }
+                match self.progressed.wait_timeout(progress, remaining) {
+                    Ok((next, _)) => progress = next,
+                    Err(_) => return,
+                }
+            }
+        }
+        self.observed.store(*progress, Ordering::Release);
     }
 }
 
