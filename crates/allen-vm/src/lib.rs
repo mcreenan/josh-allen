@@ -2,19 +2,22 @@
 
 mod canonical;
 mod json;
+mod origin;
 
 pub use canonical::{
     CanonicalDecodeError, CanonicalEncodeError, decode_canonical, decode_canonical_with_limit,
     encode_canonical, encode_canonical_with_limit,
 };
 pub use json::{JsonDecodeError, JsonDecodeErrorKind, decode_json, project_json_value};
+use origin::{ActiveLoop, LoopIndex};
+pub use origin::{EffectOrigin, LoopActivation, OriginFrame, SpawnOrigin};
 
 use allen_bytecode::{
     BoolBinaryOp, CapabilityOperation, CheckedIntOperation, CollectionOperation, CompareOp,
-    Constant, Conversion, DebugInfo, EnumPayloadType, EnumTypeId, ExternalFsAccess, FsOperation,
-    FunctionId, Instruction, ListCombinator, MAX_VALUE_NESTING, NumericBinaryOp, Register,
-    SafeCollectionOperation, StandardOperation, StringOperation, TemplateResource, ValueType,
-    VerifiedArtifact, VerifiedModule, canonical_float_bits,
+    Constant, Conversion, DebugConstruct, DebugInfo, EnumPayloadType, EnumTypeId, ExternalFsAccess,
+    FsOperation, FunctionId, Instruction, ListCombinator, MAX_VALUE_NESTING, NumericBinaryOp,
+    Register, SafeCollectionOperation, StandardOperation, StringOperation, TemplateResource,
+    ValueType, VerifiedArtifact, VerifiedModule, canonical_float_bits,
 };
 use std::cell::RefCell;
 use std::cmp::Ordering;
@@ -1055,6 +1058,21 @@ pub trait CheckpointObserver {
 
     /// Receive the first near-limit charge for one finite resource.
     fn budget_warning(&mut self, _warning: BudgetWarning) {}
+
+    /// Whether this observer wants [`Self::effect_started`] with origins.
+    ///
+    /// Origins are tracked only when this returns `true` before the first
+    /// instruction and the execution has debug information.
+    fn observes_effect_origins(&self) -> bool {
+        false
+    }
+
+    /// Receive where one effect request started, immediately before the
+    /// provider is asked to start it.
+    ///
+    /// The origin is diagnostic. It cannot change execution, and it is not
+    /// part of any request digest or replay record.
+    fn effect_started(&mut self, _pending: PendingEffectId, _origin: &EffectOrigin) {}
 }
 
 /// One safe lifecycle transition for a scheduler task.
@@ -1188,6 +1206,11 @@ impl std::error::Error for ExecutionError {}
 /// Resolves optional source information for verified bytecode locations.
 pub trait DebugSourceMap {
     fn source_location(&self, function: FunctionId, instruction: u32) -> Option<SourceLocation>;
+
+    /// The control-flow construct table, used to track loop activations.
+    fn constructs(&self) -> &[DebugConstruct] {
+        &[]
+    }
 }
 
 impl DebugSourceMap for DebugInfo {
@@ -1206,6 +1229,10 @@ impl DebugSourceMap for DebugInfo {
             end: location.end,
         })
     }
+
+    fn constructs(&self) -> &[DebugConstruct] {
+        &self.constructs
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -1221,6 +1248,8 @@ struct MachineFrame {
     program_counter: usize,
     activation: u32,
     active_scopes: Vec<u32>,
+    /// Active loop executions, outermost first, when origins are tracked.
+    loops: Vec<ActiveLoop>,
     continuation: Option<u16>,
     fold: Option<PendingFold>,
     combinator: Option<PendingListCombinator>,
@@ -1402,6 +1431,8 @@ struct MachineTask {
     entry_function: FunctionId,
     frames: Vec<MachineFrame>,
     state: MachineTaskState,
+    /// Spawns that led to this task, outermost first, when origins are tracked.
+    spawns: Rc<[SpawnOrigin]>,
 }
 
 fn task_handles(value: &Value, handles: &mut Vec<u64>) {
@@ -1428,6 +1459,9 @@ struct TaskMachine {
     cleanup_warning_emitted: bool,
     providers_cancelled: bool,
     tasks: BTreeMap<u64, MachineTask>,
+    /// Whether the observer receives effect origins.
+    origins: bool,
+    loop_index: Option<LoopIndex>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1859,11 +1893,24 @@ fn new_machine_frame(
         program_counter: 0,
         activation: depth,
         active_scopes: Vec::new(),
+        loops: Vec::new(),
         continuation,
         fold: None,
         combinator: None,
         sequence: None,
     })
+}
+
+/// The task's frames with their executing instructions and active loops.
+fn origin_frames(task: &MachineTask) -> Vec<OriginFrame> {
+    task.frames
+        .iter()
+        .map(|frame| OriginFrame {
+            function: frame.function,
+            instruction: frame.active().instruction,
+            loops: frame.loops.iter().map(ActiveLoop::activation).collect(),
+        })
+        .collect()
 }
 
 fn machine_failure(task: &MachineTask, error: VmError) -> TaskFailure {
@@ -1894,9 +1941,14 @@ fn execute_task_machine(
             });
         }
     };
+    let origins = debug.is_some() && budget.observer.observes_effect_origins();
     let mut machine = TaskMachine {
         cleanup_limit: limits.cleanup_instructions,
         cleanup_remaining: limits.cleanup_instructions,
+        origins,
+        loop_index: debug
+            .filter(|_| origins)
+            .and_then(|debug| LoopIndex::new(debug.constructs())),
         ..TaskMachine::default()
     };
     machine.tasks.insert(
@@ -1907,6 +1959,7 @@ fn execute_task_machine(
             entry_function: entry,
             frames: vec![root],
             state: MachineTaskState::Ready,
+            spawns: Rc::from(Vec::new()),
         },
     );
     machine.emit_event(budget.observer, 0, 0, TaskEventKind::Spawned);
@@ -2144,6 +2197,7 @@ impl TaskMachine {
         future: &FutureValue,
         budget: &mut Budget<'_>,
         effects: &mut dyn EffectProvider,
+        origin: Option<&EffectOrigin>,
     ) -> Result<(PendingEffectId, EffectPoll, ValueType, EffectFailureFamily), VmError> {
         let pending = self.next_pending_effect()?;
         let failure_family = future
@@ -2159,6 +2213,9 @@ impl TaskMachine {
             }
         };
         budget.start_effect()?;
+        if let Some(origin) = origin {
+            budget.observer.effect_started(pending, origin);
+        }
         let poll = match future {
             FutureValue::Effect {
                 operation,
@@ -2195,6 +2252,17 @@ impl TaskMachine {
                 Err(error)
             }
         }
+    }
+
+    /// The origin of an effect started by `task_id`'s innermost frame.
+    fn task_effect_origin(&self, task_id: u64) -> Option<EffectOrigin> {
+        let task = self.tasks.get(&task_id).filter(|_| self.origins)?;
+        Some(EffectOrigin {
+            task_id,
+            parent_task_id: task.spawns.last().map(|spawn| spawn.parent_task_id),
+            spawns: task.spawns.to_vec(),
+            frames: origin_frames(task),
+        })
     }
 
     fn cancel_effects(&mut self, effects: &mut dyn EffectProvider) {
@@ -2691,6 +2759,9 @@ impl TaskMachine {
         })?;
         let task = self.tasks.get_mut(&task_id).expect("scheduled task exists");
         let frame = task.frames.last_mut().expect("scheduled frame exists");
+        if let Some(loop_index) = self.loop_index.as_mut() {
+            loop_index.enter_instruction(function_id, instruction_index, &mut frame.loops);
+        }
         frame.program_counter = frame
             .program_counter
             .checked_add(1)
@@ -3549,8 +3620,9 @@ impl TaskMachine {
                         }
                         external => {
                             let _ = task;
-                            let (pending, poll, result_type, failure_family) =
-                                self.start_effect_future(external, budget, effects)?;
+                            let origin = self.task_effect_origin(task_id);
+                            let (pending, poll, result_type, failure_family) = self
+                                .start_effect_future(external, budget, effects, origin.as_ref())?;
                             let task = self
                                 .tasks
                                 .get_mut(&task_id)
@@ -4540,6 +4612,21 @@ impl TaskMachine {
             ));
         }
         self.next_task = id;
+        // The spawning task's frames are the spawned work's origin.
+        let spawner = self
+            .tasks
+            .get(&owner)
+            .filter(|_| self.origins)
+            .map(|parent| {
+                (
+                    Rc::clone(&parent.spawns),
+                    SpawnOrigin {
+                        task_id: id,
+                        parent_task_id: owner,
+                        frames: origin_frames(parent),
+                    },
+                )
+            });
         let task = match future.as_ref() {
             FutureValue::Function {
                 function,
@@ -4547,17 +4634,33 @@ impl TaskMachine {
             } => {
                 let frame =
                     new_machine_frame(raw_module, *function, arguments, &[], None, 1, budget)?;
+                let spawns = spawner.map_or_else(
+                    || Rc::from(Vec::new()),
+                    |(chain, spawn)| {
+                        let mut spawns = chain.to_vec();
+                        spawns.push(spawn);
+                        Rc::from(spawns)
+                    },
+                );
                 MachineTask {
                     owner,
                     scope,
                     entry_function: *function,
                     frames: vec![frame],
                     state: MachineTaskState::Ready,
+                    spawns,
                 }
             }
             external => {
+                // A spawned effect is its own task; its site is the spawn.
+                let origin = spawner.map(|(chain, spawn)| EffectOrigin {
+                    task_id: id,
+                    parent_task_id: Some(owner),
+                    spawns: chain.to_vec(),
+                    frames: spawn.frames,
+                });
                 let (pending, poll, result_type, failure_family) =
-                    self.start_effect_future(external, budget, effects)?;
+                    self.start_effect_future(external, budget, effects, origin.as_ref())?;
                 let state = match poll {
                     EffectPoll::Ready(value) => {
                         budget.complete_effect()?;
@@ -4578,6 +4681,7 @@ impl TaskMachine {
                     entry_function: origin_function,
                     frames: Vec::new(),
                     state,
+                    spawns: Rc::from(Vec::new()),
                 }
             }
         };
@@ -10927,6 +11031,7 @@ mod tests {
                 },
                 &mut budget,
                 &mut super::NoEffects,
+                None,
             )
             .map(|(_, poll, _, _)| poll)
     }
@@ -13254,6 +13359,7 @@ mod tests {
                     entry_function: 0,
                     frames: vec![],
                     state,
+                    spawns: Rc::from(Vec::new()),
                 },
             );
             let Value::Record(fields) = machine
