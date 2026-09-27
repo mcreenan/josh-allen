@@ -331,6 +331,11 @@ The runtime sends the final lifecycle event before the terminal response.
 Provider detail, credentials, paths, prompts, transcript content, tool data,
 and hidden reasoning never appear in public error messages.
 
+A `failed` error's `span` is `null` without artifact debug information.
+Otherwise it names the failing instruction's source span: `source`, UTF-8 byte
+`start` and `end`, and for source loads 1-based `line`, `column`, `end_line`,
+and `end_column`.
+
 Source `fail(reason)` uses `failed` with code `program.failed`, never `stopped`.
 The runtime cancels and joins owned work before reporting it. Empty text is
 `program failed`; nonempty text is bounded to 2,048 UTF-8 bytes and passes

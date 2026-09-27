@@ -935,7 +935,7 @@ task_event sequence=8 task_id=0 owner_id=0 kind=completed\n";
     assert!(source_run.status.success());
     assert_eq!(
         String::from_utf8(source_run.stdout.clone()).unwrap(),
-        "[\"pkg/x696e6c696e65/x302e312e30/x737263/x7461736b2d6465627567.allen::answer\",1,{\"tag\":\"Some\",\"value\":\"pkg://inline@0.1.0/src/task-debug.allen:30..38\"},0,\"ready\",42]\n"
+        "[\"pkg/x696e6c696e65/x302e312e30/x737263/x7461736b2d6465627567.allen::answer\",1,{\"tag\":\"Some\",\"value\":\"pkg://inline@0.1.0/src/task-debug.allen:34..36\"},0,\"ready\",42]\n"
     );
     assert_eq!(
         String::from_utf8(source_run.stderr.clone()).unwrap(),

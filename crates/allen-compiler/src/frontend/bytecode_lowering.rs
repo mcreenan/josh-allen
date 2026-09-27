@@ -5030,6 +5030,26 @@ impl FunctionLowering<'_, '_> {
         &mut self,
         expression: &LoweredExpr,
     ) -> Result<CompiledExpr, Diagnostic> {
+        let first = self.code.len();
+        let value = self.compile_expression_inner(expression)?;
+        self.mark_unmarked_instructions(first, expression.span);
+        Ok(value)
+    }
+
+    /// Give each instruction emitted since `first` that has no span the span
+    /// of the innermost expression that emitted it. Debug locations then name
+    /// the failing expression of a runtime trap instead of the function body.
+    fn mark_unmarked_instructions(&mut self, first: usize, span: Span) {
+        for instruction in first..self.code.len() {
+            self.instruction_spans.entry(instruction).or_insert(span);
+        }
+    }
+
+    #[allow(clippy::too_many_lines)]
+    fn compile_expression_inner(
+        &mut self,
+        expression: &LoweredExpr,
+    ) -> Result<CompiledExpr, Diagnostic> {
         match &expression.kind {
             LoweredExprKind::Unit => {
                 let register = self.allocate(ValueType::Unit)?;
@@ -11732,6 +11752,19 @@ impl FunctionLowering<'_, '_> {
 
     #[allow(clippy::too_many_lines)]
     pub(super) fn compile_expected(
+        &mut self,
+        expression: &LoweredExpr,
+        expected: &ValueType,
+        label: &str,
+    ) -> Result<CompiledExpr, Diagnostic> {
+        let first = self.code.len();
+        let value = self.compile_expected_inner(expression, expected, label)?;
+        self.mark_unmarked_instructions(first, expression.span);
+        Ok(value)
+    }
+
+    #[allow(clippy::too_many_lines)]
+    fn compile_expected_inner(
         &mut self,
         expression: &LoweredExpr,
         expected: &ValueType,

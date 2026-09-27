@@ -179,9 +179,10 @@ unique IDs, bounded sizes, and no trailing data.
 
 The debug section never changes executable meaning; omitting it leaves a valid
 artifact. It stores the sorted normalized source paths, one location per
-instruction as a UTF-8 byte span, and a control-flow construct table. Effect,
-await, spawn, and call instructions carry the span of the expression that
-emits them. Each construct records its function, nearest enclosing construct,
+instruction as a UTF-8 byte span, and a control-flow construct table. Each
+instruction carries the span of the innermost expression that emits it; in
+particular effect, await, spawn, and call instructions carry their own
+expression's span. Each construct records its function, nearest enclosing construct,
 kind (`for`, `while`, `loop`, `if`, `match`, or `await_block`), source span, and
 the contiguous instruction range it emitted, including nested constructs. A
 loop range starts at the loop header, so a `for` iterable is evaluated outside
@@ -752,6 +753,10 @@ and fuzz targets. Golden data represents only the current implementation.
 
 Compiler and preflight failures are structured diagnostics before execution.
 Runtime terminal failures use bounded registered codes and sanitized messages.
+When the artifact has debug information, a JOSH runtime failure's `span` is
+the failing instruction's source span as an object with `source`, UTF-8 byte
+`start` and `end`, and for source loads 1-based `line`, `column`, `end_line`,
+and `end_column`, as in effect origins; otherwise it is `null`.
 `runtime.panic` is a safe host boundary for an implementation invariant breach;
 a Rust panic must not escape the supervisor.
 

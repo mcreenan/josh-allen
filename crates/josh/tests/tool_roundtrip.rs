@@ -2980,3 +2980,94 @@ export async fn main() returns String effects [model.request, user.ask, tool.exa
         (&json!(20), &json!(10))
     );
 }
+
+#[test]
+fn runtime_failures_report_the_failing_source_span() {
+    let source =
+        "export fn main() returns Int {\n  let zero = 0;\n  let total = 10 / zero;\n  total\n}\n";
+    let initialize = InitializeParams {
+        host: PeerInfo {
+            name: "span-host".to_owned(),
+            version: "1.0.0".to_owned(),
+        },
+        protocol_versions: vec![josh_protocol::PROTOCOL_VERSION.to_owned()],
+        language_versions: vec![">=0.1.0, <0.2.0".to_owned()],
+        execution_mode: ExecutionMode::Unattended,
+        invoking_session_id: InvokingSessionId::Null,
+        standard_capabilities: Vec::new(),
+        limits: limits(),
+        extensions: Vec::new(),
+    };
+    let catalog = json!({"schema_dialect":josh_protocol::SCHEMA_DIALECT,"metadata":{"source":"test-host","source_revision":"1","observed_at_unix_ms":1,"freshness":"current","complete":true},"tools":[]});
+    let load = ProgramLoadParams::SourceBundle {
+        files: vec![SourceFile {
+            path: "src/main.allen".to_owned(),
+            encoding: FileEncoding::Utf8,
+            content: source.to_owned(),
+        }],
+    };
+    let mut child = Command::new(env!("CARGO_BIN_EXE_josh"))
+        .arg("serve")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    let mut reader = FrameReader::new(
+        child.stdout.take().unwrap(),
+        josh_protocol::DEFAULT_MAX_FRAME_BYTES,
+    );
+    receive(&mut reader);
+    let mut result = |id: &str| loop {
+        match receive(&mut reader) {
+            WireMessage::Response {
+                id: response,
+                result: Some(result),
+                ..
+            } if response == id => break result,
+            WireMessage::Notification { .. } => {}
+            other => panic!("unexpected {other:?}"),
+        }
+    };
+    send(&mut stdin, "h-1", "initialize", &initialize);
+    result("h-1");
+    send(
+        &mut stdin,
+        "h-p",
+        "host/project",
+        &projection_value(&json!(initialize), &catalog),
+    );
+    result("h-p");
+    send(&mut stdin, "h-2", "catalog/set", &catalog);
+    result("h-2");
+    send(&mut stdin, "h-3", "program/load", &load);
+    let loaded = result("h-3");
+    let start = ExecutionStartParams {
+        execution_id: "exec-span".to_owned(),
+        program_id: loaded["program_id"].as_str().unwrap().to_owned(),
+        artifact_digest: loaded["artifact_digest"].as_str().unwrap().to_owned(),
+        entry: "main".to_owned(),
+        input: serde_json::Value::Null,
+        working_directory: None,
+        granted_capabilities: Vec::new(),
+        granted_tools: Vec::new(),
+        allowed_http_origins: Vec::new(),
+        granted_exec: Vec::new(),
+        granted_exec_environment: Vec::new(),
+        limits: BTreeMap::from([("wall_ms".to_owned(), 5_000)]),
+    };
+    send(&mut stdin, "h-4", "execution/start", &start);
+    let failed = result("h-4");
+    drop(stdin);
+    assert!(child.wait().unwrap().success());
+    assert_eq!(failed["outcome"], "failed");
+    let span = &failed["error"]["span"];
+    assert_eq!(span["source"], "src/main.allen");
+    assert_eq!((&span["line"], &span["column"]), (&json!(3), &json!(15)));
+    assert_eq!(
+        &source[usize::try_from(span["start"].as_u64().unwrap()).unwrap()
+            ..usize::try_from(span["end"].as_u64().unwrap()).unwrap()],
+        "10 / zero"
+    );
+}

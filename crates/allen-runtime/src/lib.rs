@@ -2003,7 +2003,9 @@ pub fn execute_prepared_with_context(
             VmError::ProgramFailed { reason } if !reason.is_empty() => reason.clone(),
             _ => safe_terminal_message(code).to_owned(),
         };
-        RuntimeError::new(code, message).with_response_audit(response_audit.clone())
+        RuntimeError::new(code, message)
+            .with_response_audit(response_audit.clone())
+            .with_location(error.frames.first().and_then(|frame| frame.source.clone()))
     })?;
     let output = prepared_output;
     Ok(RuntimeOutcome {

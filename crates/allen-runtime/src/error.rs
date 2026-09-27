@@ -1,4 +1,4 @@
-use allen_vm::VmError;
+use allen_vm::{SourceLocation, VmError};
 
 use crate::ResponseAuditRecord;
 
@@ -64,6 +64,9 @@ pub struct RuntimeError {
     pub message: String,
     /// Content-free response audit entries collected before this failure.
     pub response_audit: Vec<ResponseAuditRecord>,
+    /// Source span of the innermost failing instruction, when a VM failure
+    /// occurred in an artifact with debug information.
+    pub location: Option<SourceLocation>,
 }
 
 impl RuntimeError {
@@ -72,11 +75,17 @@ impl RuntimeError {
             code,
             message: message.into(),
             response_audit: Vec::new(),
+            location: None,
         }
     }
 
     pub(crate) fn with_response_audit(mut self, response_audit: Vec<ResponseAuditRecord>) -> Self {
         self.response_audit = response_audit;
+        self
+    }
+
+    pub(crate) fn with_location(mut self, location: Option<SourceLocation>) -> Self {
+        self.location = location;
         self
     }
 }

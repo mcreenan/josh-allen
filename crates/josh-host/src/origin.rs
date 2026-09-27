@@ -215,6 +215,17 @@ impl ProgramDebug {
         }
     }
 
+    /// Render a span in one debug source path, with host paths and positions.
+    #[must_use]
+    pub fn source_span(&self, module_path: &str, start: u32, end: u32) -> Option<SourceSpan> {
+        let source = self
+            .debug
+            .sources
+            .iter()
+            .position(|source| source == module_path)?;
+        Some(self.span(u32::try_from(source).ok()?, start, end))
+    }
+
     /// The source span of one instruction.
     fn location(&self, function: FunctionId, instruction: u32) -> Option<SourceSpan> {
         let index = self

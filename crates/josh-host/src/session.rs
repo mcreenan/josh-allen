@@ -171,7 +171,7 @@ impl PreparedExecution {
                 ExecutionOutcome::Stopped { reason, .. } => stopped_result(reason),
             },
             Err(error) => ExecutionResult::Failed {
-                error: runtime_error(&error),
+                error: runtime_error(&error, self.program.debug.as_deref()),
             },
         }
     }
@@ -932,13 +932,34 @@ fn host_policy(params: &ExecutionStartParams, catalog: &FrozenCatalog) -> HostPo
     }
 }
 
-fn runtime_error(error: &RuntimeError) -> josh_protocol::ProtocolRuntimeError {
+fn runtime_error(
+    error: &RuntimeError,
+    debug: Option<&ProgramDebug>,
+) -> josh_protocol::ProtocolRuntimeError {
+    // The failing instruction's span, rendered like an effect-origin site.
+    let span = error.location.as_ref().and_then(|location| {
+        let span = debug?.source_span(&location.module_path, location.start, location.end)?;
+        let mut value = serde_json::json!({
+            "source": span.source,
+            "start": span.start,
+            "end": span.end,
+        });
+        if let (Some(line), Some(column), Some(end_line), Some(end_column)) =
+            (span.line, span.column, span.end_line, span.end_column)
+        {
+            value["line"] = line.into();
+            value["column"] = column.into();
+            value["end_line"] = end_line.into();
+            value["end_column"] = end_column.into();
+        }
+        Some(value)
+    });
     let mut result = josh_protocol::ProtocolRuntimeError {
         code: error.code.as_str().to_owned(),
         message: error.message.clone(),
         category: "runtime".to_owned(),
         retryable: false,
-        span: None,
+        span,
         operation_id: None,
         metadata: BTreeMap::new(),
         causes: Vec::new(),
