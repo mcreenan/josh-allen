@@ -15,7 +15,7 @@ summary_path="$evidence_dir/summary.json"
 max_log_bytes="${SOURCE_CONFORMANCE_MAX_LOG_BYTES:-65536}"
 max_doc_example_bytes="${SOURCE_CONFORMANCE_MAX_DOC_EXAMPLE_BYTES:-262144}"
 allen_bin="${SOURCE_CONFORMANCE_ALLEN_BIN:-$repo_root/target/debug/allen}"
-current_bytecode_version=19
+current_bytecode_version=20
 
 mkdir -p "$logs_dir" "$artifacts_dir" "$docs_dir"
 

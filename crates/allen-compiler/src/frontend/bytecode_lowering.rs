@@ -1,4 +1,4 @@
-//! Coordinated bytecode-v19 lowering after resolution and checking.
+//! Coordinated bytecode-v20 lowering after resolution and checking.
 //!
 //! HIR and MIR are emitted from the same typed expression walk so bytecode,
 //! debug spans, ownership transitions, and both IRs cannot observe different

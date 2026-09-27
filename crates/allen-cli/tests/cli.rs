@@ -80,7 +80,7 @@ fn template_package_check_build_inspect_and_run_are_in_parity() {
         .unwrap();
     assert!(inspected.status.success());
     let report = String::from_utf8(inspected.stdout).unwrap();
-    assert!(report.starts_with("bytecode_version: 19\n"));
+    assert!(report.starts_with("bytecode_version: 20\n"));
     assert!(report.contains("section.templates: 1\n"));
 
     let source_run = Command::new(env!("CARGO_BIN_EXE_allen"))
@@ -581,7 +581,7 @@ fn dynamic_collections_check_build_and_run_identically() {
     assert!(built.stderr.is_empty());
     assert_eq!(
         &std::fs::read(&artifact).unwrap()[10..12],
-        &19_u16.to_le_bytes()
+        &20_u16.to_le_bytes()
     );
 
     let artifact_run = Command::new(env!("CARGO_BIN_EXE_allen"))
@@ -802,7 +802,7 @@ fn current_artifact_build_is_canonical() {
     );
     assert_eq!(
         &std::fs::read(&first).unwrap()[10..12],
-        &19_u16.to_le_bytes()
+        &20_u16.to_le_bytes()
     );
     let bytes = std::fs::read(&first).unwrap();
     let decoded =
@@ -843,7 +843,7 @@ fn current_artifact_build_is_canonical() {
     assert!(inspected_again.status.success());
     assert_eq!(inspected.stdout, inspected_again.stdout);
     let report = String::from_utf8(inspected.stdout).unwrap();
-    assert!(report.starts_with("bytecode_version: 19\n"));
+    assert!(report.starts_with("bytecode_version: 20\n"));
     assert!(report.contains("language_version: 0.1.1\n"));
     assert!(report.contains("target_profile: portable\n"));
     assert!(report.contains("section.manifest_contracts: 1\n"));
@@ -887,7 +887,7 @@ fn current_source_and_artifact_match() {
     assert!(built.stderr.is_empty());
     assert_eq!(
         &std::fs::read(&artifact).unwrap()[10..12],
-        &19_u16.to_le_bytes()
+        &20_u16.to_le_bytes()
     );
 
     let artifact_run = Command::new(env!("CARGO_BIN_EXE_allen"))
@@ -907,7 +907,7 @@ fn current_source_and_artifact_match() {
     assert!(inspected.status.success());
     assert!(inspected.stderr.is_empty());
     let report = String::from_utf8(inspected.stdout).unwrap();
-    assert!(report.starts_with("bytecode_version: 19\n"));
+    assert!(report.starts_with("bytecode_version: 20\n"));
 
     std::fs::remove_dir_all(directory).expect("temporary test directory must be removed");
 }
@@ -1437,7 +1437,7 @@ fn package_lock_source_artifact_and_inspect_are_deterministic() {
     );
     assert_eq!(
         &std::fs::read(&first).unwrap()[10..12],
-        &19_u16.to_le_bytes()
+        &20_u16.to_le_bytes()
     );
 
     let artifact_run = Command::new(env!("CARGO_BIN_EXE_allen"))
@@ -1458,7 +1458,7 @@ fn package_lock_source_artifact_and_inspect_are_deterministic() {
         .unwrap();
     assert!(inspected.status.success());
     let report = String::from_utf8(inspected.stdout).unwrap();
-    assert!(report.starts_with("bytecode_version: 19\n"));
+    assert!(report.starts_with("bytecode_version: 20\n"));
     assert!(report.contains("section.tools: 0\n"));
     assert!(report.contains("manifest.package: filesystem-example@0.1.0\n"));
     assert!(report.contains("contract.entry.main: function=0 input_schema=0 output_schema=1\n"));
@@ -1509,7 +1509,7 @@ export async fn main() returns Result<HttpResponse, NetworkError>
         .unwrap();
     assert!(inspected.status.success());
     let report = String::from_utf8(inspected.stdout).unwrap();
-    assert!(report.starts_with("bytecode_version: 19\n"));
+    assert!(report.starts_with("bytecode_version: 20\n"));
     assert!(report.contains("manifest.https_origins: [https://192.0.2.1]\n"));
 
     let mut outputs = Vec::new();
@@ -1859,7 +1859,7 @@ fn frontend_cross_feature_fixture_checks_builds_and_runs_with_current_source_art
     frontend_build(&source, &second);
     let first_bytes = std::fs::read(&first).expect("first artifact must exist");
     assert_eq!(first_bytes, std::fs::read(&second).unwrap());
-    assert_eq!(&first_bytes[10..12], &19_u16.to_le_bytes());
+    assert_eq!(&first_bytes[10..12], &20_u16.to_le_bytes());
 
     let artifact_run = frontend_run(&first);
     assert!(
@@ -1905,7 +1905,7 @@ fn frontend_cross_mode_sources_have_the_same_value_and_deterministic_artifacts()
         frontend_build(source, &second);
         let first_bytes = std::fs::read(&first).unwrap();
         assert_eq!(first_bytes, std::fs::read(&second).unwrap());
-        assert_eq!(&first_bytes[10..12], &19_u16.to_le_bytes());
+        assert_eq!(&first_bytes[10..12], &20_u16.to_le_bytes());
 
         let artifact_run = frontend_run(&first);
         assert!(
@@ -2307,7 +2307,7 @@ fn control_flow_has_source_artifact_parity_in_every_source_mode() {
         frontend_build(source, &second);
         let first_bytes = std::fs::read(&first).expect("first artifact must exist");
         assert_eq!(first_bytes, std::fs::read(&second).unwrap());
-        assert_eq!(&first_bytes[10..12], &19_u16.to_le_bytes());
+        assert_eq!(&first_bytes[10..12], &20_u16.to_le_bytes());
 
         let artifact_run = frontend_run(&first);
         assert!(
@@ -2458,7 +2458,7 @@ fn loops_have_source_artifact_parity_in_every_source_mode() {
         frontend_build(source, &second);
         let first_bytes = std::fs::read(&first).expect("first artifact must exist");
         assert_eq!(first_bytes, std::fs::read(&second).unwrap());
-        assert_eq!(&first_bytes[10..12], &19_u16.to_le_bytes());
+        assert_eq!(&first_bytes[10..12], &20_u16.to_le_bytes());
 
         let inspected = Command::new(env!("CARGO_BIN_EXE_allen"))
             .arg("inspect")
@@ -2470,7 +2470,7 @@ fn loops_have_source_artifact_parity_in_every_source_mode() {
         assert!(
             String::from_utf8(inspected.stdout)
                 .unwrap()
-                .starts_with("bytecode_version: 19\n")
+                .starts_with("bytecode_version: 20\n")
         );
 
         let artifact_run = frontend_run(&first);
@@ -2634,7 +2634,7 @@ fn operators_operators_have_source_artifact_parity_in_every_source_mode() {
         frontend_build(source, &second);
         let first_bytes = std::fs::read(&first).expect("first artifact must exist");
         assert_eq!(first_bytes, std::fs::read(&second).unwrap());
-        assert_eq!(&first_bytes[10..12], &19_u16.to_le_bytes());
+        assert_eq!(&first_bytes[10..12], &20_u16.to_le_bytes());
 
         let inspected = Command::new(env!("CARGO_BIN_EXE_allen"))
             .arg("inspect")
@@ -2646,7 +2646,7 @@ fn operators_operators_have_source_artifact_parity_in_every_source_mode() {
         assert!(
             String::from_utf8(inspected.stdout)
                 .unwrap()
-                .starts_with("bytecode_version: 19\n")
+                .starts_with("bytecode_version: 20\n")
         );
 
         let artifact_run = frontend_run(&first);
@@ -2752,7 +2752,7 @@ fn strings_templates_and_capability_inspection_have_source_artifact_parity() {
         frontend_build(source, &second);
         let first_bytes = std::fs::read(&first).expect("first artifact must exist");
         assert_eq!(first_bytes, std::fs::read(&second).unwrap());
-        assert_eq!(&first_bytes[10..12], &19_u16.to_le_bytes());
+        assert_eq!(&first_bytes[10..12], &20_u16.to_le_bytes());
 
         let inspected = Command::new(env!("CARGO_BIN_EXE_allen"))
             .arg("inspect")
@@ -2764,7 +2764,7 @@ fn strings_templates_and_capability_inspection_have_source_artifact_parity() {
         assert!(
             String::from_utf8(inspected.stdout)
                 .unwrap()
-                .starts_with("bytecode_version: 19\n")
+                .starts_with("bytecode_version: 20\n")
         );
 
         let artifact_run = frontend_run(&first);

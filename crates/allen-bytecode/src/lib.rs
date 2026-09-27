@@ -4,9 +4,10 @@ mod artifact;
 
 pub use artifact::{
     ARTIFACT_MAGIC, Artifact, ArtifactError, ArtifactErrorCode, ArtifactMetadata, BYTECODE_VERSION,
-    DebugInfo, DebugLocation, DecodeLimits, DecodedArtifact, EntryContract, EntryRecordProvenance,
-    ImportContract, ManifestContract, SectionSummary, SemanticVersion, StrictSchema, TargetProfile,
-    ToolContract, VerifiedArtifact, canonical_value_type_bytes, compute_entry_contract_digest,
+    DebugConstruct, DebugConstructKind, DebugInfo, DebugLocation, DebugRegion, DebugRegionKind,
+    DecodeLimits, DecodedArtifact, EntryContract, EntryRecordProvenance, ImportContract,
+    ManifestContract, SectionSummary, SemanticVersion, StrictSchema, TargetProfile, ToolContract,
+    VerifiedArtifact, canonical_value_type_bytes, compute_entry_contract_digest,
     compute_entry_record_provenance, compute_strict_schema_digest, compute_template_digest,
     compute_tool_contract_digest, decode, decode_and_verify, encode, encode_with_limits,
 };

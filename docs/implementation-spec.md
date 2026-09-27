@@ -166,7 +166,7 @@ async producers, and generated tool calls all participate in effect checking.
 
 ## 4. Current artifact format
 
-The repository defines one canonical bytecode-v19 `.allenb` format. The header contains the
+The repository defines one canonical bytecode-v20 `.allenb` format. The header contains the
 fixed magic, the single current format identifier, language and compiler
 versions, target profile, flags, section count, and SHA-256 digest. Integers are
 little-endian. The digest covers the complete artifact with its digest field
@@ -176,6 +176,24 @@ Mandatory sections contain strings, constants, types, functions, effect sets,
 entry contracts, strict schemas, imports, the manifest contract, templates,
 and record validators. Debug information is the only optional section. Sections have canonical order,
 unique IDs, bounded sizes, and no trailing data.
+
+The debug section never changes executable meaning; omitting it leaves a valid
+artifact. It stores the sorted normalized source paths, one location per
+instruction as a UTF-8 byte span, and a control-flow construct table. Effect,
+await, spawn, and call instructions carry the span of the expression that
+emits them. Each construct records its function, nearest enclosing construct,
+kind (`for`, `while`, `loop`, `if`, `match`, or `await_block`), source span, and
+the contiguous instruction range it emitted, including nested constructs. A
+loop range starts at the loop header, so a `for` iterable is evaluated outside
+the loop. Named regions (`condition`, `body`, `then`, `else`, `scrutinee`, and
+numbered `arm`) are source spans; a location belongs to the region whose span
+contains its own span, because an arm of a decision-lowered pattern can be
+emitted more than once. Each loop lists its repeat edges: the `Jump`
+instructions that begin its next iteration (back-edges, and `continue` jumps
+that target a `while` or `loop` header). Constructs are grouped by function in
+pre-order and a construct ID is its table index. Conditionals that the
+compiler generates for `&&`, `||`, `??`, and decision-lowered patterns are not
+recorded.
 
 The template section stores each sorted unique package-qualified identity,
 byte-exact UTF-8 content, SHA-256 content-and-signature digest, sorted scalar
@@ -395,7 +413,7 @@ and otherwise denied address classes are rejected according to policy.
 
 `exec.run` accepts only an argv list and optional stdin bytes. Package
 `[exec]` command patterns and environment names are canonicalized, sorted, and
-bound into the v19 manifest contract. An effective grant must be exact or
+bound into the v20 manifest contract. An effective grant must be exact or
 narrower than one requested pattern; a nonempty `--grant-exec` supplies the
 capability without a separate generic grant. The environment begins with only
 `LC_ALL=C` and `TZ=UTC`, then copies the requested-and-granted names from the

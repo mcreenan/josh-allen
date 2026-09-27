@@ -3,7 +3,7 @@
   "status": "conforming",
   "completed_on": "2026-08-29",
   "language_versions": ["0.1.1"],
-  "bytecode_versions": [19],
+  "bytecode_versions": [20],
   "required": {
     "bounded_package_loading": "conforming",
     "canonical_lockfile": "conforming",

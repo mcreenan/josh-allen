@@ -122,7 +122,7 @@ Program and execution IDs are connection-local, opaque, bounded, and never
 reused. A failed load creates no program ID. A failed start creates no reusable
 execution ID. A prepared execution is consumed exactly once.
 
-The current artifact accepted by this protocol is bytecode v19. JSON decoding
+The current artifact accepted by this protocol is bytecode v20. JSON decoding
 inside a program is a pure VM instruction and therefore adds no provider
 request, protocol method, feature string, replay entry, retry, or fallback.
 

@@ -1,6 +1,6 @@
 {
   "profile": "errors-0.1",
-  "bytecode_version": 19,
+  "bytecode_version": 20,
   "channels": [
     "diagnostic",
     "failed",

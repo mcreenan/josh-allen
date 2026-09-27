@@ -2293,6 +2293,7 @@ fn compile_bundle_from_modules(
         debug: DebugInfo {
             sources: lowering.debug_sources,
             locations: lowering.debug_locations,
+            constructs: Vec::new(),
         },
         hir,
         mir: MirBundle {

@@ -12589,6 +12589,7 @@ mod tests {
                     end: 203,
                 },
             ],
+            constructs: Vec::new(),
         };
         let mut clock = FixedClock;
         let mut observer = super::IgnoreCheckpoints;
@@ -13147,6 +13148,7 @@ mod tests {
                 start: 10,
                 end: 20,
             }],
+            constructs: Vec::new(),
         };
         let mut clock = FixedClock;
         let mut observer = LifecycleObserver::default();

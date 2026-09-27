@@ -15,7 +15,7 @@ use crate::{
 
 pub const ARTIFACT_MAGIC: [u8; 8] = *b"ALLEN\0\x01\0";
 /// Current artifact-format identifier stored in the binary header.
-pub const BYTECODE_VERSION: u16 = 19;
+pub const BYTECODE_VERSION: u16 = 20;
 pub const HEADER_SIZE: usize = 64;
 
 const MANDATORY_SECTION_COUNT: usize = 11;
@@ -142,6 +142,185 @@ pub struct DebugLocation {
 pub struct DebugInfo {
     pub sources: Vec<String>,
     pub locations: Vec<DebugLocation>,
+    /// Source control-flow constructs, grouped by function in pre-order.
+    ///
+    /// A construct ID is its index in this table.
+    pub constructs: Vec<DebugConstruct>,
+}
+
+/// The source form of one recorded control-flow construct.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DebugConstructKind {
+    For,
+    While,
+    Loop,
+    If,
+    Match,
+    AwaitBlock,
+}
+
+impl DebugConstructKind {
+    const ALL: [Self; 6] = [
+        Self::For,
+        Self::While,
+        Self::Loop,
+        Self::If,
+        Self::Match,
+        Self::AwaitBlock,
+    ];
+
+    /// Whether the construct can repeat its body.
+    #[must_use]
+    pub const fn is_loop(self) -> bool {
+        matches!(self, Self::For | Self::While | Self::Loop)
+    }
+
+    /// Stable lower-case name used by hosts.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::For => "for",
+            Self::While => "while",
+            Self::Loop => "loop",
+            Self::If => "if",
+            Self::Match => "match",
+            Self::AwaitBlock => "await_block",
+        }
+    }
+
+    const fn tag(self) -> u8 {
+        match self {
+            Self::For => 0,
+            Self::While => 1,
+            Self::Loop => 2,
+            Self::If => 3,
+            Self::Match => 4,
+            Self::AwaitBlock => 5,
+        }
+    }
+
+    fn from_tag(tag: u8) -> Option<Self> {
+        Self::ALL.into_iter().find(|kind| kind.tag() == tag)
+    }
+
+    const fn allows_region(self, region: DebugRegionKind) -> bool {
+        matches!(
+            (self, region),
+            (
+                Self::For | Self::Loop | Self::AwaitBlock,
+                DebugRegionKind::Body
+            ) | (
+                Self::While,
+                DebugRegionKind::Condition | DebugRegionKind::Body
+            ) | (
+                Self::If,
+                DebugRegionKind::Condition | DebugRegionKind::Then | DebugRegionKind::Else
+            ) | (
+                Self::Match,
+                DebugRegionKind::Scrutinee | DebugRegionKind::Arm
+            )
+        )
+    }
+}
+
+/// One named part of a construct, identified by its source span.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DebugRegionKind {
+    Condition,
+    Body,
+    Then,
+    Else,
+    Scrutinee,
+    Arm,
+}
+
+impl DebugRegionKind {
+    const ALL: [Self; 6] = [
+        Self::Condition,
+        Self::Body,
+        Self::Then,
+        Self::Else,
+        Self::Scrutinee,
+        Self::Arm,
+    ];
+
+    /// Stable lower-case name used by hosts.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Condition => "condition",
+            Self::Body => "body",
+            Self::Then => "then",
+            Self::Else => "else",
+            Self::Scrutinee => "scrutinee",
+            Self::Arm => "arm",
+        }
+    }
+
+    const fn tag(self) -> u8 {
+        match self {
+            Self::Condition => 0,
+            Self::Body => 1,
+            Self::Then => 2,
+            Self::Else => 3,
+            Self::Scrutinee => 4,
+            Self::Arm => 5,
+        }
+    }
+
+    fn from_tag(tag: u8) -> Option<Self> {
+        Self::ALL.into_iter().find(|kind| kind.tag() == tag)
+    }
+}
+
+/// A source-span region of one construct: a condition, body, branch, or arm.
+///
+/// `index` is the zero-based arm number for [`DebugRegionKind::Arm`] and zero
+/// otherwise. Regions are attributed by source-span containment, because arm
+/// bodies of decision-lowered patterns can be emitted more than once.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct DebugRegion {
+    pub kind: DebugRegionKind,
+    pub index: u32,
+    pub start: u32,
+    pub end: u32,
+}
+
+/// One source control-flow construct and the contiguous bytecode it emitted.
+///
+/// `[first_instruction, end_instruction)` contains every instruction emitted
+/// for the construct, including nested constructs. For loops it starts at the
+/// loop header, so a `for` iterable is evaluated outside the construct.
+/// `repeat_edges` lists the `Jump` instructions that begin the next iteration
+/// of this loop (back-edges and `continue` jumps that target the header).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DebugConstruct {
+    pub function: FunctionId,
+    pub parent: Option<u32>,
+    pub kind: DebugConstructKind,
+    pub source: u32,
+    pub start: u32,
+    pub end: u32,
+    pub first_instruction: u32,
+    pub end_instruction: u32,
+    pub regions: Vec<DebugRegion>,
+    pub repeat_edges: Vec<u32>,
+}
+
+impl DebugConstruct {
+    /// Whether `instruction` lies inside this construct's instruction range.
+    #[must_use]
+    pub const fn contains_instruction(&self, instruction: u32) -> bool {
+        self.first_instruction <= instruction && instruction < self.end_instruction
+    }
+
+    /// The region whose source span contains `[start, end)`, if any.
+    #[must_use]
+    pub fn region_for_span(&self, start: u32, end: u32) -> Option<&DebugRegion> {
+        self.regions
+            .iter()
+            .find(|region| region.start <= start && end <= region.end)
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1233,7 +1412,13 @@ fn validate_encode_model(artifact: &Artifact, limits: &DecodeLimits) -> Result<(
         }
     }
     if artifact.debug.as_ref().is_some_and(|debug| {
-        debug.sources.len() > limits.debug_records || debug.locations.len() > limits.debug_records
+        debug.sources.len() > limits.debug_records
+            || debug.locations.len() > limits.debug_records
+            || debug.constructs.len() > limits.debug_records
+            || debug.constructs.iter().any(|construct| {
+                construct.regions.len() > limits.debug_records
+                    || construct.repeat_edges.len() > limits.debug_records
+            })
     }) {
         return Err(limit("debug records"));
     }
@@ -3911,6 +4096,32 @@ fn encode_debug(
         put_u32(&mut output, location.start);
         put_u32(&mut output, location.end);
     }
+    put_count(&mut output, debug.constructs.len(), "debug construct table")?;
+    for construct in &debug.constructs {
+        put_u32(&mut output, construct.function);
+        put_u32(&mut output, construct.parent.unwrap_or(u32::MAX));
+        output.push(construct.kind.tag());
+        put_u32(&mut output, construct.source);
+        put_u32(&mut output, construct.start);
+        put_u32(&mut output, construct.end);
+        put_u32(&mut output, construct.first_instruction);
+        put_u32(&mut output, construct.end_instruction);
+        put_count(&mut output, construct.regions.len(), "debug region table")?;
+        for region in &construct.regions {
+            output.push(region.kind.tag());
+            put_u32(&mut output, region.index);
+            put_u32(&mut output, region.start);
+            put_u32(&mut output, region.end);
+        }
+        put_count(
+            &mut output,
+            construct.repeat_edges.len(),
+            "debug repeat-edge table",
+        )?;
+        for edge in &construct.repeat_edges {
+            put_u32(&mut output, *edge);
+        }
+    }
     Ok(output)
 }
 
@@ -5535,8 +5746,64 @@ fn decode_debug(
             end: reader.u32()?,
         });
     }
+    let construct_count = reader.count(limits.debug_records, "debug records")?;
+    reader.charge_items::<DebugConstruct>(construct_count)?;
+    let mut constructs = Vec::with_capacity(construct_count);
+    for _ in 0..construct_count {
+        let function = reader.u32()?;
+        let parent = match reader.u32()? {
+            u32::MAX => None,
+            parent => Some(parent),
+        };
+        let kind = DebugConstructKind::from_tag(reader.u8()?)
+            .ok_or_else(|| invalid_debug("debug construct kind is unknown"))?;
+        let source = reader.u32()?;
+        let start = reader.u32()?;
+        let end = reader.u32()?;
+        let first_instruction = reader.u32()?;
+        let end_instruction = reader.u32()?;
+        let region_count = reader.count(limits.debug_records, "debug records")?;
+        reader.charge_items::<DebugRegion>(region_count)?;
+        let mut regions = Vec::with_capacity(region_count);
+        for _ in 0..region_count {
+            let kind = DebugRegionKind::from_tag(reader.u8()?)
+                .ok_or_else(|| invalid_debug("debug region kind is unknown"))?;
+            regions.push(DebugRegion {
+                kind,
+                index: reader.u32()?,
+                start: reader.u32()?,
+                end: reader.u32()?,
+            });
+        }
+        let edge_count = reader.count(limits.debug_records, "debug records")?;
+        reader.charge_items::<u32>(edge_count)?;
+        let mut repeat_edges = Vec::with_capacity(edge_count);
+        for _ in 0..edge_count {
+            repeat_edges.push(reader.u32()?);
+        }
+        constructs.push(DebugConstruct {
+            function,
+            parent,
+            kind,
+            source,
+            start,
+            end,
+            first_instruction,
+            end_instruction,
+            regions,
+            repeat_edges,
+        });
+    }
     reader.finish()?;
-    Ok(DebugInfo { sources, locations })
+    Ok(DebugInfo {
+        sources,
+        locations,
+        constructs,
+    })
+}
+
+fn invalid_debug(message: &'static str) -> ArtifactError {
+    ArtifactError::new(ArtifactErrorCode::InvalidDebug, message)
 }
 
 fn validate_string_table(artifact: &Artifact, actual: &[String]) -> Result<(), ArtifactError> {
@@ -5586,6 +5853,100 @@ fn validate_debug_shape(debug: Option<&DebugInfo>) -> Result<(), ArtifactError> 
             ));
         }
         previous = Some(key);
+    }
+    validate_debug_construct_shape(&debug.constructs)
+}
+
+/// Check the canonical, module-independent shape of the construct table.
+///
+/// Constructs are grouped by ascending function and listed in pre-order:
+/// instruction ranges are non-empty, properly nested or disjoint, and each
+/// parent is the nearest earlier construct whose range contains the child.
+fn validate_debug_construct_shape(constructs: &[DebugConstruct]) -> Result<(), ArtifactError> {
+    let mut open: Vec<usize> = Vec::new();
+    for (index, construct) in constructs.iter().enumerate() {
+        if construct.first_instruction >= construct.end_instruction {
+            return Err(invalid_debug("debug construct instruction range is empty"));
+        }
+        if construct.start > construct.end {
+            return Err(invalid_debug("debug construct span start exceeds its end"));
+        }
+        if let Some(previous) = index.checked_sub(1).map(|previous| &constructs[previous]) {
+            if (previous.function, previous.first_instruction)
+                > (construct.function, construct.first_instruction)
+            {
+                return Err(invalid_debug(
+                    "debug constructs must be sorted by function and first instruction",
+                ));
+            }
+        }
+        while let Some(&top) = open.last() {
+            let enclosing = &constructs[top];
+            if enclosing.function == construct.function
+                && enclosing.first_instruction <= construct.first_instruction
+                && construct.first_instruction < enclosing.end_instruction
+            {
+                break;
+            }
+            open.pop();
+        }
+        let expected_parent = open.last().copied();
+        if let Some(parent) = expected_parent {
+            let enclosing = &constructs[parent];
+            if construct.end_instruction > enclosing.end_instruction
+                || construct.start < enclosing.start
+                || construct.end > enclosing.end
+            {
+                return Err(invalid_debug("debug construct overlaps its parent"));
+            }
+        }
+        if construct.parent.map(|parent| parent as usize) != expected_parent {
+            return Err(invalid_debug(
+                "debug construct parent is not its nearest enclosing construct",
+            ));
+        }
+        let mut previous_end = construct.start;
+        let mut next_arm = 0_u32;
+        for region in &construct.regions {
+            let expected_index = if region.kind == DebugRegionKind::Arm {
+                next_arm
+            } else {
+                0
+            };
+            if !construct.kind.allows_region(region.kind)
+                || region.start > region.end
+                || region.start < previous_end
+                || region.end > construct.end
+                || region.index != expected_index
+            {
+                return Err(invalid_debug(
+                    "debug construct regions must be allowed, sorted, disjoint, and numbered",
+                ));
+            }
+            if region.kind == DebugRegionKind::Arm {
+                next_arm = next_arm
+                    .checked_add(1)
+                    .ok_or_else(|| invalid_debug("debug construct has too many arms"))?;
+            }
+            previous_end = region.end;
+        }
+        if !construct.kind.is_loop() && !construct.repeat_edges.is_empty() {
+            return Err(invalid_debug("only loop constructs have repeat edges"));
+        }
+        if !construct
+            .repeat_edges
+            .windows(2)
+            .all(|pair| pair[0] < pair[1])
+            || construct
+                .repeat_edges
+                .iter()
+                .any(|edge| !construct.contains_instruction(*edge))
+        {
+            return Err(invalid_debug(
+                "debug repeat edges must be sorted, unique, and inside their loop",
+            ));
+        }
+        open.push(index);
     }
     Ok(())
 }
@@ -5639,6 +6000,30 @@ fn validate_debug_references(
                 ArtifactErrorCode::InvalidDebug,
                 "debug location source is out of range",
             ));
+        }
+    }
+    for construct in &debug.constructs {
+        let function = module
+            .functions
+            .get(construct.function as usize)
+            .ok_or_else(|| invalid_debug("debug construct function is out of range"))?;
+        if construct.end_instruction as usize > function.code.len() {
+            return Err(invalid_debug(
+                "debug construct instruction range is out of range",
+            ));
+        }
+        if construct.source as usize >= debug.sources.len() {
+            return Err(invalid_debug("debug construct source is out of range"));
+        }
+        for edge in &construct.repeat_edges {
+            match function.code.get(*edge as usize) {
+                Some(Instruction::Jump { target }) if construct.contains_instruction(*target) => {}
+                _ => {
+                    return Err(invalid_debug(
+                        "debug repeat edge is not a jump inside its loop",
+                    ));
+                }
+            }
         }
     }
     Ok(())
@@ -6719,6 +7104,7 @@ mod tests {
                     start: 0,
                     end: 4,
                 }],
+                constructs: Vec::new(),
             }),
             schemas: vec![StrictSchema {
                 value_type: ValueType::Unit,
@@ -7035,7 +7421,7 @@ mod tests {
     }
 
     #[test]
-    fn bytecode_v19_exec_manifest_contract_round_trips_and_rejects_tampering() {
+    fn bytecode_v20_exec_manifest_contract_round_trips_and_rejects_tampering() {
         let mut model = artifact(false);
         let manifest = model.manifest.as_mut().unwrap();
         manifest.required_capabilities = vec!["exec.run".to_owned()];
@@ -7047,7 +7433,7 @@ mod tests {
             decoded.manifest().unwrap(),
             model.manifest.as_ref().unwrap()
         );
-        assert_eq!(decoded.metadata().bytecode_version, 19);
+        assert_eq!(decoded.metadata().bytecode_version, 20);
 
         let mut unsorted = model.clone();
         unsorted.manifest.as_mut().unwrap().exec_commands.reverse();
@@ -7412,6 +7798,91 @@ mod tests {
     }
 
     #[test]
+    fn debug_construct_table_round_trips_and_rejects_invalid_shapes() {
+        let construct = |kind, first_instruction, end_instruction, parent| DebugConstruct {
+            function: 0,
+            parent,
+            kind,
+            source: 0,
+            start: 0,
+            end: 4,
+            first_instruction,
+            end_instruction,
+            regions: Vec::new(),
+            repeat_edges: Vec::new(),
+        };
+        let mut model = artifact(true);
+        let mut outer = construct(DebugConstructKind::If, 0, 2, None);
+        outer.regions = vec![
+            DebugRegion {
+                kind: DebugRegionKind::Condition,
+                index: 0,
+                start: 0,
+                end: 1,
+            },
+            DebugRegion {
+                kind: DebugRegionKind::Then,
+                index: 0,
+                start: 1,
+                end: 2,
+            },
+            DebugRegion {
+                kind: DebugRegionKind::Else,
+                index: 0,
+                start: 2,
+                end: 4,
+            },
+        ];
+        let mut inner = construct(DebugConstructKind::Match, 1, 2, Some(0));
+        inner.start = 1;
+        inner.end = 3;
+        inner.regions = vec![
+            DebugRegion {
+                kind: DebugRegionKind::Scrutinee,
+                index: 0,
+                start: 1,
+                end: 2,
+            },
+            DebugRegion {
+                kind: DebugRegionKind::Arm,
+                index: 0,
+                start: 2,
+                end: 3,
+            },
+        ];
+        model.debug.as_mut().unwrap().constructs = vec![outer, inner];
+        let bytes = encode(&model).unwrap();
+        let decoded = decode_and_verify(&bytes, &DecodeLimits::default()).unwrap();
+        assert_eq!(decoded.debug(), model.debug.as_ref());
+        assert_eq!(decoded.debug().unwrap().constructs[1].parent, Some(0));
+
+        let rejected = |mutate: &dyn Fn(&mut Vec<DebugConstruct>)| {
+            let mut invalid = model.clone();
+            mutate(&mut invalid.debug.as_mut().unwrap().constructs);
+            let error = encode(&invalid)
+                .and_then(|bytes| decode_and_verify(&bytes, &DecodeLimits::default()))
+                .unwrap_err();
+            assert_eq!(error.code(), ArtifactErrorCode::InvalidDebug, "{error}");
+        };
+        rejected(&|constructs| constructs[1].parent = None);
+        rejected(&|constructs| constructs[1].first_instruction = 2);
+        rejected(&|constructs| constructs[1].end_instruction = 3);
+        rejected(&|constructs| constructs[0].end_instruction = 3);
+        rejected(&|constructs| constructs[0].function = 1);
+        rejected(&|constructs| constructs[0].source = 1);
+        rejected(&|constructs| constructs.reverse());
+        rejected(&|constructs| constructs[1].regions[1].index = 1);
+        rejected(&|constructs| constructs[1].regions[0].kind = DebugRegionKind::Body);
+        rejected(&|constructs| constructs[0].regions.swap(0, 1));
+        rejected(&|constructs| constructs[0].repeat_edges = vec![1]);
+        rejected(&|constructs| {
+            constructs[0].kind = DebugConstructKind::Loop;
+            constructs[0].regions.clear();
+            constructs[0].repeat_edges = vec![0];
+        });
+    }
+
+    #[test]
     fn fail_instruction_round_trips_and_rejects_a_non_string_reason() {
         let mut model = artifact(false);
         model.module.constants = vec![Constant::String("failed".to_owned())];
@@ -7496,8 +7967,8 @@ mod tests {
     }
 
     #[test]
-    fn bytecode_v19_round_trips_newtype_identity_and_wrap_operations() {
-        assert_eq!(BYTECODE_VERSION, 19);
+    fn bytecode_v20_round_trips_newtype_identity_and_wrap_operations() {
+        assert_eq!(BYTECODE_VERSION, 20);
         let mut model = artifact(false);
         let epoch = ValueType::Newtype {
             name: "src/main.allen::EpochSeconds".to_owned(),

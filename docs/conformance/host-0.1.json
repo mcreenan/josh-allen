@@ -3,7 +3,7 @@
   "status": "conforming",
   "completed_on": "2026-08-30",
   "language_versions": ["0.1.1"],
-  "bytecode_versions": [19],
+  "bytecode_versions": [20],
   "protocol_versions": ["josh/1.6"],
   "required": {
     "agent_and_typed_response_operations": "conforming",
