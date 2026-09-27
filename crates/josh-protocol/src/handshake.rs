@@ -111,7 +111,7 @@ impl Validate for InitializeParams {
             }
             _ => {
                 return Err(invalid(
-                    "josh/1.7 invoking_session_id does not match execution_mode",
+                    "josh/1.8 invoking_session_id does not match execution_mode",
                 ));
             }
         }

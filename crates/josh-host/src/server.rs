@@ -30,16 +30,17 @@ use josh_protocol::{
     ExecutionResult, ExecutionStartParams, FrameReader, GrantDuration, HostProjectionSetParams,
     InitializeParams, ModelRequestParams, PeerInfo, PermissionRequestParams,
     PermissionRequestResult, PermissionRevokeParams, PermissionRight, PermissionTargetKind,
-    ProgramLoadParams, PromptPolicy, PromptSegmentPayload, ProtocolError, ProtocolTracker,
-    ReceiveAction, ResponseSchemaPayload, RuntimeReadyParams, StructuredPromptPayload,
-    SubAgentAskParams, SubAgentCreateParams, SubAgentCreateResult, SubAgentMessageParams,
-    SubAgentProjectionPayload, SubAgentRunParams, ToolInvokeParams, ToolInvokeResult,
-    TranscriptPart, TranscriptRole, TypedResponseResult, UserAskParams, Validate,
+    ProgramCheckParams, ProgramLoadParams, PromptPolicy, PromptSegmentPayload, ProtocolError,
+    ProtocolTracker, ReceiveAction, ResponseSchemaPayload, RuntimeReadyParams,
+    StructuredPromptPayload, SubAgentAskParams, SubAgentCreateParams, SubAgentCreateResult,
+    SubAgentMessageParams, SubAgentProjectionPayload, SubAgentRunParams, ToolInvokeParams,
+    ToolInvokeResult, TranscriptPart, TranscriptRole, TypedResponseResult, UserAskParams, Validate,
     ValidationIssuePayload, WireError, WireErrorCode, WireMessage, encode_frame,
     notification_params, request_params, response_result,
 };
 use serde_json::Value;
 
+use crate::check::ProgramError;
 use crate::events::{EventClock, SystemEventClock, execution_event};
 use crate::grants::GrantRegistry;
 use crate::origin::{OriginStore, ProgramDebug};
@@ -211,14 +212,38 @@ where
                     }
                     "program/load" => {
                         let result = request_params::<ProgramLoadParams>(&message, "program/load")
-                            .map_err(invalid_request)
-                            .and_then(|params| lock_session(&session)?.load_program(&params));
+                            .map_err(|error| ProgramError::from(invalid_request(error)))
+                            .and_then(|params| {
+                                lock_session(&session)
+                                    .map_err(ProgramError::from)?
+                                    .load_program(&params)
+                            });
                         match result {
                             Ok(result) => {
                                 write_result(&writer, id, &result)?;
                                 let mut state = lock_tracker(&tracker)?;
                                 state.commit_response(id).map_err(state_error)?;
                                 state.program_loaded().map_err(state_error)?;
+                            }
+                            Err(error) => {
+                                write_wire_error(&writer, id, error.wire())?;
+                                lock_tracker(&tracker)?
+                                    .commit_response(id)
+                                    .map_err(state_error)?;
+                            }
+                        }
+                    }
+                    "program/check" => {
+                        let result =
+                            request_params::<ProgramCheckParams>(&message, "program/check")
+                                .map_err(invalid_request)
+                                .and_then(|params| lock_session(&session)?.check_program(&params));
+                        match result {
+                            Ok(result) => {
+                                write_result(&writer, id, &result)?;
+                                lock_tracker(&tracker)?
+                                    .commit_response(id)
+                                    .map_err(state_error)?;
                             }
                             Err(error) => finish_failed_request(&writer, &tracker, id, error)?,
                         }

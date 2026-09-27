@@ -28,10 +28,12 @@ pub use frontend::{
     extract_inline_manifest, prepare_source, prepare_tools, reachable_source_modules,
 };
 pub use package::{
-    CompiledPackage, CompiledPackageSourceTest, assemble_inline_compilation,
-    assemble_inline_source, assemble_loaded_package, assemble_loaded_source_test,
-    assemble_loose_compilation, assemble_root_source_package,
-    assemble_root_source_package_with_resources, assemble_source_test, prepare_loaded_source_tests,
+    AssemblyError, CompiledPackage, CompiledPackageSourceTest, assemble_inline_compilation,
+    assemble_inline_source, assemble_inline_source_checked, assemble_loaded_package,
+    assemble_loaded_source_test, assemble_loose_compilation, assemble_root_source_package,
+    assemble_root_source_package_with_resources,
+    assemble_root_source_package_with_resources_checked, assemble_source_test,
+    prepare_loaded_source_tests,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -103,9 +105,25 @@ pub fn compile(source: &str) -> Result<Module, Vec<Diagnostic>> {
 
 #[must_use]
 pub fn render_diagnostic(path: &str, source: &str, diagnostic: &Diagnostic) -> String {
-    let offset = diagnostic.span.start.min(source.len());
-    let prefix = &source[..offset];
-    let bytes = prefix.as_bytes();
+    let (line, column) = source_position(source, diagnostic.span.start);
+    format!(
+        "{path}:{line}:{column}: error[{}]: {}",
+        diagnostic.code, diagnostic.message
+    )
+}
+
+/// The 1-based line and column of a UTF-8 byte offset in source text.
+///
+/// `\n`, `\r\n`, and a lone `\r` each end one line. Columns count Unicode
+/// scalar values. An offset past the end, or inside a character, is moved to
+/// the nearest earlier character boundary.
+#[must_use]
+pub fn source_position(source: &str, offset: usize) -> (usize, usize) {
+    let mut offset = offset.min(source.len());
+    while !source.is_char_boundary(offset) {
+        offset -= 1;
+    }
+    let bytes = &source.as_bytes()[..offset];
     let mut line = 1;
     let mut line_start = 0;
     let mut position = 0;
@@ -127,16 +145,78 @@ pub fn render_diagnostic(path: &str, source: &str, diagnostic: &Diagnostic) -> S
             _ => position += 1,
         }
     }
-    let column = source[line_start..offset].chars().count() + 1;
-    format!(
-        "{path}:{line}:{column}: error[{}]: {}",
-        diagnostic.code, diagnostic.message
-    )
+    (line, source[line_start..offset].chars().count() + 1)
+}
+
+/// Precomputed line starts for repeated [`source_position`] lookups.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SourceLines {
+    text: String,
+    /// Byte offsets that begin a line: 0, and each offset after a `\n`,
+    /// a `\r\n`, or a lone `\r`.
+    line_starts: Vec<usize>,
+}
+
+impl SourceLines {
+    #[must_use]
+    pub fn new(text: &str) -> Self {
+        let bytes = text.as_bytes();
+        let mut line_starts = vec![0];
+        for (index, byte) in bytes.iter().enumerate() {
+            let ends_line = match byte {
+                b'\n' => true,
+                b'\r' => bytes.get(index + 1) != Some(&b'\n'),
+                _ => false,
+            };
+            if ends_line {
+                line_starts.push(index + 1);
+            }
+        }
+        Self {
+            text: text.to_owned(),
+            line_starts,
+        }
+    }
+
+    /// The same 1-based line and column as [`source_position`].
+    #[must_use]
+    pub fn position(&self, offset: usize) -> (usize, usize) {
+        let mut offset = offset.min(self.text.len());
+        while !self.text.is_char_boundary(offset) {
+            offset -= 1;
+        }
+        // An offset between the two bytes of `\r\n` already follows a line end.
+        if offset > 0
+            && self.text.as_bytes()[offset - 1] == b'\r'
+            && self.text.as_bytes().get(offset) == Some(&b'\n')
+        {
+            return (
+                self.line_starts.partition_point(|start| *start <= offset) + 1,
+                1,
+            );
+        }
+        let line = self.line_starts.partition_point(|start| *start <= offset);
+        let start = self.line_starts[line - 1];
+        (line, self.text[start..offset].chars().count() + 1)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn source_lines_match_source_position_at_every_offset() {
+        let text = "a\r\nb\rc\n\n🦀d\r\r\ne\u{e9}f\r";
+        let lines = SourceLines::new(text);
+        for offset in 0..=text.len() + 2 {
+            assert_eq!(
+                lines.position(offset),
+                source_position(text, offset),
+                "{offset}"
+            );
+        }
+    }
 
     #[test]
     fn diagnostic_rendering_counts_every_source_line_terminator_once() {

@@ -330,8 +330,8 @@ fn initialize_result_features_are_exact() {
 }
 
 #[test]
-fn exec_grants_use_the_strict_josh_1_7_start_contract() {
-    assert_eq!(PROTOCOL_VERSION, "josh/1.7");
+fn exec_grants_use_the_strict_josh_1_8_start_contract() {
+    assert_eq!(PROTOCOL_VERSION, "josh/1.8");
     assert!(FEATURES.contains(&"exec-run"));
     let value = json!({
         "execution_id":"exec-1",
@@ -1051,4 +1051,68 @@ fn program_debug_tables_validate_identifiers_and_regions() {
         mutate(&mut invalid);
         assert!(parse(invalid.clone()).is_err(), "accepted {invalid}");
     }
+}
+
+#[test]
+fn compiler_diagnostics_and_program_checks_are_bounded_and_consistent() {
+    let diagnostic = json!({
+        "code":"E3007","severity":"error","message":"unknown name 'missing'",
+        "source":"src/main.allen","start":40,"end":47,"line":3,"column":3,"end_line":3,"end_column":10,
+        "labels":[{"message":"declared here","source":"src/main.allen","start":0,"end":3,"line":1,"column":1,"end_line":1,"end_column":4}],
+        "notes":[],"help":null
+    });
+    let parse = |value: serde_json::Value| {
+        serde_json::from_value::<josh_protocol::ProgramInvalidData>(value)
+            .map_err(|error| error.to_string())
+            .and_then(|data| {
+                data.validate()
+                    .map(|()| data)
+                    .map_err(|error| error.to_string())
+            })
+    };
+    let data = parse(json!({"diagnostics":[diagnostic.clone()]})).unwrap();
+    assert_eq!(data.diagnostics[0].labels.len(), 1);
+    assert!(parse(json!({"diagnostics":[]})).is_err());
+    assert!(parse(json!({"diagnostics":vec![diagnostic.clone(); 65]})).is_err());
+    for (key, value) in [
+        ("line", json!(0)),
+        ("column", json!(0)),
+        ("end_line", json!(2)),
+        ("start", json!(50)),
+        ("source", json!("")),
+        ("code", json!("")),
+        ("severity", json!("fatal")),
+        ("message", json!("x".repeat(1_025))),
+    ] {
+        let mut invalid = diagnostic.clone();
+        invalid[key] = value;
+        assert!(
+            parse(json!({"diagnostics":[invalid.clone()]})).is_err(),
+            "{invalid}"
+        );
+    }
+    let mut unknown = diagnostic.clone();
+    unknown["span"] = json!({});
+    assert!(parse(json!({"diagnostics":[unknown]})).is_err());
+
+    let check = |value: serde_json::Value| {
+        serde_json::from_value::<josh_protocol::ProgramCheckResult>(value)
+            .map_err(|error| error.to_string())
+            .and_then(|result| result.validate().map_err(|error| error.to_string()))
+    };
+    let failed = json!({"diagnostics":[diagnostic],"artifact_digest":null,"entries":[],
+        "required_tools":[],"exec_commands":[],"exec_environment":[],"debug":null});
+    check(failed.clone()).unwrap();
+    let mut both = failed.clone();
+    both["artifact_digest"] = json!(format!("sha256:{}", "a".repeat(64)));
+    assert!(check(both).is_err());
+    let mut tools_without_artifact = failed;
+    tools_without_artifact["required_tools"] = json!(["example.lookup"]);
+    assert!(check(tools_without_artifact).is_err());
+    let passed = json!({"diagnostics":[],"artifact_digest":format!("sha256:{}", "a".repeat(64)),
+        "entries":[],"required_tools":[],"exec_commands":[],"exec_environment":[],"debug":null});
+    check(passed.clone()).unwrap();
+    let mut neither = passed;
+    neither["artifact_digest"] = json!(null);
+    assert!(check(neither).is_err());
 }

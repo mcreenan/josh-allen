@@ -109,23 +109,70 @@ pub fn assemble_inline_source(
     source: &str,
     catalog: &FrozenCatalog,
 ) -> Result<CompiledPackage, String> {
-    let compiled = compile_inline_manifest_source_with_catalog(source, catalog)
-        .map_err(|diagnostics| render_inline_diagnostics(source, diagnostics))?;
-    assemble_compiled_inline_source(compiled)
+    assemble_inline_source_checked(source, catalog).map_err(|error| error.render())
 }
 
-fn render_inline_diagnostics(source: &str, diagnostics: Vec<crate::Diagnostic>) -> String {
-    diagnostics
-        .into_iter()
-        .map(|diagnostic| {
-            render_diagnostic(
-                diagnostic.source.as_deref().unwrap_or("main.allen"),
-                source,
-                &diagnostic,
-            )
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
+/// Compile one loose or inline-manifest source file, keeping structured errors.
+///
+/// The source is compiled as module `main.allen`. This is the same path as
+/// [`assemble_inline_source`], whose error is [`AssemblyError::render`].
+///
+/// # Errors
+///
+/// Returns compiler diagnostics, or a manifest, entry, or boundary error.
+pub fn assemble_inline_source_checked(
+    source: &str,
+    catalog: &FrozenCatalog,
+) -> Result<CompiledPackage, AssemblyError> {
+    let compiled =
+        compile_inline_manifest_source_with_catalog(source, catalog).map_err(|diagnostics| {
+            AssemblyError::Diagnostics {
+                root: "main.allen".to_owned(),
+                sources: BTreeMap::from([("main.allen".to_owned(), source.to_owned())]),
+                diagnostics,
+            }
+        })?;
+    assemble_compiled_inline_source(compiled).map_err(AssemblyError::Program)
+}
+
+/// Why one source program could not be assembled into an artifact.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum AssemblyError {
+    /// Compiler diagnostics. A diagnostic without a `source` belongs to `root`,
+    /// and `sources` maps each module identity to its text.
+    Diagnostics {
+        root: String,
+        sources: BTreeMap<String, String>,
+        diagnostics: Vec<crate::Diagnostic>,
+    },
+    /// A package, manifest, entry, or boundary error without a source span.
+    Program(String),
+}
+
+impl AssemblyError {
+    /// Render the error as the one-line-per-diagnostic text used by the CLI.
+    #[must_use]
+    pub fn render(&self) -> String {
+        match self {
+            Self::Diagnostics {
+                root,
+                sources,
+                diagnostics,
+            } => diagnostics
+                .iter()
+                .map(|diagnostic| {
+                    let module = diagnostic.source.as_deref().unwrap_or(root);
+                    let text = sources
+                        .get(module)
+                        .or_else(|| sources.get(root))
+                        .map_or("", String::as_str);
+                    render_diagnostic(module, text, diagnostic)
+                })
+                .collect::<Vec<_>>()
+                .join("\n"),
+            Self::Program(message) => message.clone(),
+        }
+    }
 }
 
 fn assemble_compiled_inline_source(
@@ -615,6 +662,31 @@ pub fn assemble_root_source_package_with_resources(
     catalog: Option<&FrozenCatalog>,
     limits: &LoadLimits,
 ) -> Result<CompiledPackage, String> {
+    assemble_root_source_package_with_resources_checked(
+        manifest_text,
+        sources,
+        resources,
+        lock_text,
+        catalog,
+        limits,
+    )
+    .map_err(|error| error.render())
+}
+
+/// Verify and assemble one in-memory package, keeping structured errors.
+///
+/// # Errors
+///
+/// Returns compiler diagnostics keyed by module identity, or a package,
+/// resource, lock, tool, or boundary error.
+pub fn assemble_root_source_package_with_resources_checked(
+    manifest_text: &str,
+    sources: &BTreeMap<String, String>,
+    resources: &BTreeMap<String, Vec<u8>>,
+    lock_text: Option<&str>,
+    catalog: Option<&FrozenCatalog>,
+    limits: &LoadLimits,
+) -> Result<CompiledPackage, AssemblyError> {
     let loaded = load_verified_root_package_with_resources(
         manifest_text,
         sources,
@@ -622,8 +694,20 @@ pub fn assemble_root_source_package_with_resources(
         lock_text,
         limits,
     )
-    .map_err(|error| error.to_string())?;
-    assemble_loaded_package(&loaded, catalog)
+    .map_err(|error| AssemblyError::Program(error.to_string()))?;
+    let (bundle, mut prepared, templates, resources) =
+        prepare_loaded_package(&loaded, catalog).map_err(AssemblyError::Program)?;
+    let compilation = compile_package_bundle_with_prepared_tools_and_templates(
+        &bundle,
+        &mut prepared,
+        &templates,
+    )
+    .map_err(|diagnostics| AssemblyError::Diagnostics {
+        root: bundle.root.clone(),
+        sources: bundle.sources.clone(),
+        diagnostics,
+    })?;
+    finish_loaded_package(&loaded, compilation, prepared, resources).map_err(AssemblyError::Program)
 }
 
 /// Compile one verified package graph into the canonical current artifact.

@@ -23,36 +23,18 @@ use josh_protocol::{
 /// Origins retained for typed-response retries of recent effects.
 const ORIGIN_STORE_CAPACITY: usize = 1_024;
 
-/// Source text indexed by line for 1-based line and column positions.
+/// Source text indexed by line for the compiler's 1-based line and column
+/// positions, so origins and diagnostics agree with rendered compiler errors.
 #[derive(Debug)]
-struct LineIndex {
-    text: String,
-    line_starts: Vec<usize>,
-}
+struct LineIndex(allen_compiler::SourceLines);
 
 impl LineIndex {
     fn new(text: &str) -> Self {
-        let mut line_starts = vec![0];
-        line_starts.extend(
-            text.bytes()
-                .enumerate()
-                .filter_map(|(index, byte)| (byte == b'\n').then_some(index + 1)),
-        );
-        Self {
-            text: text.to_owned(),
-            line_starts,
-        }
+        Self(allen_compiler::SourceLines::new(text))
     }
 
-    /// The 1-based line and column (in Unicode scalar values) of a byte offset.
     fn position(&self, offset: u32) -> Option<(u32, u32)> {
-        let mut offset = usize::try_from(offset).ok()?.min(self.text.len());
-        while !self.text.is_char_boundary(offset) {
-            offset -= 1;
-        }
-        let line = self.line_starts.partition_point(|start| *start <= offset);
-        let line_start = self.line_starts[line - 1];
-        let column = self.text[line_start..offset].chars().count() + 1;
+        let (line, column) = self.0.position(usize::try_from(offset).ok()?);
         Some((u32::try_from(line).ok()?, u32::try_from(column).ok()?))
     }
 }

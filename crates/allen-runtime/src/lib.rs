@@ -5825,7 +5825,10 @@ fn response_schema(
     }
 }
 
-fn schema_descriptor(
+/// The strict JSON boundary descriptor of one value type, the format used by
+/// typed-response schemas and entry contracts.
+#[must_use]
+pub fn schema_descriptor(
     value_type: &ValueType,
     enums: &[allen_bytecode::EnumType],
 ) -> serde_json::Value {

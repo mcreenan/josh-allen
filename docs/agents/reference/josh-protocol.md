@@ -1,6 +1,6 @@
 # JOSH protocol reference for AI agents
 
-Status: Operational guide for the current `josh/1.7` protocol
+Status: Operational guide for the current `josh/1.8` protocol
 
 Entry point: [`docs/agents/README.md`](../README.md). The implementation
 specification is authoritative for runtime behavior.
@@ -75,7 +75,7 @@ negotiated protocol version:
   "method": "initialize",
   "params": {
     "host": {"name": "allen-host", "version": "0.1.0"},
-    "protocol_versions": ["josh/1.7"],
+    "protocol_versions": ["josh/1.8"],
     "language_versions": [">=0.1.0, <0.2.0"],
     "execution_mode": "attached",
     "invoking_session_id": "session-1",
@@ -97,11 +97,12 @@ negotiated protocol version:
 stable `invoking_session_id`; unattended mode sends it as `null`. Limits and
 standard capability names are canonical, bounded, sorted, and unique.
 
-The runtime either selects `josh/1.7` and language `0.1.1` or rejects
+The runtime either selects `josh/1.8` and language `0.1.1` or rejects
 initialization. Its result returns the runtime identity, effective limits, and
 these exact feature strings:
-`agent`, `catalog-provenance`, `effect-origin`, `exec-run`, `external-fs-grants`,
-`host-projection`, `model`, `record-replay`, `structured-prompts`,
+`agent`, `catalog-provenance`, `compile-diagnostics`, `effect-origin`,
+`exec-run`, `external-fs-grants`, `host-projection`, `model`, `program-check`,
+`record-replay`, `structured-prompts`,
 `structured-transcript`, `sub-agents`, `typed-responses`, `typed-tools`, and
 `user-interaction`.
 There is no minor-version fallback or alternate feature set.
@@ -206,7 +207,19 @@ The artifact verifier independently derives the exact required site set from
 the exhaustive nominal record-path provenance stored for each direction.
 It also returns sorted `exec_commands` and `exec_environment` lists from the
 verified manifest contract. These expose names and patterns, never environment
-values.
+values. Each entry also carries `input_descriptor` and `output_descriptor`
+(typed-response schema descriptors) and its sorted declared `effects`.
+
+A source program that does not compile fails `program/load` with
+`program.invalid` and `data.diagnostics`: each has `code`, `severity`,
+`message`, bundle-path `source`, byte `start`/`end`, 1-based `line`,
+`column`, `end_line`, `end_column`, `labels`, `notes`, and `help`. Spanless
+failures (manifest or entry boundary) are one `E3005` at 1:1 of
+`src/main.allen` (or `allen.toml`). `program/check` takes the load parameters,
+creates no program ID, and returns `diagnostics`, `artifact_digest`,
+`entries`, `required_tools`, `exec_commands`, `exec_environment`, and `debug`;
+a program that does not compile is a successful check with diagnostics. Check
+and load return identical diagnostics for the same source and catalog.
 
 The result's `debug` field is `null` without artifact debug information.
 Otherwise it holds static `constructs` (control-flow constructs with `id`,
@@ -300,7 +313,7 @@ omit raw input, output, stderr, credentials, and temporary paths. The runner
 never retries, calls `executor resume`, opens an approval flow, or falls back
 to a shell, agent, model, or another provider.
 
-This route uses the current `josh/1.7` `tool/invoke` contract unchanged. It
+This route uses the current `josh/1.8` `tool/invoke` contract unchanged. It
 does not add a method, feature string, or alternate protocol version. Recording
 stores the validated tool boundary result, and replay uses that result without
 starting Executor.
@@ -482,7 +495,7 @@ must not produce a second terminal response or expose internal error detail.
 
 When writing or reviewing a JOSH client:
 
-1. Offer only `josh/1.7`.
+1. Offer only `josh/1.8`.
 2. Send `initialize` exactly once.
 3. Use strict `Content-Length` framing and exact JSON shapes.
 4. Keep request IDs unique per direction while active.
@@ -490,6 +503,7 @@ When writing or reviewing a JOSH client:
 6. Match catalog metadata and count to the projected tools section.
 7. Freeze the catalog before loading any program.
 8. Read exact `required_tools` from `program/load`; do not infer grants from source.
+   Show `error.data.diagnostics` when a source load fails.
 9. Never request authority absent from the loaded program contract.
 10. Preserve attached session identity on all `agent/*` calls.
 11. Treat opaque handles as execution-local and nonserializable.

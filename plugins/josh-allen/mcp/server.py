@@ -29,7 +29,7 @@ JOSH_RESPONSE_TIMEOUT_SECONDS = 30
 # MCP version used by the local stdio clients supported by this plugin.
 MCP_PROTOCOL_VERSION = "2025-06-18"
 JOSH_PROTOCOL = "josh/1"
-JOSH_PROTOCOL_VERSION = "josh/1.7"
+JOSH_PROTOCOL_VERSION = "josh/1.8"
 JOSH_LIMITS = {
     "max_frame_bytes": MAX_FRAME_BYTES,
     "max_active_requests": 64,

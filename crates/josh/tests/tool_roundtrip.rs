@@ -3071,3 +3071,114 @@ fn runtime_failures_report_the_failing_source_span() {
         "10 / zero"
     );
 }
+
+#[test]
+#[allow(clippy::too_many_lines)]
+fn program_check_and_failed_loads_return_structured_diagnostics_over_raw_stdio() {
+    let broken = "export fn main() returns Int {\n  let value = 1;\n  value + missing\n}\n";
+    let working = "export fn main() returns Int {\n  mut total = 0;\n  for step in 0..3 { total += step; }\n  total\n}\n";
+    let bundle = |source: &str| ProgramLoadParams::SourceBundle {
+        files: vec![SourceFile {
+            path: "src/main.allen".to_owned(),
+            encoding: FileEncoding::Utf8,
+            content: source.to_owned(),
+        }],
+    };
+    let initialize = InitializeParams {
+        host: PeerInfo {
+            name: "check-host".to_owned(),
+            version: "1.0.0".to_owned(),
+        },
+        protocol_versions: vec![josh_protocol::PROTOCOL_VERSION.to_owned()],
+        language_versions: vec![">=0.1.0, <0.2.0".to_owned()],
+        execution_mode: ExecutionMode::Unattended,
+        invoking_session_id: InvokingSessionId::Null,
+        standard_capabilities: Vec::new(),
+        limits: limits(),
+        extensions: Vec::new(),
+    };
+    let catalog = json!({"schema_dialect":josh_protocol::SCHEMA_DIALECT,"metadata":{"source":"test-host","source_revision":"1","observed_at_unix_ms":1,"freshness":"current","complete":true},"tools":[]});
+    let mut child = Command::new(env!("CARGO_BIN_EXE_josh"))
+        .arg("serve")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    let mut reader = FrameReader::new(
+        child.stdout.take().unwrap(),
+        josh_protocol::DEFAULT_MAX_FRAME_BYTES,
+    );
+    receive(&mut reader);
+    let mut response = |id: &str| match receive(&mut reader) {
+        WireMessage::Response {
+            id: response,
+            result,
+            error,
+        } if response == id => (result, error),
+        other => panic!("unexpected {other:?}"),
+    };
+    send(&mut stdin, "h-1", "initialize", &initialize);
+    let (initialized, _) = response("h-1");
+    let features = initialized.unwrap()["features"].clone();
+    assert!(
+        features
+            .as_array()
+            .unwrap()
+            .contains(&json!("program-check"))
+    );
+    assert!(
+        features
+            .as_array()
+            .unwrap()
+            .contains(&json!("compile-diagnostics"))
+    );
+    send(
+        &mut stdin,
+        "h-p",
+        "host/project",
+        &projection_value(&json!(initialize), &catalog),
+    );
+    response("h-p");
+    send(&mut stdin, "h-2", "catalog/set", &catalog);
+    response("h-2");
+
+    send(&mut stdin, "h-3", "program/check", &bundle(broken));
+    let (checked, error) = response("h-3");
+    assert!(error.is_none());
+    let checked = checked.unwrap();
+    assert_eq!(checked["artifact_digest"], json!(null));
+    let diagnostics = checked["diagnostics"].clone();
+    assert_eq!(diagnostics[0]["source"], "src/main.allen");
+    assert_eq!(
+        (&diagnostics[0]["line"], &diagnostics[0]["column"]),
+        (&json!(3), &json!(11))
+    );
+
+    send(&mut stdin, "h-4", "program/load", &bundle(broken));
+    let (loaded, error) = response("h-4");
+    assert!(loaded.is_none());
+    let error = error.unwrap();
+    assert_eq!(error.code, WireErrorCode::ProgramInvalid);
+    assert_eq!(error.message, "source program does not compile");
+    assert_eq!(error.data.unwrap()["diagnostics"], diagnostics);
+
+    send(&mut stdin, "h-5", "program/check", &bundle(working));
+    let (checked, _) = response("h-5");
+    let checked = checked.unwrap();
+    assert_eq!(checked["diagnostics"], json!([]));
+    assert_eq!(
+        checked["entries"][0]["output_descriptor"],
+        json!({"type":"integer"})
+    );
+    assert_eq!(checked["debug"]["constructs"][0]["kind"], "for");
+    // A check leaves no program behind: the first load gets the first ID.
+    send(&mut stdin, "h-6", "program/load", &bundle(working));
+    let (loaded, _) = response("h-6");
+    let loaded = loaded.unwrap();
+    assert_eq!(loaded["program_id"], "program-1");
+    assert_eq!(loaded["artifact_digest"], checked["artifact_digest"]);
+    drop(stdin);
+    assert!(child.wait().unwrap().success());
+}

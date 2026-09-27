@@ -28,7 +28,7 @@ The workspace uses these crates:
 | `allen-http-get` | Restricted HTTPS GET and destination policy |
 | `allen-testkit` | Deterministic recording, replay, redaction, and provider test support |
 | `allen-cli` | `check`, `build`, `inspect`, `run`, and package commands |
-| `josh-protocol` | The current `josh/1.7` message, payload, framing, and connection-state contract |
+| `josh-protocol` | The current `josh/1.8` message, payload, framing, and connection-state contract |
 | `josh-host` | JOSH session lifecycle, provider adapters, stdio connection, and execution supervision |
 | `josh` | The `serve` and `run` executable entry points |
 
@@ -446,7 +446,7 @@ or an output limit. It never invokes a shell or retries.
 ## 10. Current JOSH protocol
 
 JOSH uses the fixed envelope marker `josh/1` and negotiates the sole current
-protocol version `josh/1.7`. Each frame is an ASCII header
+protocol version `josh/1.8`. Each frame is an ASCII header
 `Content-Length: <decimal byte count>\r\n`, the exact header
 `Content-Type: application/josh+json; charset=utf-8\r\n`, an empty `\r\n`
 line, and exactly that many UTF-8 JSON bytes. The default frame limit is
@@ -458,12 +458,13 @@ invalid header, ends early, or is not strict JSON closes the connection after
 active work is cancelled; `josh serve` exits unsuccessfully and names the
 reason on stderr.
 
-The host sends `initialize` once with `protocol_versions: ["josh/1.7"]`, one
+The host sends `initialize` once with `protocol_versions: ["josh/1.8"]`, one
 execution mode, an invoking-session identity or `null`, limits, and standard
 capabilities.
-The runtime selects `josh/1.7` or rejects initialization. The result contains
+The runtime selects `josh/1.8` or rejects initialization. The result contains
 the runtime identity, effective limits, and the current feature set, including
-`host-projection` and `effect-origin`. There is no minor-version fallback.
+`host-projection`, `effect-origin`, `compile-diagnostics`, and
+`program-check`. There is no minor-version fallback.
 
 The required connection prefix is
 `initialize -> host/project -> catalog/set`. `host/project` is a host-to-runtime
@@ -565,7 +566,40 @@ searching source text. `execution/start` also adds sorted canonical
 declares support for those fields. Unknown fields, malformed names or patterns,
 duplicates, and unsorted lists are protocol errors.
 
-### 10.1 Effect origins
+Each loaded entry reports its name, strict input and output schema digests,
+directional contract digests, `input_descriptor` and `output_descriptor` in
+the typed-response schema descriptor format, and the entry function's sorted
+declared `effects`.
+
+### 10.1 Compile diagnostics and program checks
+
+With the `compile-diagnostics` feature, a `source_bundle` that does not compile
+against the frozen catalog fails `program/load` with `program.invalid`, message
+`source program does not compile`, and `data: {"diagnostics": [...]}`. Other
+load failures, such as a malformed bundle or an invalid artifact, carry no
+data. Each diagnostic has `code`, `severity` (`error`), `message` (at most
+1,024 bytes), `source` (the bundle path), UTF-8 byte offsets `start` and
+`end`, 1-based `line`, `column`, `end_line`, and `end_column`, `labels` (each
+with `message` and the same position fields), `notes`, and `help`. Columns
+count Unicode scalar values, and `\n`, `\r\n`, and a lone `\r` each end one
+line, exactly as in rendered compiler errors. A failure without a source span,
+such as an invalid inline manifest or a non-serializable entry boundary, is
+one `E3005` diagnostic at offset 0 of `src/main.allen`, or of `allen.toml` for
+a package. At most 64 diagnostics are returned, and the runtime keeps only as
+many as fit in one quarter of the negotiated frame limit.
+
+With the `program-check` feature, `program/check` takes the same parameters as
+`program/load`, is valid in the same states, and compiles and verifies the
+program without creating a program ID. Its result has `diagnostics`,
+`artifact_digest`, `entries`, `required_tools`, `exec_commands`,
+`exec_environment`, and `debug`, with the meanings they have for
+`program/load`. A source program that does not compile is a successful check
+with diagnostics, a `null` digest and debug, and empty lists. A malformed
+bundle or invalid artifact fails the request as `program/load` would. Every
+path uses the same compiler entry point, so a check and a load of the same
+source against the same catalog return identical diagnostics.
+
+### 10.2 Effect origins
 
 The `effect-origin` feature reports where each provider request came from.
 Every runtime-to-host request (`tool/invoke`, `model/request`, `user/ask`,
@@ -648,7 +682,7 @@ and `truncated`:
 - The runtime stops adding entries before the tables exceed one quarter of the
   negotiated frame limit and then sets `truncated: true`.
 
-### 10.2 Headless Executor tool provider
+### 10.3 Headless Executor tool provider
 
 `josh run --executor` enables one unattended tool provider. A repeatable
 `--grant-tool <name>` grants only that exact canonical catalog name;
@@ -692,7 +726,7 @@ stderr, credentials, or paths.
 
 This adapter does not retry, run `executor resume`, open an approval flow, or
 fall back to a shell, agent, model, or another provider. It uses the existing
-`josh/1.7` `tool/invoke` request and response shapes, so it adds no protocol
+`josh/1.8` `tool/invoke` request and response shapes, so it adds no protocol
 method, feature string, or compatibility branch. Current recording captures
 the validated tool boundary result; replay returns that recorded result and
 does not start Executor.

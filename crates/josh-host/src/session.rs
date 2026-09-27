@@ -8,11 +8,9 @@ use std::time::Duration;
 use allen_bytecode::{
     DecodeLimits, VerifiedArtifact, compute_strict_schema_digest, decode_and_verify, encode,
 };
-use allen_compiler::{assemble_inline_source, assemble_root_source_package_with_resources};
-use allen_package::LoadLimits;
 use allen_runtime::{
     HostPolicy, LaunchRequest, PreparedLaunch, RuntimeError, RuntimeProviders, ToolProvider,
-    execute_prepared_with_context, prepare_launch,
+    execute_prepared_with_context, prepare_launch, schema_descriptor,
 };
 use allen_sandbox_fs::Rights;
 use allen_schema::{
@@ -25,11 +23,13 @@ use base64::Engine as _;
 use josh_protocol::{
     CatalogSetParams, CatalogSetResult, CatalogToolSummary, EntryContract, ExecutionMode,
     ExecutionResult, ExecutionStartParams, HostProjectionSetParams, HostProjectionSetResult,
-    InitializeParams, InitializeResult, PeerInfo, ProgramLoadParams, ProgramLoadResult,
-    ProjectionSectionKind, ProtocolLimits, SessionBindingLevel, Validate, WireError, WireErrorCode,
+    InitializeParams, InitializeResult, PeerInfo, ProgramCheckResult, ProgramLoadParams,
+    ProgramLoadResult, ProjectionSectionKind, ProtocolLimits, SessionBindingLevel, Validate,
+    WireError, WireErrorCode,
 };
 use sha2::{Digest as _, Sha256};
 
+use crate::check::{ProgramError, compile_source_bundle};
 use crate::origin::ProgramDebug;
 
 const RUNTIME_NAME: &str = "allen-reference";
@@ -64,6 +64,24 @@ impl std::fmt::Display for HostError {
 }
 
 impl std::error::Error for HostError {}
+
+/// A compiled and verified program before it is stored.
+struct CompiledProgram {
+    verified: VerifiedArtifact,
+    artifact_digest: String,
+    tool_contract_digest: String,
+    required_tools: Vec<String>,
+    exec_commands: Vec<String>,
+    exec_environment: Vec<String>,
+    entries: Vec<EntryContract>,
+    debug: Option<Arc<ProgramDebug>>,
+}
+
+impl CompiledProgram {
+    fn tables(&self, budget: usize) -> Option<josh_protocol::ProgramDebugPayload> {
+        self.debug.as_ref().map(|debug| debug.tables(budget))
+    }
+}
 
 #[derive(Debug)]
 struct LoadedProgram {
@@ -442,21 +460,16 @@ impl Session {
         Ok(result)
     }
 
-    /// Decodes, verifies, and stores one complete bytecode artifact.
+    /// Compiles, verifies, and stores one program.
     ///
     /// # Errors
     ///
-    /// Returns a stable program error and creates no program ID on failure.
+    /// Returns a stable program error and creates no program ID on failure. A
+    /// source program that does not compile carries compiler diagnostics.
     pub fn load_program(
         &mut self,
         params: &ProgramLoadParams,
-    ) -> Result<ProgramLoadResult, HostError> {
-        params.validate().map_err(|_| {
-            HostError::new(WireErrorCode::ProgramInvalid, "program load is invalid")
-        })?;
-        let catalog = self.catalog.as_ref().ok_or_else(|| {
-            HostError::new(WireErrorCode::RequestInvalidState, "catalog is not frozen")
-        })?;
+    ) -> Result<ProgramLoadResult, ProgramError> {
         if self.programs.len()
             >= usize::try_from(self.effective_limits.max_loaded_programs)
                 .unwrap_or(MAX_LOADED_PROGRAMS)
@@ -465,21 +478,104 @@ impl Session {
             return Err(HostError::new(
                 WireErrorCode::RequestLimit,
                 "loaded program limit reached",
-            ));
+            )
+            .into());
         }
+        let program = self.compile_program(params)?;
+        let program_id = format!("program-{}", self.next_program_id);
+        self.next_program_id = self.next_program_id.saturating_add(1);
+        let result = ProgramLoadResult {
+            program_id: program_id.clone(),
+            artifact_digest: program.artifact_digest.clone(),
+            tool_contract_digest: program.tool_contract_digest.clone(),
+            diagnostics: Vec::new(),
+            entries: program.entries.clone(),
+            required_tools: program.required_tools.clone(),
+            exec_commands: program.exec_commands.clone(),
+            exec_environment: program.exec_environment.clone(),
+            debug: program.tables(self.table_budget()),
+        };
+        self.programs.insert(
+            program_id,
+            Arc::new(LoadedProgram {
+                artifact: Arc::new(program.verified),
+                artifact_digest: program.artifact_digest,
+                debug: program.debug,
+            }),
+        );
+        Ok(result)
+    }
+
+    /// Compiles and verifies one program against the frozen catalog without
+    /// loading it.
+    ///
+    /// # Errors
+    ///
+    /// Returns a stable program error for a malformed bundle or an invalid
+    /// artifact. A source program that does not compile is a successful check
+    /// with diagnostics.
+    pub fn check_program(
+        &self,
+        params: &ProgramLoadParams,
+    ) -> Result<ProgramCheckResult, HostError> {
+        match self.compile_program(params) {
+            Ok(program) => Ok(ProgramCheckResult {
+                diagnostics: Vec::new(),
+                artifact_digest: Some(program.artifact_digest.clone()),
+                entries: program.entries.clone(),
+                required_tools: program.required_tools.clone(),
+                exec_commands: program.exec_commands.clone(),
+                exec_environment: program.exec_environment.clone(),
+                debug: program.tables(self.table_budget()),
+            }),
+            Err(error) if !error.diagnostics.is_empty() => {
+                let error = error.fit(self.table_budget());
+                Ok(ProgramCheckResult {
+                    diagnostics: error.diagnostics,
+                    artifact_digest: None,
+                    entries: Vec::new(),
+                    required_tools: Vec::new(),
+                    exec_commands: Vec::new(),
+                    exec_environment: Vec::new(),
+                    debug: None,
+                })
+            }
+            Err(error) => Err(error.error),
+        }
+    }
+
+    /// Bytes of a response frame that debug tables and diagnostics may use,
+    /// leaving most of the frame for the other result fields.
+    pub(crate) fn table_budget(&self) -> usize {
+        usize::try_from(self.effective_limits.max_frame_bytes / 4).unwrap_or(usize::MAX)
+    }
+
+    fn compile_program(&self, params: &ProgramLoadParams) -> Result<CompiledProgram, ProgramError> {
+        params.validate().map_err(|_| {
+            HostError::new(WireErrorCode::ProgramInvalid, "program load is invalid")
+        })?;
+        let catalog = self.catalog.as_ref().ok_or_else(|| {
+            HostError::new(WireErrorCode::RequestInvalidState, "catalog is not frozen")
+        })?;
         let bytes = match params {
             ProgramLoadParams::Bytecode { artifact } => base64::engine::general_purpose::STANDARD
                 .decode(artifact)
                 .map_err(|_| {
                     HostError::new(WireErrorCode::ProgramInvalid, "program artifact is invalid")
                 })?,
-            ProgramLoadParams::SourceBundle { files } => assemble_source_bundle(
-                files,
-                catalog,
-                self.effective_limits
-                    .max_frame_bytes
-                    .min(self.effective_limits.max_catalog_bytes),
-            )?,
+            ProgramLoadParams::SourceBundle { files } => {
+                let compiled = compile_source_bundle(
+                    files,
+                    catalog,
+                    self.effective_limits
+                        .max_frame_bytes
+                        .min(self.effective_limits.max_catalog_bytes),
+                )
+                .map_err(|error| error.fit(self.table_budget()))?;
+                encode(&compiled.artifact).map_err(|_| {
+                    HostError::new(WireErrorCode::ProgramInvalid, "source program is invalid")
+                })?
+            }
         };
         let mut limits = DecodeLimits::default();
         limits.artifact_bytes = limits
@@ -501,47 +597,39 @@ impl Session {
             .collect::<Vec<_>>();
         let exec_commands = manifest.exec_commands.clone();
         let exec_environment = manifest.exec_environment.clone();
+        let module = verified.verified_module().module();
         let entries = verified
             .entries()
             .iter()
-            .map(|entry| EntryContract {
-                name: entry.name.clone(),
-                input_schema: digest_text(&compute_strict_schema_digest(
-                    &verified.schemas()[entry.input_schema as usize],
-                )),
-                output_schema: digest_text(&compute_strict_schema_digest(
-                    &verified.schemas()[entry.output_schema as usize],
-                )),
-                input_contract_digest: digest_text(&entry.input_contract_digest),
-                output_contract_digest: digest_text(&entry.output_contract_digest),
+            .map(|entry| {
+                let input = &verified.schemas()[entry.input_schema as usize];
+                let output = &verified.schemas()[entry.output_schema as usize];
+                EntryContract {
+                    name: entry.name.clone(),
+                    input_schema: digest_text(&compute_strict_schema_digest(input)),
+                    output_schema: digest_text(&compute_strict_schema_digest(output)),
+                    input_contract_digest: digest_text(&entry.input_contract_digest),
+                    output_contract_digest: digest_text(&entry.output_contract_digest),
+                    input_descriptor: schema_descriptor(&input.value_type, &module.enum_types),
+                    output_descriptor: schema_descriptor(&output.value_type, &module.enum_types),
+                    effects: module
+                        .functions
+                        .get(entry.function as usize)
+                        .and_then(|function| module.effect_sets.get(function.effects as usize))
+                        .cloned()
+                        .unwrap_or_default(),
+                }
             })
             .collect();
-        let program_debug = program_debug(params, &verified, &required_tools);
-        // Leave most of the response frame for the other result fields.
-        let table_budget =
-            usize::try_from(self.effective_limits.max_frame_bytes / 4).unwrap_or(usize::MAX);
-        let debug = program_debug
-            .as_ref()
-            .map(|program_debug| program_debug.tables(table_budget));
-        let program_id = format!("program-{}", self.next_program_id);
-        self.next_program_id = self.next_program_id.saturating_add(1);
-        self.programs.insert(
-            program_id.clone(),
-            Arc::new(LoadedProgram {
-                artifact: Arc::new(verified),
-                artifact_digest: artifact_digest.clone(),
-                debug: program_debug,
-            }),
-        );
-        Ok(ProgramLoadResult {
-            program_id,
+        let debug = program_debug(params, &verified, &required_tools);
+        Ok(CompiledProgram {
+            verified,
             artifact_digest,
             tool_contract_digest,
-            diagnostics: Vec::new(),
-            entries,
             required_tools,
             exec_commands,
             exec_environment,
+            entries,
             debug,
         })
     }
@@ -728,82 +816,6 @@ fn program_debug(
         required_tools,
         &texts,
     )))
-}
-
-// Source paths are case-sensitive package paths.
-#[allow(clippy::case_sensitive_file_extension_comparisons)]
-fn assemble_source_bundle(
-    files: &[josh_protocol::SourceFile],
-    catalog: &FrozenCatalog,
-    max_bytes: u64,
-) -> Result<Vec<u8>, HostError> {
-    let mut manifest = None;
-    let mut lock = None;
-    let mut sources = BTreeMap::new();
-    let mut resources = BTreeMap::new();
-    let mut decoded_bytes = 0_u64;
-    for file in files {
-        let decoded = match file.encoding {
-            josh_protocol::FileEncoding::Utf8 => file.content.as_bytes().to_vec(),
-            josh_protocol::FileEncoding::Base64 => base64::engine::general_purpose::STANDARD
-                .decode(&file.content)
-                .map_err(|_| {
-                    HostError::new(WireErrorCode::ProgramInvalid, "source data is invalid")
-                })?,
-        };
-        let file_bytes = u64::try_from(decoded.len()).unwrap_or(u64::MAX);
-        decoded_bytes = decoded_bytes.checked_add(file_bytes).ok_or_else(|| {
-            HostError::new(WireErrorCode::ProgramInvalid, "source program is too large")
-        })?;
-        if decoded_bytes > max_bytes {
-            return Err(HostError::new(
-                WireErrorCode::ProgramInvalid,
-                "source program is too large",
-            ));
-        }
-        match file.path.as_str() {
-            "allen.toml" => manifest = Some(file.content.as_str()),
-            "allen.lock" => lock = Some(file.content.as_str()),
-            path if path.starts_with("src/") && path.ends_with(".allen") => {
-                sources.insert(path.to_owned(), file.content.clone());
-            }
-            path => {
-                resources.insert(path.to_owned(), decoded);
-            }
-        }
-    }
-    let mut limits = LoadLimits::default();
-    limits.source_bytes = limits.source_bytes.min(max_bytes);
-    limits.manifest_bytes = limits.manifest_bytes.min(max_bytes);
-    limits.modules = limits.modules.min(files.len());
-    limits.filesystem_entries = limits.filesystem_entries.min(files.len());
-    limits.path_bytes = limits.path_bytes.min(4_096);
-    let compiled = if let Some(manifest) = manifest {
-        assemble_root_source_package_with_resources(
-            manifest,
-            &sources,
-            &resources,
-            lock,
-            Some(catalog),
-            &limits,
-        )
-    } else if lock.is_none() && sources.len() == 1 {
-        let source = sources.get("src/main.allen").ok_or_else(|| {
-            HostError::new(
-                WireErrorCode::ProgramInvalid,
-                "loose source must be named src/main.allen",
-            )
-        })?;
-        assemble_inline_source(source, catalog)
-    } else {
-        return Err(HostError::new(
-            WireErrorCode::ProgramInvalid,
-            "source manifest is missing",
-        ));
-    }
-    .map_err(|_| HostError::new(WireErrorCode::ProgramInvalid, "source program is invalid"))?;
-    encode(&compiled.artifact)
-        .map_err(|_| HostError::new(WireErrorCode::ProgramInvalid, "source program is invalid"))
 }
 
 fn validate_catalog_contracts(
@@ -996,6 +1008,7 @@ fn digest_text(digest: &[u8; 32]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use allen_compiler::assemble_inline_source;
 
     #[test]
     fn stopped_reason_is_omitted_when_it_exceeds_the_protocol_bound() {
@@ -1837,7 +1850,10 @@ export fn main() returns Void { () }
         let invalid = session.load_program(&ProgramLoadParams::Bytecode {
             artifact: base64::engine::general_purpose::STANDARD.encode(b"not-bytecode"),
         });
-        assert_eq!(invalid.unwrap_err().code, WireErrorCode::ProgramInvalid);
+        assert_eq!(
+            invalid.unwrap_err().error.code,
+            WireErrorCode::ProgramInvalid
+        );
 
         let params = ExecutionStartParams {
             execution_id: "exec-1".to_owned(),

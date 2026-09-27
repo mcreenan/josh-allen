@@ -723,3 +723,43 @@ fn permission_decision_event_requires_an_active_execution() {
         ReceiveAction::NotificationAccepted
     );
 }
+
+#[test]
+fn program_check_is_a_host_request_valid_once_the_catalog_is_frozen() {
+    let mut runtime = ProtocolTracker::new(PeerRole::Runtime, 8);
+    runtime.receive(&request("init", "initialize")).unwrap();
+    runtime.initialize_succeeded().unwrap();
+    runtime.commit_response("init").unwrap();
+    assert_eq!(
+        runtime
+            .receive(&request("early", "program/check"))
+            .unwrap_err()
+            .code,
+        WireErrorCode::RequestInvalidState
+    );
+    runtime
+        .receive(&request("projection", "host/project"))
+        .unwrap();
+    runtime.projection_succeeded().unwrap();
+    runtime.commit_response("projection").unwrap();
+    runtime.receive(&request("catalog", "catalog/set")).unwrap();
+    runtime.catalog_succeeded().unwrap();
+    runtime.commit_response("catalog").unwrap();
+    runtime.receive(&request("check", "program/check")).unwrap();
+    runtime.commit_response("check").unwrap();
+    // A check does not load a program, so execution still cannot start.
+    assert_eq!(
+        runtime
+            .receive(&request("run", "execution/start"))
+            .unwrap_err()
+            .code,
+        WireErrorCode::RequestInvalidState
+    );
+    let mut host = ProtocolTracker::new(PeerRole::Runtime, 8);
+    assert_eq!(
+        host.register_outgoing_request("check", "program/check")
+            .unwrap_err()
+            .code,
+        WireErrorCode::RequestMethodNotFound
+    );
+}

@@ -610,9 +610,8 @@ impl ProtocolTracker {
             (PeerRole::Host, false) | (PeerRole::Runtime, true) => PeerRole::Host,
         };
         let defined_sender = match method {
-            "initialize" | "host/project" | "catalog/set" | "program/load" | "execution/start" => {
-                PeerRole::Host
-            }
+            "initialize" | "host/project" | "catalog/set" | "program/check" | "program/load"
+            | "execution/start" => PeerRole::Host,
             "tool/invoke" | "agent/message" | "agent/ask" | "agent/transcript"
             | "permission/request" | "model/request" | "user/ask" | "sub_agent/create"
             | "sub_agent/run" | "sub_agent/message" | "sub_agent/ask" => PeerRole::Runtime,
@@ -633,7 +632,7 @@ impl ProtocolTracker {
             "initialize" => self.state == ConnectionState::New,
             "host/project" => self.state == ConnectionState::Initialized,
             "catalog/set" => self.state == ConnectionState::Projected,
-            "program/load" => matches!(
+            "program/check" | "program/load" => matches!(
                 self.state,
                 ConnectionState::CatalogFrozen | ConnectionState::ProgramLoaded
             ),

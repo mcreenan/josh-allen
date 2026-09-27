@@ -443,6 +443,11 @@ pub struct EntryContract {
     pub output_schema: String,
     pub input_contract_digest: String,
     pub output_contract_digest: String,
+    /// Strict boundary descriptors, in the format of typed-response schemas.
+    pub input_descriptor: Value,
+    pub output_descriptor: Value,
+    /// The entry function's sorted declared effects.
+    pub effects: Vec<String>,
 }
 
 impl Validate for EntryContract {
@@ -450,6 +455,10 @@ impl Validate for EntryContract {
         if self.name.is_empty() {
             return Err(invalid("entry name is empty"));
         }
+        if !self.input_descriptor.is_object() || !self.output_descriptor.is_object() {
+            return Err(invalid("entry descriptors must be objects"));
+        }
+        validate_sorted_unique(&self.effects, "entry effects")?;
         validate_digest(&self.input_schema)?;
         validate_digest(&self.output_schema)?;
         validate_digest(&self.input_contract_digest)?;
@@ -457,26 +466,18 @@ impl Validate for EntryContract {
     }
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct DiagnosticSpan {
-    pub uri: String,
-    pub start: u64,
-    pub end: u64,
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct DiagnosticLabelSpan {
-    pub start: u64,
-    pub end: u64,
-}
-
+/// A secondary location that explains a compiler diagnostic.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct DiagnosticLabel {
-    pub span: DiagnosticLabelSpan,
     pub message: String,
+    pub source: String,
+    pub start: u32,
+    pub end: u32,
+    pub line: u32,
+    pub column: u32,
+    pub end_line: u32,
+    pub end_column: u32,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -486,16 +487,147 @@ pub enum DiagnosticSeverity {
     Warning,
 }
 
+/// One compiler diagnostic for a source program.
+///
+/// `source` is the host's source-bundle path. `start` and `end` are UTF-8
+/// byte offsets; lines and columns are 1-based, columns count Unicode scalar
+/// values, and `\n`, `\r\n`, and a lone `\r` each end a line.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct CompilerDiagnostic {
     pub code: String,
     pub severity: DiagnosticSeverity,
     pub message: String,
-    pub primary: DiagnosticSpan,
+    pub source: String,
+    pub start: u32,
+    pub end: u32,
+    pub line: u32,
+    pub column: u32,
+    pub end_line: u32,
+    pub end_column: u32,
     pub labels: Vec<DiagnosticLabel>,
     pub notes: Vec<String>,
     pub help: Option<String>,
+}
+
+/// Maximum number of diagnostics in one response.
+pub const MAX_DIAGNOSTICS: usize = 64;
+
+impl Validate for CompilerDiagnostic {
+    fn validate(&self) -> Result<(), ProtocolError> {
+        let position = |source: &str, start, end, line, column, end_line, end_column| {
+            !source.is_empty()
+                && source.len() <= 4_096
+                && start <= end
+                && line > 0
+                && column > 0
+                && (line, column) <= (end_line, end_column)
+        };
+        if self.code.is_empty()
+            || self.code.len() > 64
+            || self.message.len() > 1_024
+            || self.labels.len() > 16
+            || self.notes.len() > 16
+            || self.notes.iter().any(|note| note.len() > 1_024)
+            || self.help.as_ref().is_some_and(|help| help.len() > 1_024)
+            || !position(
+                &self.source,
+                self.start,
+                self.end,
+                self.line,
+                self.column,
+                self.end_line,
+                self.end_column,
+            )
+            || self.labels.iter().any(|label| {
+                label.message.len() > 1_024
+                    || !position(
+                        &label.source,
+                        label.start,
+                        label.end,
+                        label.line,
+                        label.column,
+                        label.end_line,
+                        label.end_column,
+                    )
+            })
+        {
+            return Err(invalid("compiler diagnostic is invalid"));
+        }
+        Ok(())
+    }
+}
+
+fn validate_diagnostics(diagnostics: &[CompilerDiagnostic]) -> Result<(), ProtocolError> {
+    if diagnostics.len() > MAX_DIAGNOSTICS {
+        return Err(invalid("too many compiler diagnostics"));
+    }
+    diagnostics.iter().try_for_each(Validate::validate)
+}
+
+/// The `data` of a `program.invalid` wire error for a source program that
+/// does not compile.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProgramInvalidData {
+    pub diagnostics: Vec<CompilerDiagnostic>,
+}
+
+impl Validate for ProgramInvalidData {
+    fn validate(&self) -> Result<(), ProtocolError> {
+        if self.diagnostics.is_empty() {
+            return Err(invalid("program error data needs a diagnostic"));
+        }
+        validate_diagnostics(&self.diagnostics)
+    }
+}
+
+/// Parameters of `program/check`: the same program forms as `program/load`.
+pub type ProgramCheckParams = ProgramLoadParams;
+
+/// The result of compiling and verifying a program without loading it.
+///
+/// A source program that does not compile has diagnostics and no artifact;
+/// every other field is then empty or null.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProgramCheckResult {
+    pub diagnostics: Vec<CompilerDiagnostic>,
+    pub artifact_digest: Option<String>,
+    pub entries: Vec<EntryContract>,
+    pub required_tools: Vec<String>,
+    pub exec_commands: Vec<String>,
+    pub exec_environment: Vec<String>,
+    pub debug: Option<ProgramDebugPayload>,
+}
+
+impl Validate for ProgramCheckResult {
+    fn validate(&self) -> Result<(), ProtocolError> {
+        validate_diagnostics(&self.diagnostics)?;
+        if self.diagnostics.is_empty() != self.artifact_digest.is_some() {
+            return Err(invalid(
+                "a check has either diagnostics or an artifact digest",
+            ));
+        }
+        if let Some(digest) = &self.artifact_digest {
+            validate_digest(digest)?;
+        } else if !self.entries.is_empty()
+            || !self.required_tools.is_empty()
+            || !self.exec_commands.is_empty()
+            || !self.exec_environment.is_empty()
+            || self.debug.is_some()
+        {
+            return Err(invalid("a failed check has no program contract"));
+        }
+        for entry in &self.entries {
+            entry.validate()?;
+        }
+        validate_sorted_unique(&self.required_tools, "required_tools")?;
+        if let Some(debug) = &self.debug {
+            debug.validate()?;
+        }
+        Ok(())
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
