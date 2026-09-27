@@ -33,7 +33,15 @@ use super::{
     sub_agent_error_type, task_snapshot_type, template_interpolations, time_error_type,
     user_error_type,
 };
-use allen_bytecode::{ListLiteralItem, MapLiteralItem, decode_error_type};
+use allen_bytecode::{
+    DebugConstruct, DebugConstructKind, DebugRegionKind, ListLiteralItem, MapLiteralItem,
+    decode_error_type,
+};
+
+mod constructs;
+
+use constructs::{PendingConstruct, generated_pattern_spans, is_coalescing_match};
+pub(super) use constructs::{finish_function_constructs, finish_module_constructs};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum PatternLiteralValue {
@@ -427,6 +435,7 @@ pub(super) struct GlobalLowering<'a> {
     pub(super) spans: Vec<SourceSpan>,
     pub(super) debug_sources: Vec<String>,
     pub(super) debug_locations: Vec<DebugLocation>,
+    pub(super) debug_constructs: Vec<DebugConstruct>,
     pub(super) next_symbol: SymbolId,
     pub(super) async_functions: BTreeSet<FunctionId>,
     pub(super) constant_values: BTreeMap<SymbolId, allen_vm::Value>,
@@ -522,6 +531,9 @@ pub(super) struct FunctionLowering<'a, 'b> {
     control_reachable: bool,
     runtime_terminal_values: BTreeSet<Register>,
     sub_agent_value_scopes: BTreeMap<Register, u32>,
+    constructs: Vec<PendingConstruct>,
+    construct_stack: Vec<usize>,
+    generated_construct_spans: Vec<Vec<Span>>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -605,6 +617,8 @@ pub(super) struct CompiledLoop {
     hir: HirExpr,
     register: Register,
     falls_through: bool,
+    /// Jumps that begin the next iteration, for the debug construct table.
+    repeat_edges: Vec<usize>,
 }
 
 impl FunctionLowering<'_, '_> {
@@ -1167,6 +1181,7 @@ impl FunctionLowering<'_, '_> {
         let global_hir_modules = self.global.hir_modules.clone();
         let global_mir_functions_len = self.global.mir_functions.len();
         let global_debug_locations_len = self.global.debug_locations.len();
+        let global_debug_constructs_len = self.global.debug_constructs.len();
         let global_async_functions = self.global.async_functions.clone();
         let code_len = self.code.len();
         let register_len = self.registers.len();
@@ -1186,6 +1201,8 @@ impl FunctionLowering<'_, '_> {
         let tail = self.mir_tail.take();
         let runtime_terminal_values = self.runtime_terminal_values.clone();
         let sub_agent_value_scopes = self.sub_agent_value_scopes.clone();
+        let constructs_len = self.constructs.len();
+        let construct_stack = self.construct_stack.clone();
         let control_reachable = self.control_reachable;
         self.control_reachable = false;
 
@@ -1199,6 +1216,9 @@ impl FunctionLowering<'_, '_> {
         self.global
             .debug_locations
             .truncate(global_debug_locations_len);
+        self.global
+            .debug_constructs
+            .truncate(global_debug_constructs_len);
         self.global.async_functions = global_async_functions;
         self.code.truncate(code_len);
         self.instruction_spans
@@ -1220,6 +1240,8 @@ impl FunctionLowering<'_, '_> {
         self.mir_tail = tail;
         self.runtime_terminal_values = runtime_terminal_values;
         self.sub_agent_value_scopes = sub_agent_value_scopes;
+        self.constructs.truncate(constructs_len);
+        self.construct_stack = construct_stack;
         self.control_reachable = control_reachable;
         result
     }
@@ -1800,9 +1822,20 @@ impl FunctionLowering<'_, '_> {
     ) -> Result<CompiledLoop, Diagnostic> {
         let loop_depth = self.loops.len();
         let control_reachable = self.control_reachable;
+        let construct = self.begin_construct(DebugConstructKind::While, span);
         let result = self.compile_while_scoped(condition, body, span);
         self.restore_loop_depth(loop_depth);
         self.control_reachable = control_reachable;
+        if let Ok(value) = &result {
+            self.finish_construct(
+                construct,
+                &[
+                    (DebugRegionKind::Condition, condition.span),
+                    (DebugRegionKind::Body, body.span),
+                ],
+                &value.repeat_edges,
+            );
+        }
         result
     }
 
@@ -1830,6 +1863,7 @@ impl FunctionLowering<'_, '_> {
             return Ok(CompiledLoop {
                 register,
                 falls_through: false,
+                repeat_edges: Vec::new(),
                 hir: self.hir(
                     HirExprKind::While {
                         condition: Box::new(condition_value.hir),
@@ -1880,7 +1914,9 @@ impl FunctionLowering<'_, '_> {
         let backedge_reachable = body_runtime_falls_through
             && outer_control_reachable
             && constant_condition != Some(false);
+        let mut repeat_edges = Vec::new();
         if backedge_reachable {
+            repeat_edges.push(self.code.len());
             self.code.push(Instruction::Jump { target: header });
             self.mark_last_instruction(body.span);
         } else if body_falls_through && outer_control_reachable && constant_condition != Some(false)
@@ -1907,10 +1943,14 @@ impl FunctionLowering<'_, '_> {
             has_zero_iteration,
             edge_span,
         )?;
+        // `continue` in a while loop jumps straight back to the header.
+        repeat_edges.extend(&context.continue_jumps);
         let exit = if constant_condition == Some(false) {
             self.code.truncate(body_target as usize);
             self.instruction_spans
                 .retain(|instruction, _| *instruction < body_target as usize);
+            self.truncate_constructs_from(body_target as usize);
+            repeat_edges.clear();
             body_target
         } else {
             emitted_exit
@@ -1945,6 +1985,7 @@ impl FunctionLowering<'_, '_> {
         Ok(CompiledLoop {
             register,
             falls_through,
+            repeat_edges,
             hir: self.hir(
                 HirExprKind::While {
                     condition: Box::new(condition_value.hir),
@@ -1966,6 +2007,7 @@ impl FunctionLowering<'_, '_> {
         let loop_reachable = self.control_reachable;
         let register = self.allocate(ValueType::Unit)?;
         let header = u32::try_from(self.code.len()).expect("instruction index fits");
+        let construct = self.begin_construct(DebugConstructKind::Loop, span);
         let entry = self.push_loop();
         let mir_header = self.next_mir_block();
         self.mir_blocks.extend((0..2).map(|_| MirBlock {
@@ -1981,7 +2023,9 @@ impl FunctionLowering<'_, '_> {
         let body_falls_through = body_value.value_type != ValueType::Never;
         let body_runtime_falls_through = self.runtime_falls_through(&body_value);
         let backedge_reachable = body_runtime_falls_through && loop_reachable;
+        let mut repeat_edges = Vec::new();
         if backedge_reachable {
+            repeat_edges.push(self.code.len());
             self.code.push(Instruction::Jump { target: header });
             self.mark_last_instruction(body.span);
         } else if body_falls_through && loop_reachable {
@@ -2019,10 +2063,18 @@ impl FunctionLowering<'_, '_> {
             &context.break_mir_blocks,
             false,
         );
+        // `continue` in `loop` jumps straight back to the header.
+        repeat_edges.extend(&context.continue_jumps);
+        self.finish_construct(
+            construct,
+            &[(DebugRegionKind::Body, body.span)],
+            &repeat_edges,
+        );
         let effects = body_hir.effects;
         Ok(CompiledLoop {
             register,
             falls_through,
+            repeat_edges,
             hir: self.hir(
                 HirExprKind::Loop {
                     body: Box::new(body_hir),
@@ -2052,6 +2104,7 @@ impl FunctionLowering<'_, '_> {
         Ok(CompiledLoop {
             register,
             falls_through: false,
+            repeat_edges: Vec::new(),
             hir: self.hir(
                 HirExprKind::For {
                     binding: hir_binding,
@@ -2224,6 +2277,7 @@ impl FunctionLowering<'_, '_> {
         };
         let entry = self.push_loop();
         let header = u32::try_from(self.code.len()).expect("instruction index fits");
+        let construct = self.begin_construct(DebugConstructKind::For, span);
         let condition_operations_start = self.mir.len();
         let less = self.allocate(ValueType::Bool)?;
         self.code.push(Instruction::Compare {
@@ -2373,6 +2427,9 @@ impl FunctionLowering<'_, '_> {
         let backedge_reachable = loop_reachable && (body_runtime_falls_through || has_continue);
         let step_operations_start = self.mir.len();
         let mut range_endpoint_branch = None;
+        // `continue` in a for loop jumps forward to the step, whose back-edge
+        // is the loop's only repeat edge.
+        let mut repeat_edges = Vec::new();
         if backedge_reachable {
             if range_inclusive.is_some() {
                 let at_end = self.allocate(ValueType::Bool)?;
@@ -2405,6 +2462,7 @@ impl FunctionLowering<'_, '_> {
             self.mir.push(MirOperation::Binary {
                 destination: u32::from(cursor),
             });
+            repeat_edges.push(self.code.len());
             self.code.push(Instruction::Jump { target: header });
             self.mark_last_instruction(span);
         }
@@ -2472,10 +2530,16 @@ impl FunctionLowering<'_, '_> {
             &context.break_mir_blocks,
             true,
         );
+        self.finish_construct(
+            construct,
+            &[(DebugRegionKind::Body, body.span)],
+            &repeat_edges,
+        );
         let effects = self.union_effects([source_effects, body_hir.effects]);
         Ok(CompiledLoop {
             register,
             falls_through,
+            repeat_edges,
             hir: self.hir(
                 HirExprKind::For {
                     binding: hir_binding,
@@ -6891,6 +6955,18 @@ impl FunctionLowering<'_, '_> {
         body: &LoweredBody,
         span: Span,
     ) -> Result<CompiledExpr, Diagnostic> {
+        let construct = self.begin_construct(DebugConstructKind::AwaitBlock, span);
+        let value = self.compile_await_block_inner(body, span)?;
+        self.finish_construct(construct, &[(DebugRegionKind::Body, body.span)], &[]);
+        Ok(value)
+    }
+
+    #[allow(clippy::too_many_lines)]
+    fn compile_await_block_inner(
+        &mut self,
+        body: &LoweredBody,
+        span: Span,
+    ) -> Result<CompiledExpr, Diagnostic> {
         if !self.info.lowered.is_async {
             return Err(Diagnostic::new(
                 "E3011",
@@ -9626,12 +9702,13 @@ impl FunctionLowering<'_, '_> {
                 moved: false,
             },
         );
-        let value = match expected {
+        let generated = generated_pattern_spans(span, arms);
+        let value = self.with_generated_construct_spans(generated, |lowering| match expected {
             Some((expected, label)) => {
-                self.compile_contextually_expected(&decision, expected, label)
+                lowering.compile_contextually_expected(&decision, expected, label)
             }
-            None => self.compile_expression(&decision),
-        };
+            None => lowering.compile_expression(&decision),
+        });
         if let Some(previous) = previous {
             self.bindings.insert(name, previous);
         } else {
@@ -9676,6 +9753,7 @@ impl FunctionLowering<'_, '_> {
                 moved: false,
             },
         );
+        let generated = generated_pattern_spans(span, &arms);
         let expanded = LoweredExpr {
             kind: LoweredExprKind::Match {
                 source: Box::new(LoweredExpr {
@@ -9686,12 +9764,12 @@ impl FunctionLowering<'_, '_> {
             },
             span,
         };
-        let value = match expected {
+        let value = self.with_generated_construct_spans(generated, |lowering| match expected {
             Some((expected, label)) => {
-                self.compile_contextually_expected(&expanded, expected, label)
+                lowering.compile_contextually_expected(&expanded, expected, label)
             }
-            None => self.compile_expression(&expanded),
-        };
+            None => lowering.compile_expression(&expanded),
+        });
         if let Some(previous) = previous {
             self.bindings.insert(name, previous);
         } else {
@@ -10121,6 +10199,45 @@ impl FunctionLowering<'_, '_> {
 
     #[allow(clippy::too_many_lines)]
     pub(super) fn compile_if(
+        &mut self,
+        condition: &LoweredExpr,
+        then_body: &LoweredBody,
+        else_branch: Option<&LoweredElse>,
+        span: Span,
+        expected: Option<(&ValueType, &str)>,
+        compiled_condition: Option<CompiledExpr>,
+    ) -> Result<CompiledExpr, Diagnostic> {
+        // A precompiled condition means `&&` or `||` lowering, not a source `if`.
+        let construct = if compiled_condition.is_none() {
+            self.begin_construct(DebugConstructKind::If, span)
+        } else {
+            None
+        };
+        let value = self.compile_if_inner(
+            condition,
+            then_body,
+            else_branch,
+            span,
+            expected,
+            compiled_condition,
+        )?;
+        let mut regions = vec![
+            (DebugRegionKind::Condition, condition.span),
+            (DebugRegionKind::Then, then_body.span),
+        ];
+        match else_branch {
+            Some(LoweredElse::Body(body)) => regions.push((DebugRegionKind::Else, body.span)),
+            Some(LoweredElse::If(expression)) => {
+                regions.push((DebugRegionKind::Else, expression.span));
+            }
+            None => {}
+        }
+        self.finish_construct(construct, &regions, &[]);
+        Ok(value)
+    }
+
+    #[allow(clippy::too_many_lines)]
+    fn compile_if_inner(
         &mut self,
         condition: &LoweredExpr,
         then_body: &LoweredBody,
@@ -10626,6 +10743,34 @@ impl FunctionLowering<'_, '_> {
 
     #[allow(clippy::too_many_lines)]
     pub(super) fn compile_match(
+        &mut self,
+        source: &LoweredExpr,
+        arms: &[(LoweredPattern, LoweredExpr, Span)],
+        span: Span,
+        expected: Option<(&ValueType, &str)>,
+    ) -> Result<CompiledExpr, Diagnostic> {
+        let construct = if is_coalescing_match(arms) {
+            None
+        } else {
+            self.begin_construct(DebugConstructKind::Match, span)
+        };
+        let value = self.compile_match_inner(source, arms, span, expected)?;
+        let mut regions = vec![(DebugRegionKind::Scrutinee, source.span)];
+        regions.extend(arms.iter().map(|(_, body, pattern_span)| {
+            (
+                DebugRegionKind::Arm,
+                Span {
+                    start: pattern_span.start,
+                    end: body.span.end.max(pattern_span.end),
+                },
+            )
+        }));
+        self.finish_construct(construct, &regions, &[]);
+        Ok(value)
+    }
+
+    #[allow(clippy::too_many_lines)]
+    fn compile_match_inner(
         &mut self,
         source: &LoweredExpr,
         arms: &[(LoweredPattern, LoweredExpr, Span)],
@@ -15323,6 +15468,9 @@ pub(super) fn lower_one_function(
         control_reachable: true,
         runtime_terminal_values: BTreeSet::new(),
         sub_agent_value_scopes: BTreeMap::new(),
+        constructs: Vec::new(),
+        construct_stack: Vec::new(),
+        generated_construct_spans: Vec::new(),
     };
     for ((name, _, span), parameter_type) in info.lowered.parameters.iter().zip(&info.parameters) {
         if lowering.local_name_conflicts(name) {
@@ -15478,6 +15626,8 @@ pub(super) fn lower_one_function(
         });
     }
     lowering.global.debug_locations.extend(locations);
+    let constructs = finish_function_constructs(&lowering.constructs, function_id, source);
+    lowering.global.debug_constructs.extend(constructs);
     let hir = HirFunction {
         symbol: info.symbol,
         name: info.lowered.name.clone(),

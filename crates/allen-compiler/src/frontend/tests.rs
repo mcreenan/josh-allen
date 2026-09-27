@@ -8379,3 +8379,297 @@ export async fn main() returns Int effects [task.spawn, user.ask] {
         ]
     );
 }
+
+/// One construct as `(kind, parent, source text prefix, regions, repeat edges)`.
+type ConstructSummary = (
+    &'static str,
+    Option<u32>,
+    String,
+    Vec<(&'static str, String)>,
+    usize,
+);
+
+fn construct_summaries(source: &str, function_suffix: &str) -> Vec<ConstructSummary> {
+    let compilation = compile_source(source).expect("construct fixture compiles");
+    let debug = &compilation.debug;
+    // Every recorded table must survive the canonical artifact round trip.
+    let catalog =
+        allen_schema::FrozenCatalog::freeze(Vec::new(), &allen_schema::CatalogLimits::default())
+            .expect("empty catalog");
+    let package = crate::assemble_inline_source(source, &catalog).expect("fixture assembles");
+    let bytes = allen_bytecode::encode(&package.artifact).expect("artifact encodes");
+    let verified = allen_bytecode::decode_and_verify(&bytes, &allen_bytecode::DecodeLimits::default())
+        .expect("construct table verifies");
+    assert_eq!(
+        verified.debug().expect("debug").constructs.len(),
+        debug.constructs.len()
+    );
+    let function = compilation
+        .module
+        .functions
+        .iter()
+        .position(|function| function.name.ends_with(function_suffix))
+        .expect("fixture function");
+    let text = |start: u32, end: u32| {
+        let text = &source[start as usize..end as usize];
+        text.lines().next().unwrap_or_default().trim().to_owned()
+    };
+    debug
+        .constructs
+        .iter()
+        .filter(|construct| construct.function as usize == function)
+        .map(|construct| {
+            for edge in &construct.repeat_edges {
+                assert!(matches!(
+                    compilation.module.functions[function].code[*edge as usize],
+                    Instruction::Jump { target } if construct.contains_instruction(target)
+                ));
+            }
+            let base = debug
+                .constructs
+                .iter()
+                .position(|candidate| candidate.function as usize == function)
+                .expect("function has constructs");
+            (
+                construct.kind.name(),
+                construct
+                    .parent
+                    .map(|parent| parent - u32::try_from(base).expect("index fits")),
+                text(construct.start, construct.end),
+                construct
+                    .regions
+                    .iter()
+                    .map(|region| (region.kind.name(), text(region.start, region.end)))
+                    .collect(),
+                construct.repeat_edges.len(),
+            )
+        })
+        .collect()
+}
+
+fn regions(regions: &[(&'static str, &str)]) -> Vec<(&'static str, String)> {
+    regions
+        .iter()
+        .map(|(kind, text)| (*kind, (*text).to_owned()))
+        .collect()
+}
+
+#[test]
+fn construct_table_records_nested_loops_branches_matches_and_await_blocks() {
+    let source = r#"async fn work(value: Int) returns Int { value }
+export async fn main() returns Int effects [task.spawn] {
+  mut total = 0;
+  for outer in 0..3 {
+    mut inner = 0;
+    while (inner < outer) {
+      inner += 1;
+      if (inner == 2) { continue; }
+      total += inner;
+    }
+    loop {
+      if (total > 10) { break; } else { total += 1; }
+      if (total == 5) { continue; }
+    }
+  }
+  let label = match total > 5 {
+    true => "many"
+    false => "few"
+  };
+  let values = await {
+    let first = spawn work(1);
+    let second = spawn work(2);
+    (await first) + (await second)
+  };
+  total + values + length(label)
+}
+"#;
+    assert_eq!(
+        construct_summaries(source, "::main"),
+        [
+            (
+                "for",
+                None,
+                "for outer in 0..3 {".to_owned(),
+                regions(&[("body", "{")]),
+                1
+            ),
+            (
+                "while",
+                Some(0),
+                "while (inner < outer) {".to_owned(),
+                regions(&[("condition", "inner < outer"), ("body", "{")]),
+                2
+            ),
+            (
+                "if",
+                Some(1),
+                "if (inner == 2) { continue; }".to_owned(),
+                regions(&[
+                    ("condition", "inner == 2"),
+                    ("then", "{ continue; }")
+                ]),
+                0
+            ),
+            (
+                "loop",
+                Some(0),
+                "loop {".to_owned(),
+                regions(&[("body", "{")]),
+                2
+            ),
+            (
+                "if",
+                Some(3),
+                "if (total > 10) { break; } else { total += 1; }".to_owned(),
+                regions(&[
+                    ("condition", "total > 10"),
+                    ("then", "{ break; }"),
+                    ("else", "{ total += 1; }")
+                ]),
+                0
+            ),
+            (
+                "if",
+                Some(3),
+                "if (total == 5) { continue; }".to_owned(),
+                regions(&[("condition", "total == 5"), ("then", "{ continue; }")]),
+                0
+            ),
+            (
+                "match",
+                None,
+                "match total > 5 {".to_owned(),
+                regions(&[
+                    ("scrutinee", "total > 5"),
+                    ("arm", "true => \"many\""),
+                    ("arm", "false => \"few\"")
+                ]),
+                0
+            ),
+            (
+                "await_block",
+                None,
+                "await {".to_owned(),
+                regions(&[("body", "{")]),
+                0
+            ),
+        ]
+    );
+}
+
+#[test]
+fn construct_table_skips_generated_conditionals_and_discarded_code() {
+    let source = r#"enum Shape { Dot Line(Int) Box(Int) }
+fn flag() returns Bool { true }
+fn check(input: Option<Int>, shape: Shape) returns Int {
+  mut count = 0;
+  while (false) {
+    for item in [1, 2] { count += item; }
+  }
+  let both = flag() && (if (count > 0) { true } else { false });
+  let value = input ?? 0;
+  let size = match input {
+    Some(1..=3) => 1
+    Some(_) => 2
+    None => 0
+  };
+  let pair = match shape {
+    Shape.Dot | Shape.Line(_) => if (both) { 1 } else { 2 }
+    Shape.Box(side) => side
+  };
+  count + value + size + pair
+}
+export fn main() returns Int { check(Some(2), Shape.Dot) }
+"#;
+    assert_eq!(
+        construct_summaries(source, "::check"),
+        [
+            (
+                "while",
+                None,
+                "while (false) {".to_owned(),
+                regions(&[("condition", "false"), ("body", "{")]),
+                0
+            ),
+            (
+                "if",
+                None,
+                "if (count > 0) { true } else { false }".to_owned(),
+                regions(&[
+                    ("condition", "count > 0"),
+                    ("then", "{ true }"),
+                    ("else", "{ false }")
+                ]),
+                0
+            ),
+            (
+                "match",
+                None,
+                "match input {".to_owned(),
+                regions(&[
+                    ("scrutinee", "input"),
+                    ("arm", "Some(1..=3) => 1"),
+                    ("arm", "Some(_) => 2"),
+                    ("arm", "None => 0")
+                ]),
+                0
+            ),
+            (
+                "match",
+                None,
+                "match shape {".to_owned(),
+                regions(&[
+                    ("scrutinee", "shape"),
+                    ("arm", "Shape.Dot | Shape.Line(_) => if (both) { 1 } else { 2 }"),
+                    ("arm", "Shape.Box(side) => side")
+                ]),
+                0
+            ),
+            // Or-pattern expansion emits the shared arm body once per
+            // alternative, so its construct appears once per emission.
+            (
+                "if",
+                Some(3),
+                "if (both) { 1 } else { 2 }".to_owned(),
+                regions(&[
+                    ("condition", "both"),
+                    ("then", "{ 1 }"),
+                    ("else", "{ 2 }")
+                ]),
+                0
+            ),
+            (
+                "if",
+                Some(3),
+                "if (both) { 1 } else { 2 }".to_owned(),
+                regions(&[
+                    ("condition", "both"),
+                    ("then", "{ 1 }"),
+                    ("else", "{ 2 }")
+                ]),
+                0
+            ),
+        ]
+    );
+}
+
+#[test]
+fn construct_table_rolls_back_constructs_compiled_without_runtime_code() {
+    let source = r#"fn halted() returns Int {
+  while (stop("halted")) {
+    if (true) { () }
+  }
+}
+export fn main() returns Int { halted() }
+"#;
+    assert_eq!(
+        construct_summaries(source, "::halted"),
+        [(
+            "while",
+            None,
+            "while (stop(\"halted\")) {".to_owned(),
+            regions(&[("condition", "stop(\"halted\")"), ("body", "{")]),
+            0
+        )]
+    );
+}

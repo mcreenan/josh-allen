@@ -1214,6 +1214,7 @@ fn evaluate_constants(
         spans: Vec::new(),
         debug_sources: bundle.modules.keys().cloned().collect(),
         debug_locations: Vec::new(),
+        debug_constructs: Vec::new(),
         next_symbol: u32::try_from(bundle.functions.len()).map_err(|_| {
             Diagnostic::new(
                 "E3005",
@@ -2180,6 +2181,7 @@ fn compile_bundle_from_modules(
         spans: Vec::new(),
         debug_sources: bundle.modules.keys().cloned().collect(),
         debug_locations: Vec::new(),
+        debug_constructs: Vec::new(),
         next_symbol: u32::try_from(bundle.functions.len()).map_err(|_| {
             vec![Diagnostic::new(
                 "E3005",
@@ -2293,7 +2295,7 @@ fn compile_bundle_from_modules(
         debug: DebugInfo {
             sources: lowering.debug_sources,
             locations: lowering.debug_locations,
-            constructs: Vec::new(),
+            constructs: bytecode_lowering::finish_module_constructs(lowering.debug_constructs),
         },
         hir,
         mir: MirBundle {
