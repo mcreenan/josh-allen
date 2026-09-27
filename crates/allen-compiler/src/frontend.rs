@@ -1423,12 +1423,21 @@ fn evaluate_constants(
         concurrent_effects: 0,
         cleanup_instructions: 0,
     };
+    // Runtime functions in the same module may call catalog tools. Constants
+    // never do, but the whole preliminary module must verify, so it is checked
+    // against the same frozen tool contracts that the compiler bound.
+    let tool_contracts = bundle_tool_contracts(bundle);
     let mut values = BTreeMap::new();
     for symbol in order {
         let info = &bundle.functions[symbol as usize];
         let mut module = raw_module.clone();
         module.entry = info.bytecode.expect("constant bytecode");
-        let verified = allen_bytecode::verify(module).map_err(|error| {
+        let verified = if tool_contracts.is_empty() {
+            allen_bytecode::verify(module)
+        } else {
+            allen_bytecode::verify_with_frozen_tool_catalog(module, &tool_contracts)
+        }
+        .map_err(|error| {
             Diagnostic::new(
                 "E3005",
                 format!(
@@ -1454,6 +1463,22 @@ fn evaluate_constants(
         values.insert(symbol, result.value);
     }
     Ok(values)
+}
+
+/// Verification contracts for the catalog tools bound in one bundle, in
+/// contract order, with types in the bundle's enum numbering.
+fn bundle_tool_contracts(bundle: &ResolvedBundle) -> Vec<allen_bytecode::ToolVerificationContract> {
+    let mut bindings = bundle.tools.values().collect::<Vec<_>>();
+    bindings.sort_by_key(|binding| binding.contract);
+    bindings
+        .into_iter()
+        .map(|binding| allen_bytecode::ToolVerificationContract {
+            tool_name: binding.source_path.join("."),
+            input: binding.input.clone(),
+            output: binding.output.clone(),
+            declared_error: binding.declared_error.clone(),
+        })
+        .collect()
 }
 
 fn is_constant_expression(expression: &LoweredExpr) -> bool {

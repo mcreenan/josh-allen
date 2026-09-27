@@ -8707,3 +8707,51 @@ fn loops_whose_body_ends_in_branches_that_all_leave_through_loop_control_compile
         );
     }
 }
+
+#[test]
+fn top_level_constants_evaluate_in_programs_that_call_catalog_tools() {
+    let definition = allen_schema::ToolDefinition::parse(
+        "example.lookup",
+        "1.0.0",
+        r#"{"type":"object","properties":{"value":{"type":"string"}},"required":["value"],"additionalProperties":false}"#,
+        r#"{"oneOf":[{"type":"object","properties":{"tag":{"type":"string","enum":["found"]},"value":{"type":"string"}},"required":["tag","value"],"additionalProperties":false},{"type":"object","properties":{"tag":{"type":"string","enum":["missing"]}},"required":["tag"],"additionalProperties":false}]}"#,
+        r#"{"type":"object","properties":{"message":{"type":"string"}},"required":["message"],"additionalProperties":false}"#,
+        Vec::new(),
+        allen_schema::Idempotency::Idempotent,
+        &allen_schema::SchemaLimits::default(),
+    )
+    .unwrap();
+    let catalog = allen_schema::FrozenCatalog::freeze(
+        vec![definition],
+        &allen_schema::CatalogLimits::default(),
+    )
+    .unwrap();
+    let source = r#"manifest {
+  language: "0.1"
+  entry: main
+  capabilities: []
+  tools: { required: [{ name: "example.lookup", version: ">=1.0.0, <2.0.0" }] }
+}
+const GREETING: String = "hello";
+const WORDS: List<String> = [GREETING, "world"];
+export async fn main() returns String effects [tool.example.lookup@1] {
+  match await tools.example.lookup.call({ value: GREETING }) {
+    Ok(_) => string.join(WORDS, " ")
+    Err(_) => "failed"
+  }
+}
+"#;
+    let (_, compilation, _) = compile_inline_manifest_source_with_catalog(source, &catalog)
+        .expect("constants compile beside catalog tool calls");
+    assert!(
+        compilation
+            .module
+            .functions
+            .iter()
+            .any(|function| function
+                .code
+                .iter()
+                .any(|instruction| matches!(instruction, Instruction::ToolInvoke { .. })))
+    );
+    crate::assemble_inline_source(source, &catalog).expect("the program assembles and verifies");
+}
