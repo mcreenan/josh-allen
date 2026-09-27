@@ -8310,3 +8310,72 @@ export fn main() returns Int {{ 0 }}
         assert_eq!(diagnostics[0].message, message, "{predicate}");
     }
 }
+
+#[test]
+fn effect_await_spawn_and_call_instructions_carry_their_own_source_spans() {
+    let source = r#"fn twice(value: Int) returns Int { value * 2 }
+async fn later() returns Int { 1 }
+export async fn main() returns Int effects [task.spawn, user.ask] {
+  let doubled = twice(2);
+  let add = fn(value: Int) returns Int { value + 1 };
+  let added = add(doubled);
+  let task = spawn later();
+  let reply = await user.ask<String>(prompt { system: "Name?" output: String });
+  let first = await task;
+  added + first
+}
+"#;
+    let compilation = compile_source(source).expect("span-marked program compiles");
+    let main = compilation
+        .module
+        .functions
+        .iter()
+        .position(|function| function.name.ends_with("::main"))
+        .expect("main function");
+    let text_of = |instruction: usize| {
+        let location = compilation
+            .debug
+            .locations
+            .iter()
+            .find(|location| {
+                location.function as usize == main && location.instruction as usize == instruction
+            })
+            .expect("every instruction has a debug location");
+        &source[location.start as usize..location.end as usize]
+    };
+    let code = &compilation.module.functions[main].code;
+    let spans = code
+        .iter()
+        .enumerate()
+        .filter_map(|(index, instruction)| {
+            let kind = match instruction {
+                Instruction::DirectCall { .. } => "direct",
+                Instruction::ClosureCall { .. } => "closure",
+                Instruction::AsyncCall { .. } => "async",
+                Instruction::Spawn { .. } => "spawn",
+                Instruction::EffectCall { .. } => "effect",
+                Instruction::Await { .. } => "await",
+                _ => return None,
+            };
+            Some((kind, text_of(index)))
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        spans,
+        [
+            ("direct", "twice(2)"),
+            ("closure", "add(doubled)"),
+            ("async", "later()"),
+            ("spawn", "spawn later()"),
+            (
+                "effect",
+                r#"user.ask<String>(prompt { system: "Name?" output: String })"#
+            ),
+            (
+                "await",
+                r#"await user.ask<String>(prompt { system: "Name?" output: String })"#
+            ),
+            ("await", "await task"),
+        ]
+    );
+}

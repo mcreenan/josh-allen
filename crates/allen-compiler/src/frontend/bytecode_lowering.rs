@@ -5142,6 +5142,7 @@ impl FunctionLowering<'_, '_> {
                                     function: target.bytecode.expect("constant bytecode"),
                                     arguments: Vec::new(),
                                 });
+                                self.mark_last_instruction(expression.span);
                                 self.mir.push(MirOperation::DirectCall {
                                     destination: u32::from(register),
                                     function: target.symbol,
@@ -6311,6 +6312,7 @@ impl FunctionLowering<'_, '_> {
             future: future.register,
             scope,
         });
+        self.mark_last_instruction(span);
         self.mir.push(MirOperation::Spawn {
             destination: u32::from(register),
             future: u32::from(future.register),
@@ -6556,6 +6558,7 @@ impl FunctionLowering<'_, '_> {
                 operation,
                 arguments: values.iter().map(|value| value.register).collect(),
             });
+            self.mark_last_instruction(span);
             self.mir.push(MirOperation::EffectCall {
                 destination: u32::from(register),
                 operation,
@@ -6644,6 +6647,7 @@ impl FunctionLowering<'_, '_> {
                 operation,
                 arguments: values.iter().map(|value| value.register).collect(),
             });
+            self.mark_last_instruction(span);
             self.mir.push(MirOperation::EffectCall {
                 destination: u32::from(register),
                 operation,
@@ -6740,6 +6744,7 @@ impl FunctionLowering<'_, '_> {
             operation,
             arguments: values.iter().map(|value| value.register).collect(),
         });
+        self.mark_last_instruction(span);
         self.mir.push(MirOperation::EffectCall {
             destination: u32::from(register),
             operation,
@@ -6805,6 +6810,7 @@ impl FunctionLowering<'_, '_> {
             destination: register,
             source: source.register,
         });
+        self.mark_last_instruction(span);
         if is_affine(&value_type) {
             let scope = if matches!(value_type, ValueType::Task(_)) {
                 self.active_scopes.last().copied().unwrap_or(0)
@@ -12995,6 +13001,7 @@ impl FunctionLowering<'_, '_> {
                 tool: binding.contract,
                 input: input.register,
             });
+            self.mark_last_instruction(span);
             self.mir.push(MirOperation::ToolCall {
                 destination: u32::from(register),
                 tool: binding.contract,
@@ -13504,6 +13511,7 @@ impl FunctionLowering<'_, '_> {
                 closure: binding.register,
                 arguments: values.iter().map(|value| value.register).collect(),
             });
+            self.mark_last_instruction(span);
             self.mir.push(MirOperation::ClosureCall {
                 destination: u32::from(register),
                 closure: u32::from(binding.register),
@@ -13927,6 +13935,7 @@ impl FunctionLowering<'_, '_> {
                 function,
                 arguments: argument_registers,
             });
+            self.mark_last_instruction(span);
             self.mir.push(MirOperation::AsyncCall {
                 destination: u32::from(register),
                 function: symbol,
@@ -13947,6 +13956,7 @@ impl FunctionLowering<'_, '_> {
                 function,
                 arguments: argument_registers,
             });
+            self.mark_last_instruction(span);
             self.mir.push(MirOperation::DirectCall {
                 destination: u32::from(register),
                 function: symbol,
