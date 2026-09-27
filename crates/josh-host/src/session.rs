@@ -357,12 +357,13 @@ impl Session {
                 "tool catalog is incomplete",
             ));
         }
-        let tools_projection = self
-            .projection
-            .as_ref()
-            .expect("projection presence checked above")
-            .projection
-            .section(ProjectionSectionKind::Tools);
+        let Some(projection) = self.projection.as_ref() else {
+            return Err(HostError::new(
+                WireErrorCode::CatalogInvalid,
+                "tool catalog is invalid",
+            ));
+        };
+        let tools_projection = projection.projection.section(ProjectionSectionKind::Tools);
         let metadata_matches = tools_projection.source == params.metadata.source
             && tools_projection.source_revision == params.metadata.source_revision
             && tools_projection.observed_at_unix_ms == params.metadata.observed_at_unix_ms

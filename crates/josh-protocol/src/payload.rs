@@ -207,6 +207,12 @@ impl Validate for HostProjectionSetParams {
 }
 
 impl HostProjectionSetParams {
+    /// Return the section of one canonical kind.
+    ///
+    /// # Panics
+    ///
+    /// Panics if called on a projection that has not passed validation, which
+    /// guarantees exactly one section of every canonical kind.
     #[must_use]
     pub fn section(&self, kind: ProjectionSectionKind) -> &ProjectionSection {
         self.sections
