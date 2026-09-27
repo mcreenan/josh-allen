@@ -10582,7 +10582,11 @@ impl FunctionLowering<'_, '_> {
         };
         self.mark_instruction(branch_index, condition_span);
 
-        let has_continuation = false_terminal.is_none() || true_terminal.is_none();
+        // A branch reaches the join only if control leaves its nested region. A
+        // branch that ends in `break` or `continue` has no terminator of its own
+        // but its region never falls out, so it must not keep the join alive.
+        let has_continuation = reaches_join(false_terminal.as_ref(), false_region)
+            || reaches_join(true_terminal.as_ref(), true_region);
         let join_block = self.next_mir_block();
         self.mir_blocks[base as usize - 1] = MirBlock {
             operations: Vec::new(),
@@ -11378,7 +11382,10 @@ impl FunctionLowering<'_, '_> {
                 }
             },
         };
-        let has_continuation = arm_terminals.iter().any(Option::is_none);
+        let has_continuation = arm_terminals
+            .iter()
+            .zip(&arm_regions)
+            .any(|(terminal, region)| reaches_join(terminal.as_ref(), *region));
         for (arm, ((operations, terminal), region)) in arm_operations
             .into_iter()
             .zip(arm_terminals)
@@ -15714,6 +15721,14 @@ pub(super) fn lower_one_function(
         )
     })?;
     Ok((function, hir, mir))
+}
+
+/// Whether a conditional branch or match arm continues to the join block.
+///
+/// Without its own terminator a branch falls through, unless it opened a
+/// nested MIR region that never falls out, as a branch ending in loop control.
+fn reaches_join(terminal: Option<&MirTerminator>, region: CapturedMirRegion) -> bool {
+    terminal.is_none() && (region.entry.is_none() || region.tail.is_some())
 }
 
 pub(super) fn bytecode_module_path(module: &str) -> String {

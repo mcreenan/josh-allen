@@ -8673,3 +8673,37 @@ export fn main() returns Int { halted() }
         )]
     );
 }
+
+#[test]
+fn loops_whose_body_ends_in_branches_that_all_leave_through_loop_control_compile_and_run() {
+    for (source, expected) in [
+        (
+            "export fn main() returns Int { mut total = 0; loop { if (total > 10) { break; } else { total += 1; continue; } } total }",
+            11,
+        ),
+        (
+            "export fn main() returns Int { mut total = 0; while (true) { total += 1; if (total > 10) { break; } else { continue; } } total }",
+            11,
+        ),
+        (
+            "export fn main() returns Int { mut total = 0; for i in 0..5 { if (i > 3) { break; } else { total += i; continue; } } total }",
+            6,
+        ),
+        (
+            "export fn main() returns Int { mut total = 0; loop { total += 1; if (total < 3) { continue; } else { if (total == 3) { continue; } else { break; } } } total }",
+            4,
+        ),
+        (
+            "export fn main() returns Int { mut total = 0; loop { total += 1; match total > 10 { true => if (true) { break; } else { continue; } false => if (total > 0) { continue; } else { break; } } } total }",
+            11,
+        ),
+    ] {
+        let compilation = compile_source(source).unwrap_or_else(|errors| panic!("{source}: {errors:?}"));
+        let verified = verify(compilation.module).expect("loop-control branches verify");
+        assert_eq!(
+            allen_vm::execute(&verified).expect("loop-control branches run"),
+            allen_vm::Value::Int(expected),
+            "{source}"
+        );
+    }
+}
