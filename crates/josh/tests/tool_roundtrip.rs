@@ -2885,6 +2885,7 @@ export async fn main() returns String effects [model.request, user.ask, tool.exa
     };
     send(&mut stdin, "h-4", "execution/start", &start);
     let mut origins = Vec::new();
+    let mut operation_ids = Vec::new();
     let output = loop {
         match receive(&mut reader) {
             WireMessage::Request { id, method, params } => {
@@ -2894,6 +2895,7 @@ export async fn main() returns String effects [model.request, user.ask, tool.exa
                     "user/ask" => json!({"value":"asked"}),
                     other => panic!("unexpected provider request {other}"),
                 };
+                operation_ids.push(params["operation_id"].as_str().unwrap().to_owned());
                 origins.push((method, params["origin"].clone()));
                 send_message(
                     &mut stdin,
@@ -2919,6 +2921,8 @@ export async fn main() returns String effects [model.request, user.ask, tool.exa
     );
     drop(stdin);
     assert!(child.wait().unwrap().success());
+    // Operation IDs are unique across provider families within an execution.
+    assert_eq!(operation_ids, ["op-1", "op-2", "op-3", "op-4"]);
 
     let summary = origins
         .iter()

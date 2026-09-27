@@ -384,7 +384,9 @@ independent providers. The host may supply either in attached or unattended
 mode.
 
 Each request has an operation ID, prompt, response schema, attempt, validation
-issues, and deadline. Valid output returns the ordinary typed result. Expected
+issues, and deadline. Operation IDs are unique within an execution across all
+provider families; a retry repeats the operation and interaction IDs with the
+next attempt. Valid output returns the ordinary typed result. Expected
 denial, unavailability, and exhausted validation use the source-visible closed
 error type. Late or malformed responses are protocol violations.
 

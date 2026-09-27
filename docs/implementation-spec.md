@@ -538,7 +538,10 @@ request/protocol state errors.
 
 The protocol routes invoking-agent messages, typed agent questions, transcript
 snapshots, model and user prompts, sub-agent creation/run/message/ask, permission
-decisions, and typed tool invocation. Attached operations carry the initialized
+decisions, and typed tool invocation. Every provider request carries an
+`operation_id` (`op-<n>`) that is unique within its execution across all
+provider families. A typed-response retry repeats the operation ID and
+`interaction_id` with the next `attempt`. Attached operations carry the initialized
 session identity. Unattended execution cannot use invoking-agent operations but
 may use separately supplied model, user, sub-agent, and tool providers.
 

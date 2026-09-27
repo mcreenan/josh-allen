@@ -2506,10 +2506,10 @@ struct BrokerEffects<'provider> {
     enum_types: Vec<allen_bytecode::EnumType>,
     tool_deadline: Option<Instant>,
     transcript_bytes: usize,
-    next_tool_operation: u64,
-    next_agent_operation: u64,
+    /// One operation counter for every provider family, so an operation ID
+    /// names exactly one provider operation in the execution.
+    next_operation: u64,
     next_agent_interaction: u64,
-    next_permission_operation: u64,
     pending_agent_operations: HashSet<u64>,
     pending_agents: HashMap<PendingEffectId, PendingAgent>,
     pending_tools: HashMap<PendingEffectId, PendingTool>,
@@ -2580,10 +2580,8 @@ impl<'provider> BrokerEffects<'provider> {
             enum_types,
             tool_deadline: Instant::now().checked_add(tool_deadline),
             transcript_bytes,
-            next_tool_operation: 1,
-            next_agent_operation: 1,
+            next_operation: 1,
             next_agent_interaction: 1,
-            next_permission_operation: 1,
             pending_agent_operations: HashSet::new(),
             pending_agents: HashMap::new(),
             pending_tools: HashMap::new(),
@@ -2839,14 +2837,7 @@ impl<'provider> BrokerEffects<'provider> {
     }
 
     fn next_agent_operation(&mut self) -> Result<u64, VmError> {
-        let operation_id = self.next_agent_operation;
-        self.next_agent_operation =
-            self.next_agent_operation
-                .checked_add(1)
-                .ok_or(VmError::ResourceLimit {
-                    resource: "agent_operations",
-                })?;
-        Ok(operation_id)
+        take_operation(&mut self.next_operation, "agent_operations")
     }
 
     fn next_agent_interaction(&mut self) -> Result<u64, VmError> {
@@ -3254,13 +3245,7 @@ impl<'provider> BrokerEffects<'provider> {
         };
         let pending_target_id = self.next_pending_target;
         self.next_pending_target = self.next_pending_target.saturating_add(1);
-        let operation_id = self.next_permission_operation;
-        self.next_permission_operation =
-            self.next_permission_operation
-                .checked_add(1)
-                .ok_or(VmError::ResourceLimit {
-                    resource: "permission_operations",
-                })?;
+        let operation_id = take_operation(&mut self.next_operation, "permission_operations")?;
         let request = ExternalGrantRequest {
             execution_id: self.execution_id,
             operation_id,
@@ -3524,13 +3509,7 @@ impl EffectProvider for BrokerEffects<'_> {
                 return Self::permission_retention_error(&error).map(allen_vm::EffectPoll::Ready);
             }
         };
-        let operation_id = self.next_permission_operation;
-        self.next_permission_operation =
-            self.next_permission_operation
-                .checked_add(1)
-                .ok_or(VmError::ResourceLimit {
-                    resource: "permission_operations",
-                })?;
+        let operation_id = take_operation(&mut self.next_operation, "permission_operations")?;
         let pending_target_id = self.next_pending_target;
         self.next_pending_target = self.next_pending_target.saturating_add(1);
         let request = ExternalGrantRequest {
@@ -3739,13 +3718,7 @@ impl EffectProvider for BrokerEffects<'_> {
                 .input_schema
                 .validate(&input_json, &SchemaLimits::default())
                 .map_err(|_| VmError::ToolSchemaError)?;
-            let operation_id = self.next_tool_operation;
-            self.next_tool_operation =
-                self.next_tool_operation
-                    .checked_add(1)
-                    .ok_or(VmError::ResourceLimit {
-                        resource: "tool_operations",
-                    })?;
+            let operation_id = take_operation(&mut self.next_operation, "tool_operations")?;
             let deadline = self.tool_deadline.map_or(Duration::MAX, |deadline| {
                 deadline.saturating_duration_since(Instant::now())
             });
@@ -5927,6 +5900,16 @@ pub fn schema_descriptor(
         }),
         _ => serde_json::json!({"type":"unsupported"}),
     }
+}
+
+/// Allocate the next execution-wide provider operation ID. Overflow keeps the
+/// family's registered resource name.
+fn take_operation(counter: &mut u64, resource: &'static str) -> Result<u64, VmError> {
+    let operation_id = *counter;
+    *counter = counter
+        .checked_add(1)
+        .ok_or(VmError::ResourceLimit { resource })?;
+    Ok(operation_id)
 }
 
 fn truncate_utf8(value: &str, maximum_bytes: usize) -> &str {
